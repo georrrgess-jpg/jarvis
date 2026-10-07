@@ -22,8 +22,9 @@ DEFAULT_REPLY = (
 
 class MockOllama:
     def __init__(self, port: int = 0, models: list[str] | None = None, reply: str | None = None,
-                 token_delay: float = 0.0) -> None:
+                 token_delay: float = 0.0, tools_supported: bool = True) -> None:
         self.models = ["llama3.2:latest"] if models is None else models
+        self.tools_supported = tools_supported
         self.reply = reply or DEFAULT_REPLY
         self.token_delay = token_delay
         self.requests: list[tuple[str, dict]] = []
@@ -88,10 +89,12 @@ class MockOllama:
                 if self.path == "/api/generate":
                     return self._json(200, {"model": model, "response": "", "done": True})
                 if self.path == "/api/chat":
+                    if body.get("tools") and not owner.tools_supported:
+                        return self._json(400, {"error": f"registry.ollama.ai/library/{model} does not support tools"})
                     if not body.get("stream", True):
                         return self._json(200, {"model": model, "message": {"role": "assistant", "content": owner.reply},
                                                 "done": True})
-                    return self._stream(owner._chat_chunks(model))
+                    return self._stream(owner._chat_chunks(model, body))
                 if self.path == "/api/pull":
                     return self._stream(owner._pull_chunks(model or body.get("name", "")))
                 return self._json(404, {"error": "not found"})
@@ -102,8 +105,28 @@ class MockOllama:
         self.url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
-    def _chat_chunks(self, model: str):
-        for token in re.findall(r"\S+\s*|\s+", self.reply):
+    def _chat_chunks(self, model: str, body: dict | None = None):
+        """Stream a reply. With tools offered, "search"/"read" requests first get a tool call, like a real model."""
+        body = body or {}
+        messages = body.get("messages") or [{}]
+        last = messages[-1]
+        tool_names = {t["function"]["name"] for t in body.get("tools") or []}
+        text = self.reply
+        if last.get("role") == "user":
+            ask = last.get("content", "").lower()
+            call = None
+            if "search" in ask and "web_search" in tool_names:
+                call = {"name": "web_search", "arguments": {"query": last["content"]}}
+            elif "read" in ask and "read_file" in tool_names:
+                call = {"name": "read_file", "arguments": {"query": ask.split("read", 1)[1].strip(" ?.")}}
+            if call:
+                yield {"model": model, "message": {"role": "assistant", "content": "", "tool_calls": [{"function": call}]},
+                       "done": False}
+                yield {"model": model, "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}
+                return
+        elif last.get("role") == "tool":
+            text = f"According to my {last.get('tool_name')} tool: {last.get('content', '')[:300]}"
+        for token in re.findall(r"\S+\s*|\s+", text):
             if self.token_delay:
                 time.sleep(self.token_delay)
             yield {"model": model, "created_at": "2026-01-01T00:00:00Z",

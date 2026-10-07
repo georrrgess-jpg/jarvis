@@ -334,6 +334,8 @@ kbd {
 .msg.system.error .msg-body { color: rgb(var(--red)); }
 .msg.system.error::before { background: rgb(var(--red)); box-shadow: 0 0 8px rgb(var(--red)); }
 .msg.system.ok .msg-body { color: rgb(var(--green)); }
+.msg.system.tool .msg-body { color: rgb(var(--amber)); }
+.msg.system.tool .msg-body::before { content: '⟶ '; color: rgb(var(--amber) / .6); }
 .msg.interrupted .msg-body::after { content: ' ⟂ interrupted'; font: 400 11px var(--font-mono); color: var(--text-faint); }
 
 .caret { display: inline-block; width: .55em; height: 1.05em; margin-left: 2px; vertical-align: -0.16em; background: rgb(var(--cyan)); box-shadow: 0 0 8px rgb(var(--cyan)); animation: blink .8s steps(2) infinite; }

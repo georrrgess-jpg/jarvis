@@ -19,6 +19,8 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
 - **Audio-reactive visualisers**: real FFT bands from the microphone while listening and from JARVIS's own voice while speaking (each clip is analysed once in Python and played back in sync in the UI), plus an oscilloscope waveform.
 - **Streaming replies**: tokens stream into the comms log with a typewriter effect, and JARVIS starts speaking after the first sentence instead of waiting for the full answer.
 - **Push-to-talk + silence detection**: click the mic (or tap <kbd>Space</kbd>) and just talk — capture stops on silence. Hold the button/<kbd>Space</kbd> for classic push-to-talk. Press it while JARVIS is talking to barge in; <kbd>Esc</kbd> interrupts.
+- **Opens your files and apps**: "open my resume", "open Spotify", "open downloads", "open the budget spreadsheet". JARVIS searches your Desktop, Documents, Downloads, Pictures, Music, Videos, OneDrive and Start Menu, and can read text and Word documents to summarise them. For safety it never runs programs directly (apps open through their shortcuts).
+- **Internet access, free and key-less**: web search (DuckDuckGo, with a Wikipedia fallback), reading web pages and opening sites in your browser. Ask about news, weather, prices or anything recent. Both abilities can be switched off in Settings ▸ Abilities.
 - **Text input** for silent typing, with Markdown/code rendering in the log.
 - **Telemetry**: CPU and RAM gauges, 60 s history, per-core bars, disk, network, processes, uptime, battery.
 - **Interface sounds** synthesised at start-up (activation chime, listening blips, processing ticks, error tones) — no audio files shipped.
@@ -92,7 +94,7 @@ build.py            automated PyInstaller build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                  # 70 tests; no microphone, speakers or network needed
+python -m pytest -q                  # 100+ tests; no microphone, speakers or network needed
 python -m tests.mock_ollama          # fake Ollama on :11434 for UI work without a model
 ```
 

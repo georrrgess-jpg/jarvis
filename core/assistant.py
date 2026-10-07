@@ -25,12 +25,18 @@ from .sfx import SoundFX
 from .state import State, StateMachine
 from .stt import ENGINE_LABELS, SpeechInput, STTError
 from .system import SystemMonitor
+from .tools import Toolbox, ToolError, describe_call
 from .tts import CODE_MARK, EdgeTTS, SentenceSplitter, TTSError, clean_for_speech
 
 log = logging.getLogger("jarvis.assistant")
 
 Emit = Callable[[str, dict], None]
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:]{0,120}$")
+_OPEN_COMMAND = re.compile(
+    r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you )*(?:open|launch|start|run|load|pull up|bring up|show me)"
+    r"\s+(?:up\s+)?(?:the\s+|my\s+)?(?P<target>.+?)(?:\s+(?:please|for me|now))?[\s.!?]*$",
+    re.IGNORECASE,
+)
 
 
 class Turn:
@@ -142,6 +148,7 @@ class Assistant:
         stt: SpeechInput | None = None,
         audio: AudioEngine | None = None,
         monitor: SystemMonitor | None = None,
+        tools: Toolbox | None = None,
     ) -> None:
         self.config = config
         self._emit_raw = emit
@@ -151,6 +158,7 @@ class Assistant:
         self.tts = tts or EdgeTTS(config, cache_dir=app_data_dir() / "tts_cache")
         self.stt = stt or SpeechInput(config)
         self.monitor = monitor or SystemMonitor()
+        self.tools = tools or Toolbox(config)
         self.state = StateMachine(self._on_state)
 
         self._turn: Turn | None = None
@@ -241,6 +249,7 @@ class Assistant:
             ("interface sounds", self.sfx.load),
             ("microphone", lambda: setattr(self, "_mic", self.stt.availability())),
             ("ollama", self.check_ollama),
+            ("file index", self._warm_file_index),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -409,11 +418,48 @@ class Assistant:
             self.emit("system_message", level="error", text=message)
             self._finish_turn(turn)
 
+    def _warm_file_index(self) -> None:
+        if self.tools.files_enabled:
+            self._spawn(self.tools.index.entries, name="file-index")
+
+    def _tool_used(self, turn: Turn, name: str, args: dict) -> None:
+        self._emit_turn(turn, "tool_activity", tool=name, label=describe_call(name, args))
+
+    def _direct_command(self, turn: Turn, text: str) -> str | None:
+        """Handle plain "open X" requests without the model: instant, and reliable even with small models."""
+        match = _OPEN_COMMAND.match(text.strip())
+        if not match:
+            return None
+        target = match.group("target").strip(" \"'")
+        site = self.tools.website_for(target) if self.tools.web_enabled else None
+        explicit_url = bool(site) and "." in target
+        if self.tools.files_enabled and not explicit_url:
+            try:
+                result = self.tools.open_target(target, min_score=70)
+                self._tool_used(turn, "open_file", {"query": target})
+                return f"Opening {result['name']}, {self.title}."
+            except ToolError:
+                pass
+        if site:
+            self.tools.open_website(site)
+            self._tool_used(turn, "open_website", {"url": site})
+            return f"Opening {target}, {self.title}."
+        return None
+
     def _converse(self, turn: Turn, text: str, source: str) -> None:
         self._emit_turn(turn, "user_message", id=f"u{next(self._ids)}", text=text, source=source)
         if not self._set_state(State.THINKING, turn, "thinking"):
             return
         self.sfx.play("process")
+
+        try:
+            direct = self._direct_command(turn, text)
+        except Exception:
+            log.exception("Direct command failed")
+            direct = None
+        if direct:
+            self._deliver(turn, [direct])
+            return
 
         if not (self.llm.online and self.llm.model):
             self.check_ollama()  # maybe the user just started it
@@ -422,7 +468,9 @@ class Assistant:
             self._deliver(turn, [f"I'm afraid my neural core is offline, {self.title}: {reason}. "
                                  "The setup steps are on screen."])
             return
-        self._deliver(turn, self.llm.stream_reply(text, turn.cancel))
+        toolbox = self.tools if (self.tools.files_enabled or self.tools.web_enabled) else None
+        self._deliver(turn, self.llm.stream_reply(
+            text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args)))
 
     def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None) -> None:
         mid = f"a{next(self._ids)}"

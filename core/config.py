@@ -27,6 +27,9 @@ DEFAULTS: dict[str, Any] = {
     "temperature": 0.7,
     "max_history_turns": 12,
     "custom_instructions": "",
+    # Abilities (tools the model may use)
+    "allow_files": True,  # find, open and read files / apps on this computer
+    "allow_internet": True,  # web search, read and open web pages
     # Voice output (edge-tts)
     "voice": "en-GB-RyanNeural",
     "speech_rate": 0,  # percent, -50..50

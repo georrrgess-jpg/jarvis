@@ -22,7 +22,7 @@
 
   const S = {
     state: 'IDLE', listenPhase: null, settings: {}, ollama: null, mic: null, audio: null,
-    core: null, voiceOk: true, voices: null, booted: false, system: null,
+    core: null, voiceOk: true, voices: null, booted: false, system: null, activity: null,
   };
 
   let api = null;
@@ -531,7 +531,9 @@
         sub = ph === 'calibrating' ? 'Calibrating to ambient noise…'
           : ph === 'capturing' ? (Ptt.holding ? 'Receiving · release to transmit' : 'Receiving audio…')
             : `Go ahead, ${title()} — I'm listening`;
-      } else if (st === 'THINKING') sub = ph === 'transcribing' ? 'Decoding speech…' : `Consulting ${(o && o.model) || 'neural core'}…`;
+      } else if (st === 'THINKING') {
+        sub = ph === 'transcribing' ? 'Decoding speech…' : S.activity ? `${S.activity}…` : `Consulting ${(o && o.model) || 'neural core'}…`;
+      }
       else if (st === 'SPEAKING') sub = `Voice matrix · ${voiceShort(S.settings.voice)}`;
       $('#state-sub').textContent = sub;
     },
@@ -879,6 +881,7 @@
       case 'state':
         S.state = ev.state;
         if (ev.state !== 'LISTENING' && ev.state !== 'THINKING') S.listenPhase = null;
+        if (ev.state !== 'THINKING') S.activity = null;
         if (ev.state === 'IDLE') { Feed.mic = null; document.body.style.setProperty('--mic-level', 0); }
         Hud.setState(ev.state);
         break;
@@ -891,6 +894,7 @@
       case 'assistant_token': Chat.token(ev.id, ev.text); break;
       case 'assistant_end': Chat.end(ev); if (ev.stats) { S.core = ev.stats; Hud.updateCore(); } break;
       case 'system_message': Chat.system(ev.text, ev.level); break;
+      case 'tool_activity': S.activity = ev.label; Chat.system(ev.label, 'tool'); Hud.updateSub(); break;
       case 'notice': toast(ev.text, ev.level); break;
       case 'ollama_status': Ollama.update(ev); break;
       case 'core_stats': { const { type, ...c } = ev; S.core = c; Hud.updateCore(); break; }

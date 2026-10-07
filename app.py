@@ -3,6 +3,7 @@
     python app.py              launch the assistant
     python app.py --debug      launch with the web inspector enabled
     python app.py --selftest   verify the install / frozen build without opening a window
+    python app.py --smoke-test open the real window, wait for the HUD to boot, report and exit
 """
 
 from __future__ import annotations
@@ -12,11 +13,15 @@ import json
 import logging
 import logging.handlers
 import os
+import platform
 import queue
 import sys
+import tempfile
 import threading
 import time
+import traceback
 import webbrowser
+from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -27,6 +32,119 @@ from core.config import Config, app_data_dir, resource_path  # noqa: E402
 log = logging.getLogger("jarvis")
 
 ALLOWED_EXTERNAL_URLS = ("https://ollama.com/", "https://github.com/ollama/")
+WEBVIEW2_DOWNLOAD_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+
+# Windows MessageBox flags
+_MB_OK, _MB_OKCANCEL, _MB_ICONERROR, _MB_ICONWARNING, _MB_ICONINFO = 0x0, 0x1, 0x10, 0x30, 0x40
+_IDOK = 1
+_dialogs_enabled = True  # disabled for unattended runs (--selftest / --smoke-test)
+_instance_mutex = None
+
+
+# ============================================================================ crash visibility
+def message_box(text: str, title: str = "J.A.R.V.I.S.", flags: int = _MB_OK | _MB_ICONINFO) -> int:
+    """Native dialog on Windows. A windowed exe has no console, so this is the only way to tell the user."""
+    if not _dialogs_enabled or sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.MessageBoxW(None, text, title, flags | 0x00010000 | 0x00040000))
+    except Exception:
+        return 0
+
+
+def report_fatal(exc: BaseException, context: str = "startup") -> None:
+    """Log a fatal error, save it somewhere guaranteed writable and show it to the user."""
+    details = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    where: Path | None = None
+    try:
+        log.critical("Fatal error during %s:\n%s", context, details)
+        where = app_data_dir() / "jarvis.log"
+    except Exception:
+        pass
+    try:  # logging may not be configured (or the profile folder may be unwritable)
+        crash = Path(tempfile.gettempdir()) / "jarvis-crash.txt"
+        crash.write_text(
+            f"J.A.R.V.I.S. {APP_VERSION} failed during {context}\n{platform.platform()} | Python {platform.python_version()}"
+            f" | frozen={getattr(sys, 'frozen', False)}\n\n{details}",
+            encoding="utf-8",
+        )
+        where = where or crash
+    except OSError:
+        pass
+    message_box(
+        f"J.A.R.V.I.S. could not start.\n\n{exc.__class__.__name__}: {exc}\n\n"
+        f"Details were saved to:\n{where or 'the log file'}\n\nPlease include that file when reporting the problem.",
+        "J.A.R.V.I.S. failed to start",
+        _MB_OK | _MB_ICONERROR,
+    )
+
+
+def install_crash_handlers() -> None:
+    def excepthook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return sys.__excepthook__(exc_type, exc, tb)
+        report_fatal(exc.with_traceback(tb))
+
+    def thread_excepthook(args):
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread else "?"
+        log.error("Unhandled exception in thread %s", name, exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = excepthook
+    threading.excepthook = thread_excepthook
+
+
+def webview2_version() -> str | None:
+    """Edge WebView2 runtime version, using the same registry lookup pywebview uses to pick its renderer.
+
+    If this returns None on Windows, pywebview silently falls back to the legacy IE (MSHTML)
+    engine, which cannot run the HUD, so we stop with a helpful message instead.
+    """
+    if sys.platform != "win32":
+        return None
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full") as key:
+            if winreg.QueryValueEx(key, "Release")[0] < 394802:  # .NET Framework 4.6.2
+                return None
+    except OSError:
+        return None
+    clients = ("{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}", "{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}",
+               "{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}", "{65C35B14-6C1D-4122-AC46-7148CC9D6497}")
+    wow = "" if platform.machine() == "x86" else "WOW6432Node\\"
+    for client in clients:
+        for hive, path in ((winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{client}"),
+                           (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\{wow}Microsoft\EdgeUpdate\Clients\{client}")):
+            try:
+                with winreg.OpenKey(hive, path) as key:
+                    version = str(winreg.QueryValueEx(key, "pv")[0])
+                if int(version.split(".")[0]) >= 86:
+                    return version
+            except (OSError, ValueError):
+                continue
+    return None
+
+
+def acquire_single_instance() -> bool:
+    """Prevent duplicate windows when the user double-clicks again during the slow first unpack."""
+    global _instance_mutex
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    handle = kernel32.CreateMutexW(None, False, "Local\\JARVIS-HUD-single-instance")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        return False
+    _instance_mutex = handle  # keep the handle alive for the life of the process
+    return True
 
 
 # ============================================================================ events → UI
@@ -118,23 +236,43 @@ class JarvisAPI:
     """
 
     def __init__(self, assistant, bridge: EventBridge, frameless: bool = True) -> None:
-        self._assistant = assistant
+        self._assistant_obj = assistant
+        self._assistant_ready = threading.Event()
+        if assistant is not None:
+            self._assistant_ready.set()
         self._bridge = bridge
         self._frameless = frameless
         self._window = None
         self._maximized = False
+        self._ready = threading.Event()
+        self._booted = threading.Event()
 
     def _attach(self, window) -> None:
         self._window = window
+
+    def _set_assistant(self, assistant) -> None:
+        self._assistant_obj = assistant
+        self._assistant_ready.set()
+
+    @property
+    def _assistant(self):
+        """The assistant loads in the background so the window can appear first; calls wait for it."""
+        if not self._assistant_ready.wait(90):
+            raise RuntimeError("J.A.R.V.I.S. core failed to initialise")
+        return self._assistant_obj
 
     # -- lifecycle ---------------------------------------------------------
     def ui_ready(self) -> dict:
         payload = self._assistant.boot_payload()
         payload["window"] = {"frameless": self._frameless}
         self._bridge.set_ready()
+        self._ready.set()
+        log.info("UI bridge connected")
         return payload
 
     def boot_complete(self) -> None:
+        self._booted.set()
+        log.info("HUD boot sequence complete")
         self._assistant.boot_complete()
 
     def play_sfx(self, name: str) -> None:
@@ -338,6 +476,18 @@ def run_selftest(report_path: str | None) -> int:
         snap = mon.snapshot()
         return {"cpu": snap["cpu"], "ram": snap["ram"], "host": mon.static_info()["hostname"]}
 
+    def gui_backend():
+        """Load the native GUI layer exactly like webview.start() does (pythonnet/WinForms/WebView2 on Windows)."""
+        from webview import guilib
+
+        lib = guilib.initialize()
+        info = {"renderer": getattr(lib, "renderer", None)}
+        if sys.platform == "win32":
+            info["webview2"] = webview2_version()
+            if info["renderer"] != "edgechromium":
+                raise RuntimeError(f"renderer is {info['renderer']!r}, expected 'edgechromium' (WebView2 runtime missing?)")
+        return info
+
     def ollama_probe():
         from core.llm import LLMEngine
 
@@ -352,8 +502,12 @@ def run_selftest(report_path: str | None) -> int:
     check("config", config_roundtrip)
     check("telemetry", telemetry)
     check("ollama_probe", ollama_probe)  # informational: offline is not a failure
+    if sys.platform == "win32":  # elsewhere a display server may be absent during the build
+        check("gui_backend", gui_backend)
 
-    required = ("web_assets", "imports", "audio_pipeline", "text_pipeline", "config", "telemetry")
+    required = ["web_assets", "imports", "audio_pipeline", "text_pipeline", "config", "telemetry"]
+    if sys.platform == "win32":
+        required.append("gui_backend")
     results["ok"] = all(results["checks"][k]["ok"] for k in required)
     text = json.dumps(results, indent=2)
     if report_path:
@@ -364,34 +518,130 @@ def run_selftest(report_path: str | None) -> int:
     return 0 if results["ok"] else 1
 
 
+# ============================================================================ GUI smoke test
+_SMOKE_PROBE = r"""JSON.stringify({
+  body: document.body.className,
+  title: (document.querySelector('#state-title span') || {}).textContent,
+  bootOverlay: !!document.querySelector('#boot:not(.done)'),
+  reactor: [document.querySelector('#reactor').clientWidth, document.querySelector('#reactor').clientHeight],
+  chips: [...document.querySelectorAll('.chip')].map(c => c.innerText.replace(/\s+/g, ' ').trim()),
+  log: document.querySelector('#log').innerText.slice(0, 300),
+  ua: navigator.userAgent
+})"""
+
+
+class SmokeTest:
+    """Drives one real launch: window shown -> JS bridge -> HUD boot -> DOM probe -> close."""
+
+    def __init__(self, window, api: JarvisAPI, report: str | None, hold: float) -> None:
+        self._window, self._api, self._report, self._hold = window, api, report, hold
+        self.passed = False
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, name="smoke-test", daemon=True).start()
+
+    def _run(self) -> None:
+        result: dict[str, Any] = {"ok": False, "version": APP_VERSION, "platform": platform.platform(),
+                                  "webview2": webview2_version(), "stage": "window"}
+        try:
+            for stage, event, timeout in (("window", self._window.events.shown, 90),
+                                          ("bridge", self._api._ready, 60),
+                                          ("boot", self._api._booted, 45)):
+                result["stage"] = stage
+                if not event.wait(timeout):
+                    raise TimeoutError(f"no '{stage}' signal within {timeout}s")
+            time.sleep(2.0)
+            result["stage"] = "probe"
+            ui = json.loads(self._window.evaluate_js(_SMOKE_PROBE))
+            result["ui"] = ui
+            result["renderer"] = getattr(sys.modules.get("webview"), "renderer", None)
+            problems = []
+            if ui.get("bootOverlay"):
+                problems.append("boot overlay still visible")
+            if "state-" not in (ui.get("body") or "") or "booting" in (ui.get("body") or ""):
+                problems.append(f"unexpected body classes: {ui.get('body')}")
+            if min(ui.get("reactor") or [0]) < 100:
+                problems.append(f"reactor canvas too small: {ui.get('reactor')}")
+            result["problems"] = problems
+            result["ok"] = not problems
+            result["stage"] = "done"
+        except Exception as exc:  # report every failure mode
+            result["error"] = f"{exc.__class__.__name__}: {exc}"
+            log.exception("Smoke test failed at stage %s", result["stage"])
+        self.passed = bool(result["ok"])
+        log.info("Smoke test %s: %s", "PASSED" if self.passed else "FAILED", json.dumps(result))
+        if self._report:
+            Path(self._report).write_text(json.dumps(result, indent=2), encoding="utf-8")
+        time.sleep(self._hold if self.passed else 1.0)  # keep the window up for a CI screenshot
+        try:
+            self._window.destroy()
+        except Exception:
+            pass
+        # Never let a wedged GUI loop hang CI.
+        threading.Timer(20, lambda: os._exit(0 if self.passed else 1)).start()
+
+
 # ============================================================================ main
+def log_environment() -> None:
+    log.info("Platform: %s | Python %s | frozen=%s | exe=%s", platform.platform(), platform.python_version(),
+             getattr(sys, "frozen", False), sys.executable)
+    if sys.platform == "win32":
+        log.info("Edge WebView2 runtime: %s", webview2_version() or "NOT FOUND")
+
+
 def main(argv: list[str] | None = None) -> int:
+    global _dialogs_enabled
     parser = argparse.ArgumentParser(description="J.A.R.V.I.S. desktop voice assistant")
     parser.add_argument("--debug", action="store_true", help="enable the web inspector and verbose logs")
     parser.add_argument("--selftest", action="store_true", help="run headless diagnostics and exit")
     parser.add_argument("--selftest-report", metavar="PATH", help="write the self-test JSON report to PATH")
+    parser.add_argument("--smoke-test", action="store_true", help="open the real window, verify the HUD boots, then exit")
+    parser.add_argument("--smoke-report", metavar="PATH", help="write the smoke-test JSON report to PATH")
+    parser.add_argument("--smoke-hold", type=float, default=0.0, metavar="SECONDS", help="keep the window open after passing")
     parser.add_argument("--gui", help="force a pywebview backend (edgechromium, qt, gtk, cef)")
     parser.add_argument("--framed", action="store_true", help="use a normal OS window frame")
     args, _unknown = parser.parse_known_args(argv)
 
     ensure_std_streams()
     configure_logging(args.debug)
-    log.info("J.A.R.V.I.S. %s starting (frozen=%s)", APP_VERSION, getattr(sys, "frozen", False))
+    if args.selftest or args.smoke_test:
+        _dialogs_enabled = False
+    log.info("J.A.R.V.I.S. %s starting", APP_VERSION)
+    log_environment()
 
     if args.selftest:
         return run_selftest(args.selftest_report)
 
-    import webview
+    if sys.platform == "win32" and not args.gui:
+        if webview2_version() is None:
+            log.error("Microsoft Edge WebView2 runtime not found; cannot render the HUD")
+            choice = message_box(
+                "J.A.R.V.I.S. needs the Microsoft Edge WebView2 Runtime to draw its interface, "
+                "and it isn't installed on this PC.\n\nClick OK to open Microsoft's download page "
+                "(choose \"Evergreen Bootstrapper\"), install it, then start J.A.R.V.I.S. again.",
+                "J.A.R.V.I.S. - component missing",
+                _MB_OKCANCEL | _MB_ICONWARNING,
+            )
+            if choice == _IDOK:
+                webbrowser.open(WEBVIEW2_DOWNLOAD_URL)
+            return 2
+        if not args.smoke_test and not acquire_single_instance():
+            log.info("Another instance is already running; exiting")
+            message_box("J.A.R.V.I.S. is already running.\n\nIt can take a few seconds to appear after you open it.",
+                        "J.A.R.V.I.S.", _MB_OK | _MB_ICONINFO)
+            return 0
 
-    from core.assistant import Assistant
+    started = time.monotonic()
+    import webview
 
     config = Config()
     bridge = EventBridge()
-    assistant = Assistant(config, bridge.emit)
     frameless = bool(config.get("frameless", True)) and not args.framed
-    api = JarvisAPI(assistant, bridge, frameless)
+    api = JarvisAPI(None, bridge, frameless)
+    assistants: list = []
 
     width, height = window_geometry(webview)
+    log.info("Creating window %dx%d (frameless=%s)", width, height, frameless)
     window = webview.create_window(
         "J.A.R.V.I.S.",
         url=str(resource_path("web", "index.html")),
@@ -406,24 +656,58 @@ def main(argv: list[str] | None = None) -> int:
     )
     api._attach(window)
     bridge.attach(window)
+    window.events.shown += lambda: log.info("Window shown after %.1fs (renderer: %s)",
+                                            time.monotonic() - started, getattr(webview, "renderer", "?"))
+
+    def load_assistant() -> None:
+        """Runs on pywebview's worker thread once the GUI loop is up: heavy imports happen behind the boot screen."""
+        try:
+            t0 = time.monotonic()
+            from core.assistant import Assistant
+
+            assistant = Assistant(config, bridge.emit)
+            assistants.append(assistant)
+            api._set_assistant(assistant)
+            log.info("Core loaded in %.1fs", time.monotonic() - t0)
+            assistant.start()
+            log.info("Subsystems ready %.1fs after launch", time.monotonic() - started)
+        except Exception as exc:
+            report_fatal(exc, "core initialisation")
+            try:
+                window.destroy()
+            except Exception:
+                pass
 
     def on_closed() -> None:
         bridge.close()
-        assistant.shutdown()
+        for assistant in assistants:
+            assistant.shutdown()
 
     window.events.closed += on_closed
 
+    smoke = SmokeTest(window, api, args.smoke_report, args.smoke_hold) if args.smoke_test else None
+    if smoke:
+        smoke.start()
+
     icon = resource_path("assets", "jarvis.png")
     webview.start(
-        assistant.start,
+        load_assistant,
         debug=args.debug,
         http_server=True,
         private_mode=True,
         gui=args.gui,
         icon=str(icon) if icon.is_file() else None,
     )
-    return 0
+    log.info("GUI loop ended")
+    return (0 if smoke.passed else 1) if smoke else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    install_crash_handlers()
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - last line of defence: never die silently
+        report_fatal(exc)
+        sys.exit(1)

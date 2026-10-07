@@ -1071,7 +1071,7 @@
     S.booted = true;
     setTimeout(() => $('#boot').remove(), 1200);
     call('boot_complete');
-    if (p.ollama) setTimeout(() => Ollama.update(p.ollama), 1500);
+    setTimeout(() => { if (S.ollama) Ollama.update(S.ollama); }, 1500);
   }
 
   document.addEventListener('DOMContentLoaded', main);

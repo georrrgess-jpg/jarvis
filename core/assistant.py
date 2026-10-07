@@ -240,13 +240,14 @@ class Assistant:
             self.audio.init()
             self.sfx.load()
             self._mic = self.stt.availability()
-            self.check_ollama(emit_event=False)
+            self.check_ollama()
+            self.emit("mic_status", **{**self._mic, "engine": self.stt.engine_label()})
         except Exception:
             log.exception("Startup failed")
         finally:
             self._started.set()
 
-    def boot_payload(self, wait: float = 8.0) -> dict:
+    def boot_payload(self, wait: float = 25.0) -> dict:
         self._started.wait(wait)
         return {
             "version": APP_VERSION,

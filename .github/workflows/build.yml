@@ -45,6 +45,35 @@ jobs:
         env:
           SDL_AUDIODRIVER: dummy
           PYTHONIOENCODING: utf-8
+      - name: GUI smoke test (launch the real exe and wait for the HUD)
+        shell: pwsh
+        env:
+          JARVIS_HOME: ${{ runner.temp }}\jarvis-home
+        run: |
+          New-Item -ItemType Directory -Force $env:JARVIS_HOME | Out-Null
+          $p = Start-Process -FilePath dist\Jarvis.exe -ArgumentList '--smoke-test','--smoke-report','smoke.json','--smoke-hold','12' -PassThru
+          $null = $p.Handle  # keeps ExitCode readable after the process ends
+          $deadline = (Get-Date).AddSeconds(240)
+          while (-not (Test-Path smoke.json) -and -not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 1 }
+          Start-Sleep -Seconds 3
+          python -c "from PIL import ImageGrab; ImageGrab.grab(all_screens=True).save('smoke.png')"
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force; Write-Host 'Jarvis.exe did not exit in time' }
+          Write-Host "Jarvis.exe exit code: $($p.ExitCode)"
+          if (Test-Path smoke.json) { Get-Content smoke.json } else { Write-Host 'No smoke report was written' }
+          Write-Host '----- jarvis.log -----'
+          Get-Content "$env:JARVIS_HOME\jarvis.log" -ErrorAction SilentlyContinue
+          Get-Content "$env:TEMP\jarvis-crash.txt" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Upload smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test
+          path: |
+            smoke.json
+            smoke.png
+            ${{ runner.temp }}/jarvis-home/jarvis.log
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
           name: Jarvis-windows-x64

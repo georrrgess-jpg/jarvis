@@ -21,7 +21,7 @@ def run_gas(requests, token="T0K3N"):
     if not node:
         pytest.skip("node is not installed")
     out = subprocess.run([node, str(ROOT / "tests" / "gas_harness.js"), str(GAS), token],
-                         input=json.dumps(requests), capture_output=True, text=True, timeout=30)
+                         input=json.dumps(requests), capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 

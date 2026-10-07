@@ -5,7 +5,15 @@ const fs = require('fs');
 const vm = require('vm');
 
 const [scriptPath, token] = process.argv.slice(2);
-const store = { files: [], seq: 0, clock: 1700000000000 };
+const store = { files: [], seq: 0, clock: 1700000000000, sent: [], shares: [] };
+// A small mailbox for contact lookups: [from, to, cc]
+const MAILBOX = [
+  ['"Sarah Connor" <sarah.connor@example.com>', 'tony@example.com', ''],
+  ['tony@example.com', 'Sarah Connor <sarah.connor@example.com>', 'Pepper Potts <pepper@stark.com>'],
+  ['Sarah Lee <slee@school.edu>', 'tony@example.com', ''],
+  ['"Potts, Pepper" <pepper@stark.com>', 'tony@example.com', ''],
+  ['Sarah Connor <sarah.connor@example.com>', 'tony@example.com', ''],
+];
 const newId = () => `id${String(++store.seq).padStart(30, 'x')}`;
 
 class Paragraph {
@@ -122,7 +130,22 @@ const sandbox = {
     PredefinedLayout: { TITLE_AND_BODY: 'TITLE_AND_BODY' },
   },
   SpreadsheetApp: { create: (n) => new Sheet(n), openById: (id) => byId(id, Sheet) },
+  GmailApp: {
+    sendEmail(to, subject, body, options) { store.sent.push({ to, subject, body, options }); },
+    search(q) {
+      const m = /from:\(([^)]*)\)/.exec(q);
+      const words = m[1].toLowerCase().split(/\s+/);
+      const hits = MAILBOX.filter((row) => words.every((w) => row.join(' ').toLowerCase().includes(w)));
+      return hits.map((row) => ({ getMessages: () => [{ getFrom: () => row[0], getTo: () => row[1], getCc: () => row[2] }] }));
+    },
+  },
   DriveApp: {
+    getFileById(id) {
+      const f = store.files.find((x) => x.id === id);
+      if (!f) throw new Error(`No item with the given ID could be found: ${id}`);
+      return { addViewer: (e) => store.shares.push({ id, e, role: 'view' }), addEditor: (e) => store.shares.push({ id, e, role: 'edit' }),
+        getName: () => f.name, getUrl: () => f.getUrl() };
+    },
     searchFiles(q) {
       const mime = /mimeType = '([^']+)'/.exec(q)[1];
       const title = /title contains '((?:[^'\\]|\\.)*)'/.exec(q);
@@ -148,4 +171,4 @@ const docs = store.files.map((f) => {
   if (f instanceof Sheet) return { kind: 'sheet', name: f.name, tabs: f.tabs.map((t) => ({ name: t.name, cells: t.cells, bold: t.bold })) };
   return { kind: 'deck', name: f.name, slides: f.slides.map((s) => Object.fromEntries(Object.entries(s.ph).map(([k, v]) => [k, v.text]))) };
 });
-process.stdout.write(JSON.stringify({ results, files: docs }));
+process.stdout.write(JSON.stringify({ results, files: docs, sent: store.sent, shares: store.shares }));

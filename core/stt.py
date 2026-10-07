@@ -15,6 +15,7 @@ import importlib.util
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,7 @@ import numpy as np
 
 from .audio import LiveSpectrum
 from .config import app_data_dir, resource_path
+from .language import base_language, detect, recognition_languages
 
 log = logging.getLogger("jarvis.stt")
 
@@ -112,6 +114,13 @@ class SpeechInput:
         self._whisper_name: str | None = None
         self._vosk = None
         self._vosk_path: str | None = None
+        self.last_language: str | None = None  # locale the last utterance was recognised in
+
+    def languages(self) -> list[str]:
+        """Locales to listen for, the user's main language first."""
+        return recognition_languages(self._config.get("stt_language") or "en-US",
+                                     self._config.get("stt_extra_languages") or "",
+                                     bool(self._config.get("auto_language", True)))
 
     def set_source_provider(self, provider: Callable[[], AudioSource] | None) -> None:
         """Use a shared live stream (the wake-word listener's) instead of opening the microphone."""
@@ -191,16 +200,22 @@ class SpeechInput:
             return data, _rms(samples)
 
         try:
-            on_phase("calibrating")
-            energies = []
-            for _ in range(max(1, int(self.CALIBRATE_S / chunk_s))):
-                if cancel.is_set():
-                    return None
-                data, energy = read()
-                pre_roll.append(data)
-                waiting_audio.append(data)
-                energies.append(energy)
-            ambient = float(np.median(energies))
+            floor = getattr(source, "noise_floor", None)
+            if floor:
+                # The wake-word listener measured the room while idle. Calibrating now would measure
+                # the user's voice instead: they're usually already saying the command.
+                ambient = float(floor)
+            else:
+                on_phase("calibrating")
+                energies = []
+                for _ in range(max(1, int(self.CALIBRATE_S / chunk_s))):
+                    if cancel.is_set():
+                        return None
+                    data, energy = read()
+                    pre_roll.append(data)
+                    waiting_audio.append(data)
+                    energies.append(energy)
+                ambient = float(np.median(energies))
             threshold = float(np.clip(ambient * 2.6, self.MIN_THRESHOLD, self.MAX_THRESHOLD))
             peak_waiting = 0.0
 
@@ -276,17 +291,29 @@ class SpeechInput:
             import speech_recognition as sr
         except ImportError as exc:
             raise _EngineUnavailable("SpeechRecognition is not installed") from exc
-        recognizer = sr.Recognizer()
         audio = sr.AudioData(capture.pcm, capture.rate, capture.width)
-        try:
-            return recognizer.recognize_google(audio, language=self._config.get("stt_language", "en-US"))
-        except sr.UnknownValueError:
-            return ""
-        except sr.RequestError as exc:
+        languages = self.languages()
+
+        def ask(language: str):
+            try:
+                return sr.Recognizer().recognize_google(audio, language=language, show_all=True)
+            except sr.RequestError as exc:
+                return exc
+
+        if len(languages) == 1:
+            answers = [ask(languages[0])]
+        else:  # one request per language, in parallel, so auto-detection adds no delay
+            with ThreadPoolExecutor(max_workers=len(languages)) as pool:
+                answers = list(pool.map(ask, languages))
+        if all(isinstance(a, Exception) for a in answers):
             raise STTError(
                 "Google speech service is unreachable. Check your internet connection, "
                 "or install faster-whisper for offline recognition."
-            ) from exc
+            ) from answers[0]
+        text, language = pick_transcript(list(zip(languages, answers)), self.last_language)
+        if text:
+            self.last_language = language
+        return text
 
     def _recognize_whisper(self, capture: Capture, on_status=None) -> str:
         try:
@@ -308,8 +335,14 @@ class SpeechInput:
         if capture.rate != 16000 and audio.size:
             n = int(audio.size * 16000 / capture.rate)
             audio = np.interp(np.linspace(0, audio.size - 1, n), np.arange(audio.size), audio).astype(np.float32)
-        language = None if name.endswith(".en") else (self._config.get("stt_language") or "en").split("-")[0]
-        segments, _info = model.transcribe(audio, language=language, beam_size=1, condition_on_previous_text=False)
+        if name.endswith(".en"):
+            language = None
+        elif self._config.get("auto_language", True):
+            language = None  # multilingual Whisper identifies the language itself
+        else:
+            language = base_language(self._config.get("stt_language") or "en")
+        segments, info = model.transcribe(audio, language=language, beam_size=1, condition_on_previous_text=False)
+        self.last_language = getattr(info, "language", None)
         text = " ".join(seg.text.strip() for seg in segments).strip()
         if capture.duration < 1.2 and text.lower() in _WHISPER_PHANTOMS:
             return ""
@@ -340,3 +373,31 @@ class SpeechInput:
         recognizer = KaldiRecognizer(model, capture.rate)
         recognizer.AcceptWaveform(capture.pcm)
         return json.loads(recognizer.FinalResult()).get("text", "")
+
+
+def pick_transcript(answers: list[tuple[str, object]], last: str | None = None) -> tuple[str, str | None]:
+    """Choose between the same audio recognised as several languages.
+
+    Each answer is Google's ``show_all`` result: ``{"alternative": [{"transcript", "confidence"}...]}``
+    (or [] when nothing was heard). The right language usually has the highest confidence; a
+    transcript that actually *reads* as that language, and the language used last time, break ties.
+    """
+    best: tuple[float, str, str | None] = (-1.0, "", None)
+    for language, answer in answers:
+        if not isinstance(answer, dict) or not answer.get("alternative"):
+            continue
+        top = answer["alternative"][0]
+        text = str(top.get("transcript") or "").strip()
+        if not text:
+            continue
+        score = float(top.get("confidence", 0.6))
+        found = detect(text)
+        if found.code == base_language(language) and found.confidence >= 0.3:
+            score += 0.2 * found.confidence
+        elif found.confidence >= 0.6 and found.code != base_language(language):
+            score -= 0.15  # e.g. Spanish recogniser producing English-looking words
+        if last and base_language(last) == base_language(language):
+            score += 0.05
+        if score > best[0]:
+            best = (score, text, language)
+    return best[1], best[2]

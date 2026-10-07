@@ -1,8 +1,9 @@
 /**
- * J.A.R.V.I.S. <-> Google Docs & Slides bridge.
+ * J.A.R.V.I.S. <-> Google Docs, Slides, Sheets & Gmail bridge.
  *
  * Runs inside YOUR Google account as an Apps Script web app (free, no API key, no Cloud project).
- * JARVIS sends it small JSON commands; it edits your Docs/Slides with Google's built-in services.
+ * JARVIS sends it small JSON commands; it edits your Docs/Slides/Sheets and sends the emails you confirm,
+ * using Google's built-in services.
  * Only requests carrying the secret token below are accepted: keep the deployment URL private.
  *
  * Setup (JARVIS fills in the token and shows these steps in Settings):
@@ -11,7 +12,7 @@
  *   3. Authorize access when Google asks, then copy the Web app URL into JARVIS.
  */
 var JARVIS_TOKEN = '__JARVIS_TOKEN__';
-var BRIDGE_VERSION = 2;
+var BRIDGE_VERSION = 3;
 var MIME = {
   docs: 'application/vnd.google-apps.document',
   slides: 'application/vnd.google-apps.presentation',
@@ -161,6 +162,52 @@ var ACTIONS = {
     var out = describe_(deck);
     out.replaced = count;
     return out;
+  },
+
+  // ---------------------------------------------------------------- Gmail
+  mail_send: function (req) {
+    var to = String(req.to || '').trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+(\s*,\s*[^@\s]+@[^@\s]+\.[^@\s]+)*$/.test(to)) throw new Error('invalid recipient address: ' + to);
+    var options = {};
+    if (req.cc) options.cc = String(req.cc);
+    GmailApp.sendEmail(to, String(req.subject || '(no subject)'), String(req.body || ''), options);
+    return { sent: true, to: to };
+  },
+
+  /** People you've emailed with whose name matches, most frequent first (Gmail has no contacts API in Apps Script). */
+  contact_find: function (req) {
+    var name = String(req.name || '').trim();
+    if (!name) throw new Error('whose address?');
+    var words = name.toLowerCase().split(/\s+/);
+    var counts = {}, names = {};
+    var threads = GmailApp.search('from:(' + name + ') OR to:(' + name + ')', 0, 25);
+    threads.forEach(function (thread) {
+      thread.getMessages().slice(-5).forEach(function (msg) {
+        [msg.getFrom(), msg.getTo(), msg.getCc()].join(',').split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).forEach(function (part) {
+          var m = part.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/) || part.match(/^\s*()([^\s<>]+@[^\s<>]+)\s*$/);
+          if (!m) return;
+          var display = m[1].trim(), email = m[2].trim().toLowerCase();
+          var hay = (display + ' ' + email).toLowerCase();
+          if (!words.every(function (w) { return hay.indexOf(w) >= 0; })) return;
+          counts[email] = (counts[email] || 0) + 1;
+          if (display) names[email] = display;
+        });
+      });
+    });
+    var me = Session.getEffectiveUser().getEmail().toLowerCase();
+    var people = Object.keys(counts).filter(function (e) { return e !== me; }).map(function (e) {
+      return { email: e, name: names[e] || '', count: counts[e] };
+    });
+    people.sort(function (a, b) { return b.count - a.count; });
+    return { people: people.slice(0, 5) };
+  },
+
+  /** Let someone open a file JARVIS emails them a link to. */
+  share_file: function (req) {
+    var file = DriveApp.getFileById(String(req.file || ''));
+    var email = String(req.email || '').trim();
+    if (req.role === 'edit') file.addEditor(email); else file.addViewer(email);
+    return { shared: true, title: file.getName(), url: file.getUrl() };
   },
 
   // ---------------------------------------------------------------- Sheets

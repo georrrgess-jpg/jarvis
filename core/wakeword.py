@@ -15,6 +15,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Callable
 
@@ -102,6 +103,9 @@ class _BorrowedSource:
         self._queue: "queue.Queue[bytes]" = queue.Queue()
         self._buffer = b""
         self._closed = False
+        # Room noise measured while idle, so the command capture needn't calibrate (the user is
+        # usually already talking by then).
+        self.noise_floor: float | None = None
 
     def feed(self, data: bytes) -> None:
         self._queue.put(data)
@@ -128,6 +132,8 @@ class WakeListener:
 
     COOLDOWN_S = 1.5
     PERSISTENCE = 2  # consecutive 80 ms frames above threshold (filters single-frame blips)
+    LOOKBACK_CHUNKS = 2  # audio kept from just before the detection: people run "Hey Jarvis" into the command
+    BACKLOG_S = 4.0  # audio buffered between the detection and the command capture starting
 
     def __init__(self, on_wake: Callable[[float], None], sensitivity: Callable[[], float],
                  stream_factory: Callable[[], object] | None = None,
@@ -141,6 +147,9 @@ class WakeListener:
         self._borrower: _BorrowedSource | None = None
         self._lock = threading.Lock()
         self._last_wake = 0.0
+        self._recent: deque[bytes] = deque(maxlen=4)
+        self._energy: deque[float] = deque(maxlen=int(5 * RATE / CHUNK))
+        self._backlog: list[bytes] | None = None
         self.running = False
         self.error: str | None = None
 
@@ -166,6 +175,11 @@ class WakeListener:
         """Hand the live microphone to a command capture; wake detection pauses until it's closed."""
         with self._lock:
             src = _BorrowedSource(self)
+            if len(self._energy) >= 10:
+                src.noise_floor = float(np.percentile(np.asarray(self._energy), 20))
+            for data in self._backlog or []:
+                src.feed(data)  # everything said since the wake word, so the command's first word isn't lost
+            self._backlog = None
             self._borrower = src
             return src
 
@@ -216,6 +230,10 @@ class WakeListener:
                 data = stream.read(CHUNK)
                 with self._lock:
                     borrower = self._borrower
+                    if borrower is None and self._backlog is not None:
+                        self._backlog.append(data)
+                        if len(self._backlog) * CHUNK / RATE > self.BACKLOG_S:
+                            self._backlog = None  # nobody borrowed the stream: stop buffering
                 if borrower is not None:
                     borrower.feed(data)
                     hits = 0
@@ -223,13 +241,18 @@ class WakeListener:
                 if self._reset_pending:
                     detector.reset()
                     self._reset_pending = False
-                score = detector.process(np.frombuffer(data, dtype=np.int16))
+                samples = np.frombuffer(data, dtype=np.int16)
+                self._energy.append(float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))))
+                score = detector.process(samples)
+                self._recent.append(data)
                 threshold = 0.85 - 0.6 * float(self._sensitivity())  # sensitivity 0..1 -> 0.85..0.25
                 hits = hits + 1 if score >= threshold else 0
                 if hits >= self.PERSISTENCE and time.monotonic() - self._last_wake > self.COOLDOWN_S:
                     hits = 0
                     self._last_wake = time.monotonic()
                     log.info("Wake word detected (score %.2f)", score)
+                    with self._lock:
+                        self._backlog = list(self._recent)[len(self._recent) - self.LOOKBACK_CHUNKS:] if self.LOOKBACK_CHUNKS else []
                     try:
                         self._on_wake(score)
                     except Exception:

@@ -570,3 +570,59 @@ def test_play_never_opens_documents(box):
     with pytest.raises(ToolError):
         box.open_target("budget notes", min_score=70, apps_only=True)
     assert box.launched.paths == []
+
+
+def test_install_folder_fallback_finds_the_real_exe(tmp_path):
+    from core.tools import installed_programs, main_executable
+
+    game = tmp_path / "Ubisoft" / "Assassin's Creed Mirage"
+    (game / "Support").mkdir(parents=True)
+    for helper in ("unins000.exe", "CrashReporter.exe", "UbisoftConnectInstaller.exe"):
+        (game / helper).write_bytes(b"MZ")
+    (game / "Support" / "ACMirage.exe").write_bytes(b"MZ")  # redistributable folders are skipped
+    (game / "bin").mkdir()
+    (game / "bin" / "ACMirage.exe").write_bytes(b"MZ")
+    assert main_executable(str(game), "Assassin's Creed Mirage").endswith(str(Path("bin") / "ACMirage.exe"))
+    assert main_executable(str(tmp_path / "missing"), "x") is None
+    lonely = tmp_path / "Tool"
+    lonely.mkdir()
+    (lonely / "unins000.exe").write_bytes(b"MZ")
+    assert main_executable(str(lonely), "Some Tool") is None, "never an uninstaller"
+    programs = installed_programs(lambda: [{"key": "{AC}", "DisplayName": "Assassin's Creed Mirage", "InstallLocation": str(game),
+                                            "DisplayIcon": str(game / "icon.ico")}])
+    assert programs == [("Assassin's Creed Mirage", str(game / "bin" / "ACMirage.exe"))]
+
+
+def test_app_paths_get_friendly_names(tmp_path):
+    from core.tools import app_paths
+
+    word = tmp_path / "WINWORD.EXE"
+    word.write_bytes(b"MZ")
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_bytes(b"MZ")
+    found = app_paths(lambda: [("WINWORD.EXE", str(word)), ("chrome.exe", str(chrome)), ("setup.exe", str(chrome)),
+                               ("gone.exe", str(tmp_path / "gone.exe"))])
+    assert found == [("Microsoft Word", str(word)), ("Google Chrome", str(chrome))]
+
+
+def test_desktop_game_shortcuts_count_as_apps(config, tmp_path):
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    (desktop / "Counter-Strike 2.url").write_text("[InternetShortcut]\nURL=steam://rungameid/730\n")
+    (desktop / "cs2 notes.txt").write_text("smokes")
+    launched = Launches()
+    tb = Toolbox(config, index=FileIndex(lambda: [(desktop, "user")], apps_provider=lambda: []),
+                 launcher=launched.paths.append)
+    assert tb.open_target("cs2", min_score=70, apps_only=True)["name"] == "Counter-Strike 2"
+    assert launched.paths[-1].name == "Counter-Strike 2.url"
+
+
+@pytest.mark.parametrize("spoken, command", [("command prompt", "cmd.exe"), ("device manager", "devmgmt.msc"),
+                                             ("windows update", "ms-settings:windowsupdate"), ("recycle bin", "shell:RecycleBinFolder")])
+def test_more_windows_tools(config, monkeypatch, spoken, command):
+    import core.tools as tools
+
+    monkeypatch.setattr(tools.sys, "platform", "win32")
+    launched = []
+    tb = Toolbox(config, index=FileIndex(lambda: [], apps_provider=lambda: []), system_launcher=launched.append)
+    assert tb.open_target(spoken)["kind"] == "app" and launched == [command]

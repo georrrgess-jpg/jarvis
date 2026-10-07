@@ -334,3 +334,25 @@ def test_outdated_scripts_are_detected(config):
     with pytest.raises(BridgeError):
         stale.sheets("read", spreadsheet="Budget")
     assert stale.outdated, "an unknown-action reply marks the script as needing an update"
+
+
+def test_script_sends_mail_finds_contacts_and_shares_files():
+    t = "T0K3N"
+    data = run_gas([
+        {"token": t, "action": "contact_find", "name": "sarah"},
+        {"token": t, "action": "contact_find", "name": "pepper potts"},
+        {"token": t, "action": "contact_find", "name": "nobody"},
+        {"token": t, "action": "mail_send", "to": "sarah.connor@example.com", "subject": "Hi", "body": "Hello Sarah"},
+        {"token": t, "action": "mail_send", "to": "not an address", "subject": "x", "body": "y"},
+        {"token": t, "action": "doc_create", "title": "Bio"},
+    ])
+    r = data["results"]
+    assert [p["email"] for p in r[0]["people"]] == ["sarah.connor@example.com", "slee@school.edu"], "most frequent first"
+    assert r[0]["people"][0]["name"] == "Sarah Connor"
+    assert r[1]["people"] == [{"email": "pepper@stark.com", "name": "Potts, Pepper", "count": 2}]
+    assert r[2]["people"] == []
+    assert r[3]["sent"] is True and data["sent"] == [{"to": "sarah.connor@example.com", "subject": "Hi", "body": "Hello Sarah", "options": {}}]
+    assert "invalid recipient" in r[4]["error"]
+    shared = run_gas([{"token": t, "action": "doc_create", "title": "Bio"},
+                      {"token": t, "action": "share_file", "file": "id" + "x" * 29 + "1", "email": "tom@example.com"}])
+    assert shared["results"][1]["shared"] and shared["shares"] == [{"id": "id" + "x" * 29 + "1", "e": "tom@example.com", "role": "view"}]

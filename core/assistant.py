@@ -15,11 +15,16 @@ import re
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from . import APP_VERSION
 from .audio import VIS_FPS, AudioEngine, spectrum_frames
+from .compose import (EditRequest, WriteRequest, clean_document, document_prompt, extra_slide_prompt, parse_deck,
+                      parse_edit_request, parse_write_request, revise_prompt, section_prompt, slides_prompt)
 from .config import Config, app_data_dir
+from .google_bridge import BridgeError
+from .mail import (Draft, EmailRequest, email_prompt, first_name, gmail_compose_url, is_cancellation, is_confirmation,
+                   parse_email, parse_email_request)
 from .llm import LLMConnectionError, LLMEngine, LLMError, LLMModelError, OllamaStatus
 from .sfx import SoundFX
 from .state import State, StateMachine
@@ -27,6 +32,8 @@ from .stt import ENGINE_LABELS, SpeechInput, STTError
 from .system import SystemMonitor
 from .tools import Toolbox, ToolError, describe_call
 from . import wakeword
+from .compose import SHORT_FORM
+from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .tts import CODE_MARK, EdgeTTS, SentenceSplitter, TTSError, clean_for_speech
 
 log = logging.getLogger("jarvis.assistant")
@@ -85,10 +92,15 @@ class Turn:
 class Speaker:
     """Synthesises sentences in the background and plays them back in order."""
 
-    def __init__(self, assistant: "Assistant", turn: Turn, voice: str | None = None) -> None:
+    def __init__(self, assistant: "Assistant", turn: Turn, voice: str | None = None, language: str | None = None,
+                 working: bool = False) -> None:
         self._a = assistant
         self._turn = turn
+        self._working = working  # long task: go back to THINKING between spoken updates
+        self._closed = False
         self._voice = voice
+        self._auto = voice is None and bool(assistant.config.get("auto_language", True))
+        self._lang_voice = self._voice_for_language(language) if self._auto and language else None
         self._sentences: "queue.Queue[str | None]" = queue.Queue()
         self._clips: "queue.Queue[tuple | None]" = queue.Queue(maxsize=3)
         self.spoke = False
@@ -103,7 +115,24 @@ class Speaker:
     def say(self, sentence: str) -> None:
         self._sentences.put(sentence)
 
+    def _voice_for_language(self, code: str) -> str | None:
+        """None means the user's chosen voice; otherwise a voice that speaks ``code``."""
+        chosen = self._a.config.get("voice") or ""
+        if code == base_language(chosen or "en"):
+            return None
+        return voice_for(code, chosen)
+
+    def _pick_voice(self, text: str) -> str | None:
+        if not self._auto:
+            return self._voice
+        found = detect(text)
+        sure = found.confidence >= 0.9 or (found.confidence >= 0.5 and len(text.split()) >= 3)
+        if sure:  # short or ambiguous sentences keep the reply's current voice
+            self._lang_voice = self._voice_for_language(found.code)
+        return self._lang_voice
+
     def close(self) -> None:
+        self._closed = True
         self._sentences.put(None)
 
     def wait(self, timeout: float | None = None) -> None:
@@ -123,8 +152,16 @@ class Speaker:
                 text = clean_for_speech(sentence)
                 if not re.search(r"\w", text) or self.failed:
                     continue
+                voice = self._pick_voice(text)
                 try:
-                    mp3 = a.tts.synthesize(text, voice=self._voice)
+                    try:
+                        mp3 = a.tts.synthesize(text, voice=voice)
+                    except TTSError:
+                        if voice is None or voice == self._voice:
+                            raise
+                        log.warning("Voice %s failed; using the default voice", voice)
+                        self._auto, self._lang_voice = False, None
+                        mp3 = a.tts.synthesize(text, voice=self._voice)
                 except TTSError as exc:
                     self.failed = str(exc)
                     a._voice_status(False, str(exc))
@@ -163,6 +200,8 @@ class Speaker:
                     a.audio.stop_voice()
                     break
                 time.sleep(0.02)
+            if self._working and not self._closed and self._clips.empty():
+                a._set_state(State.THINKING, turn, "working")
 
 
 class Assistant:
@@ -201,6 +240,9 @@ class Assistant:
         self._pull_thread: threading.Thread | None = None
         self.wake: wakeword.WakeListener | None = None
         self._wake_error: str | None = None
+        self._last_doc: dict | None = None  # the Google Doc / deck JARVIS made or edited last ("add a section to it")
+        self._drafts: dict[str, Draft] = {}  # emails shown on screen, by id
+        self._awaiting: Draft | None = None  # the draft JARVIS just asked "shall I send it?" about
 
     # ================================================================== plumbing
     @property
@@ -494,7 +536,7 @@ class Assistant:
             self.emit("notice", level="info", text=f"I didn't quite catch that, {self.title}.")
             self._finish_turn(turn)
             return
-        if re.sub(r"[^\w' ]+", "", text.lower()).strip() in _STOP_PHRASES:
+        if re.sub(r"[^\w' ]+", "", text.lower()).strip() in _STOP_PHRASES and self._awaiting is None:
             self.sfx.play("interrupt")
             self.emit("notice", level="info", text="Standing by.")
             self._finish_turn(turn)
@@ -554,11 +596,34 @@ class Assistant:
             return f"Opening {target}, {self.title}."
         return None
 
+    def _user_language(self, text: str) -> Detection | None:
+        """The language of the user's message when it's clearly not the one JARVIS was set up in."""
+        if not self.config.get("auto_language", True):
+            return None
+        found = detect(text)
+        if found.confidence >= 0.9 or (found.confidence >= 0.5 and len(text.split()) >= 2):
+            return found
+        return None
+
     def _converse(self, turn: Turn, text: str, source: str) -> None:
-        self._emit_turn(turn, "user_message", id=f"u{next(self._ids)}", text=text, source=source)
+        lang = self._user_language(text)
+        home = base_language(self.config.get("stt_language") or "en-US")
+        foreign = lang if lang and lang.code != home else None
+        extra = {"lang": foreign.code, "lang_name": foreign.name} if foreign else {}
+        self._emit_turn(turn, "user_message", id=f"u{next(self._ids)}", text=text, source=source, **extra)
         if not self._set_state(State.THINKING, turn, "thinking"):
             return
         self.sfx.play("process")
+
+        awaiting, self._awaiting = self._awaiting, None
+        if awaiting is not None and awaiting.id in self._drafts:
+            if is_confirmation(text):
+                self._deliver(turn, [self._send_draft(awaiting)])
+                return
+            if is_cancellation(text):
+                self.discard_email(awaiting.id)
+                self._deliver(turn, [f"Very well, {self.title}. I've discarded that email."])
+                return
 
         try:
             direct = self._direct_command(turn, text)
@@ -580,6 +645,23 @@ class Assistant:
             self._deliver(turn, [f"I'm afraid my neural core is offline, {self.title}: {reason}. "
                                  "The setup steps are on screen."])
             return
+        google_ready = self.tools.web_enabled and self.tools.google.configured
+        mail = parse_email_request(text) if self.tools.web_enabled else None
+        if mail:
+            self._deliver(turn, self._email(turn, text, mail, lang), language=lang.code if lang else None,
+                          working=True, listen_after=True)
+            return
+        change = parse_edit_request(text) if google_ready else None
+        target = self._edit_target(change) if change else None
+        if change and target:
+            self._deliver(turn, self._edit(turn, text, change, target, lang), language=lang.code if lang else None,
+                          working=True)
+            return
+        writing = parse_write_request(text, google_ready=google_ready)
+        if writing:
+            self._deliver(turn, self._write(turn, text, writing, lang), language=lang.code if lang else None,
+                          working=True)
+            return
         toolbox = self.tools if (self.tools.files_enabled or self.tools.web_enabled) else None
         prefetch = []
         if self.tools.web_enabled:
@@ -590,13 +672,15 @@ class Assistant:
                 prefetch.append(("web_search", {"query": query}, self.tools.run("web_search", {"query": query})))
         self._deliver(turn, self.llm.stream_reply(
             text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args),
-            offer_tools=bool(_TOOL_CUES.search(text)), prefetch=prefetch))
+            offer_tools=bool(_TOOL_CUES.search(text)), prefetch=prefetch,
+            language=lang.name if lang else None), language=lang.code if lang else None)
 
-    def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None) -> None:
+    def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None, language: str | None = None,
+                 working: bool = False, listen_after: bool = False) -> None:
         mid = f"a{next(self._ids)}"
         speaker = None
         if self.config.get("voice_enabled", True) and self.audio.available:
-            speaker = Speaker(self, turn, voice)
+            speaker = Speaker(self, turn, voice, language, working=working)
         splitter = SentenceSplitter()
         error: str | None = None
         self._emit_turn(turn, "assistant_start", id=mid)
@@ -630,8 +714,263 @@ class Assistant:
             speaker.close()
             speaker.wait()
         if self._finish_turn(turn) and not turn.cancel.is_set():
-            if turn.kind == "listen" and not error and self.config.get("auto_listen"):
+            if turn.kind == "listen" and not error and (self.config.get("auto_listen") or listen_after):
                 self.start_listening()
+
+    # ================================================================== long-form writing
+    def _write(self, turn: Turn, text: str, req: WriteRequest, lang: Detection | None) -> Iterator[str]:
+        """Research, write and file a document or deck, narrating briefly; yields the spoken reply."""
+        language = req.language or (lang.name if lang else None)
+        lang_code = next((code for code, (name, _, _) in LANGUAGES.items() if name == language), "en")
+        place = {"doc": "a Google Doc", "slides": "Google Slides", "chat": ""}[req.target]
+        if req.target == "chat":
+            if not self.tools.google.configured and req.kind not in SHORT_FORM and self.tools.web_enabled:
+                self._emit_turn(turn, "system_message", level="info",
+                                text="Tip: link Google in Settings ▸ Google and I'll put pieces like this straight into a Google Doc.")
+        else:
+            yield f"Right away, {self.title}. I'll write that up in {place}. "
+        notes = ""
+        if self.tools.web_enabled and req.kind not in ("poem", "story", "short story"):
+            self._tool_used(turn, "web_search", {"query": req.topic})
+            try:
+                notes = self.tools.research(req.topic, language=lang_code)
+            except Exception:
+                log.exception("Research failed")
+        if turn.cancel.is_set():
+            return
+        label = f"Writing {req.kind}: {req.topic}" if req.kind != "document" else f"Writing about {req.topic}"
+        self._emit_turn(turn, "tool_activity", tool="compose", label=label)
+
+        def progress(partial: str) -> None:
+            words = len(partial.split())
+            self._emit_turn(turn, "activity", label=f"{label} · {words} words" if req.target != "slides"
+                            else f"{label} · slide {max(1, partial.count(chr(10) + chr(10)))}")
+
+        maker = slides_prompt if req.target == "slides" else document_prompt
+        system, prompt = maker(req, text, notes, language)
+        if req.target == "chat":
+            system += " Keep it under %d words." % req.words
+        draft = self.llm.compose(system, prompt, turn.cancel, on_progress=progress,
+                                 max_tokens=int(req.words * 2.2) + 400 if req.target != "slides" else 1800)
+        if turn.cancel.is_set():
+            return
+        if req.target == "chat":
+            _title, body = clean_document(draft)
+            self.llm.remember(text, body)
+            yield body
+            return
+
+        try:
+            if req.target == "slides":
+                title, subtitle, slides = parse_deck(draft)
+                if not slides:
+                    raise BridgeError("the model didn't produce any slides; please try again")
+                title = req.title or title or req.topic.title()
+                self._emit_turn(turn, "activity", label=f"Creating Google Slides: {title}")
+                result = self.tools.google.create_deck(title, subtitle, slides)
+                summary = f"a {len(slides) + 1}-slide presentation on {req.topic}"
+                kind = "slides"
+            else:
+                title, body = clean_document(draft)
+                if req.title:
+                    title = req.title
+                    body = re.sub(r"^#\s+.*", "# " + title, body, count=1) if body.startswith("#") else f"# {title}\n{body}"
+                title = title or f"{req.kind.capitalize()} of {req.topic}"
+                self._emit_turn(turn, "activity", label=f"Creating Google Doc: {title}")
+                result = self.tools.google.doc("create", title=title, text=body)
+                words = len(re.sub(r"[#*|>-]", " ", body).split())
+                summary = f"a {words}-word {req.kind} of {req.topic}" if req.kind == "biography" else f"a {words}-word {req.kind} on {req.topic}"
+                kind = "doc"
+        except BridgeError as exc:
+            self._emit_turn(turn, "system_message", level="error", text=f"Google: {exc}")
+            body = draft if req.target == "slides" else clean_document(draft)[1]
+            self.llm.remember(text, body)
+            yield f"I couldn't save it to Google, {self.title}, so here it is instead.\n\n{body}"
+            return
+        url = result.get("url") or ""
+        self._last_doc = {"kind": kind, "id": result.get("id") or "", "title": result.get("title") or title, "url": url}
+        self._emit_turn(turn, "document", doc_kind=kind, title=result.get("title") or title, url=url)
+        if url:
+            self.tools.open_link(url)
+        self.llm.remember(text, f'I wrote {summary} in the Google {"Slides presentation" if kind == "slides" else "Doc"} '
+                                f'"{result.get("title") or title}" ({url}).')
+        yield f"Done. I've written {summary} and opened it for you."
+
+    # ================================================================== email
+    def _find_document(self, name: str) -> dict | None:
+        for kind, action in (("doc", self.tools.google.doc), ("slides", self.tools.google.slides)):
+            try:
+                files = action("list", **({"document": name} if kind == "doc" else {"presentation": name})).get("files") or []
+            except BridgeError:
+                continue
+            if files:
+                return {"kind": kind, "id": files[0]["id"], "title": files[0]["title"], "url": files[0]["url"]}
+        return None
+
+    def _email(self, turn: Turn, text: str, req: EmailRequest, lang: Detection | None) -> Iterator[str]:
+        """Write an email and put it on screen for confirmation. Nothing is sent from here."""
+        google = self.tools.google
+        to, to_name, candidates = req.address or "", "", []
+        if not to and re.fullmatch(r"(?:me|myself|my\s+self)", req.who, re.I):
+            to, to_name = self.config.get("google_user_email") or "", self.config.get("user_name") or ""
+        elif not to and google.can_email:
+            self._emit_turn(turn, "tool_activity", tool="email", label=f"Looking up {req.who}'s address")
+            try:
+                candidates = google.find_contacts(req.who)
+            except BridgeError as exc:
+                log.info("Contact lookup failed: %s", exc)
+            if candidates:
+                to, to_name = candidates[0]["email"], candidates[0].get("name") or req.who
+        if not to_name and not req.address and req.who.lower() not in ("me", "myself"):
+            to_name = req.who
+        doc = None
+        if req.share:
+            doc = self._find_document(req.doc_name) if req.doc_name and google.configured else self._last_doc
+            if not doc:
+                yield f"Which document should I send, {self.title}? I couldn't tell which one you meant."
+                return
+        self._emit_turn(turn, "tool_activity", tool="email", label=f"Writing an email to {to_name or to or req.who}")
+        if doc:
+            req = EmailRequest(who=req.who, address=req.address, how="sharing",
+                               what=(f'the Google {"Slides presentation" if doc["kind"] == "slides" else "Doc"} '
+                                     f'"{doc["title"]}". Include this link exactly as written: {doc["url"]}'
+                                     + (f". Also: {req.what}" if req.what else "")))
+        system, prompt = email_prompt(req, first_name(to_name or req.who), self.config.get("user_name") or "",
+                                      lang.name if lang else None)
+        draft_text = self.llm.compose(system, prompt, turn.cancel, max_tokens=700, temperature=0.5)
+        if turn.cancel.is_set():
+            return
+        fallback = doc["title"] if doc else (req.what[:60].capitalize() if req.what else "Hello")
+        subject, body = parse_email(draft_text, fallback)
+        if doc and doc["url"] and doc["url"] not in body:
+            body += f"\n\n{doc['url']}"
+        draft = Draft(id=f"m{next(self._ids)}", to=to, to_name=to_name, subject=subject, body=body, candidates=candidates,
+                      share_id=doc["id"] if doc else "")
+        self._drafts[draft.id] = draft
+        self._emit_turn(turn, "email_draft", **draft.as_event(), can_send=google.can_email)
+        who = to_name or to
+        if not to:
+            yield (f"I've drafted the email, {self.title}, but I couldn't find {req.who}'s address. "
+                   "Type it into the card on screen and press Send.")
+            return
+        self._awaiting = draft
+        yield f"I've drafted an email to {who}. Shall I send it?"
+
+    def _send_draft(self, draft: Draft) -> str:
+        """Send (or hand to Gmail) a draft the user has confirmed."""
+        google = self.tools.google
+        if google.can_email and draft.to:
+            if draft.share_id:
+                try:
+                    google.share_file(draft.share_id, draft.to)
+                except BridgeError as exc:
+                    log.info("Sharing before emailing failed: %s", exc)
+            try:
+                google.send_email(draft.to, draft.subject, draft.body)
+            except BridgeError as exc:
+                self.emit("email_status", id=draft.id, status="error", error=str(exc))
+                return f"I'm afraid the email didn't go through, {self.title}: {exc}."
+            self._drafts.pop(draft.id, None)
+            self.emit("email_status", id=draft.id, status="sent", to=draft.to)
+            return f"Sent to {draft.to_name or draft.to}, {self.title}."
+        self.tools.open_link(gmail_compose_url(draft.to, draft.subject, draft.body))
+        self._drafts.pop(draft.id, None)
+        self.emit("email_status", id=draft.id, status="opened")
+        return f"I've opened it in Gmail for you, {self.title}. Just press Send."
+
+    # -- called from the email card on screen
+    def send_email(self, draft_id: str, to: str = "", subject: str = "", body: str = "", via_gmail: bool = False) -> dict:
+        draft = self._drafts.get(draft_id)
+        if draft is None:
+            return {"ok": False, "error": "That draft is no longer available."}
+        draft.to = (to or draft.to).strip()
+        draft.subject = subject if subject else draft.subject
+        draft.body = body if body else draft.body
+        if self._awaiting is draft:
+            self._awaiting = None
+        if via_gmail:
+            self.tools.open_link(gmail_compose_url(draft.to, draft.subject, draft.body))
+            self._drafts.pop(draft_id, None)
+            self.emit("email_status", id=draft_id, status="opened")
+            return {"ok": True, "status": "opened"}
+        if self.tools.google.can_email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", draft.to):
+            return {"ok": False, "error": "Please enter a valid email address."}
+        message = self._send_draft(draft)
+        failed = draft_id in self._drafts
+        return {"ok": not failed, "message": message, "error": message if failed else None}
+
+    def discard_email(self, draft_id: str) -> None:
+        draft = self._drafts.pop(draft_id, None)
+        if self._awaiting is draft:
+            self._awaiting = None
+        self.emit("email_status", id=draft_id, status="discarded")
+
+    def _edit_target(self, change: EditRequest) -> dict | None:
+        """Which document an edit means: a named one, or the one JARVIS worked on last."""
+        if change.name:
+            return {"kind": change.target or "doc", "id": change.name, "title": change.name, "url": ""}
+        last = self._last_doc
+        if last and (change.target in (None, last["kind"])):
+            if change.action == "revise" and last["kind"] == "slides":
+                return None  # rewriting a whole deck goes to the model (it can edit slide by slide)
+            return last
+        return None
+
+    def _edit(self, turn: Turn, text: str, change: EditRequest, target: dict, lang: Detection | None) -> Iterator[str]:
+        """Add to or revise a Google Doc, or add a slide, with the model writing the new content."""
+        google = self.tools.google
+        language = lang.name if lang else None
+        ref = target["id"] or target["title"]
+        try:
+            if target["kind"] == "slides":
+                deck = google.slides("read", presentation=ref)
+                deck_text = "\n\n".join(s.get("text", "") for s in deck.get("slides", []))
+                self._emit_turn(turn, "tool_activity", tool="compose", label=f"Writing a slide: {change.topic or change.part}")
+                system, prompt = extra_slide_prompt(change, deck_text, language)
+                draft = self.llm.compose(system, prompt, turn.cancel, max_tokens=300)
+                if turn.cancel.is_set():
+                    return
+                _t, _s, slides = parse_deck(draft)
+                slide = slides[0] if slides else {"title": change.topic.capitalize(), "body": []}
+                result = google.call("slides_add", presentation=ref, title=slide["title"], body=slide["body"])
+                done = f"I've added a slide on {change.topic or slide['title']} to {deck.get('title') or 'the presentation'}."
+            else:
+                doc = google.doc("read", document=ref)
+                current = doc.get("text", "")
+                if change.action == "add":
+                    self._emit_turn(turn, "tool_activity", tool="compose",
+                                    label=f"Writing a {change.part}" + (f": {change.topic}" if change.topic else ""))
+                    system, prompt = section_prompt(change, current, language)
+                    draft = self.llm.compose(system, prompt, turn.cancel, max_tokens=900,
+                                             on_progress=lambda p: self._emit_turn(turn, "activity", label=f"Writing · {len(p.split())} words"))
+                    if turn.cancel.is_set():
+                        return
+                    _title, body = clean_document(draft)
+                    result = google.doc("append", document=ref, text=body)
+                    what = f"a {change.part} on {change.topic}" if change.topic else f"a {change.part}"
+                    done = f"I've added {what} to {doc.get('title') or 'the document'}."
+                else:
+                    self._emit_turn(turn, "tool_activity", tool="compose", label=f"Revising {doc.get('title') or 'the document'}")
+                    system, prompt = revise_prompt(change, current, language)
+                    draft = self.llm.compose(system, prompt, turn.cancel, max_tokens=int(len(current.split()) * 2.5) + 600,
+                                             on_progress=lambda p: self._emit_turn(turn, "activity", label=f"Revising · {len(p.split())} words"))
+                    if turn.cancel.is_set():
+                        return
+                    _title, body = clean_document(draft)
+                    if len(body.split()) < 20:
+                        raise BridgeError("the rewrite came out empty, so I left the document unchanged")
+                    result = google.doc("rewrite", document=ref, text=body)
+                    done = f"I've revised {doc.get('title') or 'the document'} as you asked."
+        except BridgeError as exc:
+            self._emit_turn(turn, "system_message", level="error", text=f"Google: {exc}")
+            yield f"I'm afraid I couldn't change it, {self.title}: {exc}."
+            return
+        url = result.get("url") or target.get("url") or ""
+        self._last_doc = {"kind": target["kind"], "id": result.get("id") or target["id"],
+                          "title": result.get("title") or target["title"], "url": url}
+        self._emit_turn(turn, "document", doc_kind=target["kind"], title=self._last_doc["title"], url=url)
+        self.llm.remember(text, done)
+        yield f"Done. {done}"
 
     # ================================================================== ollama
     def check_ollama(self, emit_event: bool = True) -> dict:

@@ -33,7 +33,9 @@ DEFAULTS: dict[str, Any] = {
     # Google Docs, Slides & Sheets via the user's own Apps Script bridge
     "google_script_url": "",
     "google_bridge_token": "",
-    "google_bridge_version": 0,  # version of the script the user deployed (see BRIDGE_VERSION in the .gs)
+    "google_bridge_version": 0,
+    "google_user_email": "",  # the linked Google account ("email it to me")
+    "user_name": "",  # for email sign-offs  # version of the script the user deployed (see BRIDGE_VERSION in the .gs)
     # Voice output (edge-tts)
     "voice": "en-GB-RyanNeural",
     "speech_rate": 0,  # percent, -50..50
@@ -45,6 +47,8 @@ DEFAULTS: dict[str, Any] = {
     # Speech input
     "stt_engine": "auto",  # auto | google | whisper | vosk
     "stt_language": "en-US",
+    "auto_language": True,  # detect the language spoken/typed, reply in it and switch to a matching voice
+    "stt_extra_languages": "",  # other languages to listen for, e.g. "es-ES, fr-FR" (empty = the PC's language)
     "whisper_model": "base.en",
     "vosk_model_path": "",
     "pause_threshold": 0.9,  # seconds of silence that end an utterance

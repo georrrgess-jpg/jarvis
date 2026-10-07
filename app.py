@@ -32,7 +32,8 @@ from core.config import Config, app_data_dir, resource_path  # noqa: E402
 
 log = logging.getLogger("jarvis")
 
-ALLOWED_EXTERNAL_URLS = ("https://ollama.com/", "https://github.com/ollama/", "https://script.google.com/")
+ALLOWED_EXTERNAL_URLS = ("https://ollama.com/", "https://github.com/ollama/", "https://script.google.com/",
+                         "https://docs.google.com/", "https://mail.google.com/")
 WEBVIEW2_DOWNLOAD_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
 # Windows MessageBox flags
@@ -409,6 +410,15 @@ class JarvisAPI:
             return {"ok": True, "user": info.get("user"), "outdated": bridge.outdated}
         except BridgeError as exc:
             return {"ok": False, "error": str(exc)}
+
+    def email_send(self, draft_id: str, to: str = "", subject: str = "", body: str = "") -> dict:
+        return self._assistant.send_email(str(draft_id), str(to or ""), str(subject or ""), str(body or ""))
+
+    def email_open_gmail(self, draft_id: str, to: str = "", subject: str = "", body: str = "") -> dict:
+        return self._assistant.send_email(str(draft_id), str(to or ""), str(subject or ""), str(body or ""), via_gmail=True)
+
+    def email_discard(self, draft_id: str) -> None:
+        self._assistant.discard_email(str(draft_id))
 
     def google_disconnect(self) -> None:
         self._assistant.config.update({"google_script_url": ""})

@@ -158,7 +158,7 @@ class GoogleBridge:
             raise BridgeError("that doesn't look like a web app URL (it should end in /exec)")
         info = self.call("ping", url=url)
         version = info.get("version")
-        self._config.update({"google_script_url": url,
+        self._config.update({"google_script_url": url, "google_user_email": str(info.get("user") or ""),
                              "google_bridge_version": version if isinstance(version, int) and version > 0 else 1})
         return info
 
@@ -207,6 +207,23 @@ class GoogleBridge:
             return self.call("slides_edit", presentation=presentation, number=number, title=title,
                              body=[ln for ln in lines if ln] or None)
         raise BridgeError("action must be one of create, add, edit, delete, move, replace, read, list")
+
+    @property
+    def can_email(self) -> bool:
+        """The deployed script has the Gmail actions (v3+)."""
+        return self.configured and int(self._config.get("google_bridge_version") or 0) >= 3
+
+    def send_email(self, to: str, subject: str, body: str, cc: str = "") -> dict:
+        return self.call("mail_send", to=to, subject=subject, body=body, cc=cc)
+
+    def find_contacts(self, name: str) -> list[dict]:
+        return list(self.call("contact_find", name=name).get("people") or [])
+
+    def share_file(self, file_id: str, email: str, role: str = "view") -> dict:
+        return self.call("share_file", file=file_id, email=email, role=role)
+
+    def create_deck(self, title: str, subtitle: str, slides: list[dict]) -> dict:
+        return self.call("slides_create", title=title or "Untitled presentation", subtitle=subtitle, slides=slides)
 
     def sheets(self, action: str, spreadsheet: str = "", title: str = "", text="", range: str = "", tab: str = "") -> dict:
         action = (action or "").lower().strip()

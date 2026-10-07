@@ -35,6 +35,7 @@ Guidelines:
 - Do not use markdown, bullet points, headings or emoji unless the user asks for code, a list or a table.
 - When you write code, put it in a fenced code block and keep the spoken explanation short.
 - Never invent facts. If you are unsure, or the question is about news, weather, prices or anything recent, search the web.
+- Reply in the same language as the user's latest message.
 - Answer only the user's latest message. Don't repeat earlier answers, don't narrate what you are about to do, and don't ask follow-up questions unless you truly need information.
 {abilities}
 Context: it is {now}. The host computer is "{host}" running {os_name}."""
@@ -249,7 +250,7 @@ class LLMEngine:
 
     def stream_reply(self, text: str, cancel: threading.Event | None = None, toolbox=None,
                      on_tool: Callable[[str, dict], None] | None = None, offer_tools: bool = True,
-                     prefetch: list[tuple[str, dict, str]] | None = None) -> Iterator[str]:
+                     prefetch: list[tuple[str, dict, str]] | None = None, language: str | None = None) -> Iterator[str]:
         """Yield the reply token by token, running any tool calls in between. Memory is updated at the end.
 
         ``prefetch`` holds tool results gathered before the model runs (e.g. a web search the
@@ -262,8 +263,9 @@ class LLMEngine:
                  and self._tools_supported.get(self.model, True) else [])
         with self._lock:
             history = list(self._history)
-        messages = [{"role": "system", "content": self.system_prompt(tools=bool(specs) or bool(prefetch))}, *history,
-                    {"role": "user", "content": text}]
+        lang_hint = f"\n\nThe user is speaking {language}. Reply in {language}." if language and language != "English" else ""
+        messages = [{"role": "system", "content": self.system_prompt(tools=bool(specs) or bool(prefetch)) + lang_hint},
+                    *history, {"role": "user", "content": text}]
         for name, args, result in prefetch or []:
             messages.append({"role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": args}}]})
             messages.append({"role": "tool", "content": result[:12000], "tool_name": name})
@@ -325,7 +327,7 @@ class LLMEngine:
                         log.info("Model %s does not support tools; continuing without them", self.model)
                         self._tools_supported[self.model] = False
                         specs = []
-                        messages[0]["content"] = self.system_prompt(tools=bool(prefetch))
+                        messages[0]["content"] = self.system_prompt(tools=bool(prefetch)) + lang_hint
                         continue
                     raise
                 if pending and not calls:
@@ -371,6 +373,45 @@ class LLMEngine:
                 if cancel.is_set():
                     reply += " [interrupted]"
                 self._remember(text, reply)
+
+    def compose(self, system: str, prompt: str, cancel: threading.Event | None = None,
+                on_progress: Callable[[str], None] | None = None, max_tokens: int = 3000,
+                temperature: float = 0.7) -> str:
+        """One focused generation without history or tools (long-form writing). Returns the full text."""
+        if not self.model:
+            raise LLMModelError("No language model is selected.")
+        cancel = cancel or threading.Event()
+        client = self._client_factory(httpx.Timeout(600.0, connect=4.0))
+        parts: list[str] = []
+        last = 0.0
+        try:
+            stream = client.chat(model=self.model, stream=True, keep_alive="30m",
+                                 messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                                 options={"temperature": temperature, "num_ctx": 8192, "num_predict": max_tokens})
+            for chunk in stream:
+                if cancel.is_set():
+                    break
+                parts.append(chunk["message"]["content"] or "")
+                if on_progress and time.monotonic() - last > 0.8:
+                    last = time.monotonic()
+                    on_progress("".join(parts))
+                if chunk.get("done"):
+                    break
+        except (ConnectionError, httpx.ConnectError) as exc:
+            self.online = False
+            raise LLMConnectionError(f"Lost connection to Ollama at {self.host}.") from exc
+        except httpx.TransportError as exc:
+            raise LLMConnectionError(f"Ollama stopped responding ({exc.__class__.__name__}).") from exc
+        except ollama.ResponseError as exc:
+            raise LLMError(f"Ollama error: {exc.error}") from exc
+        finally:
+            if hasattr(client, "close"):
+                client.close()
+        return "".join(parts)
+
+    def remember(self, user: str, reply: str) -> None:
+        """Add an exchange handled outside the model (e.g. a document JARVIS wrote) to the conversation."""
+        self._remember(user, reply)
 
     def _remember(self, user: str, reply: str) -> None:
         limit = int(self._config.get("max_history_turns", 12)) * 2

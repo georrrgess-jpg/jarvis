@@ -231,7 +231,9 @@ class FileIndex:
             if type_exts:
                 score += 10.0 if e.path.suffix.lower() in type_exts else -8.0
             if e.root_kind == "apps":
-                score += 6.0  # "open spotify" means the app, not a screenshot called spotify.png
+                # "open spotify" means the app: beat screenshots called spotify.png, and the Start Menu
+                # folder that usually shares the shortcut's name
+                score += -12.0 if e.is_dir else 6.0
             if e.path.suffix.lower() in RUNNABLE_EXTENSIONS:
                 score -= 30.0
             age_days = max(0.0, (now - e.mtime) / 86400)

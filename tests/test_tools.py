@@ -100,6 +100,12 @@ def test_open_app_prefers_start_menu_shortcut(box):
     assert result["kind"] == "app" and result["name"] == "Spotify"
 
 
+def test_shortcut_beats_same_named_start_menu_folder(box):
+    ranked = box.index.search("spotify", limit=3)
+    assert ranked[0][1].path.name == "Spotify.lnk"
+    assert ranked[0][0] > next(score for score, e in ranked if e.is_dir)
+
+
 def test_open_document_by_partial_name(box):
     box.open_target("my resume")
     assert box.launched.paths[-1].name == "Resume 2024.docx"

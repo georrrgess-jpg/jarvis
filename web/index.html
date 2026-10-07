@@ -247,6 +247,30 @@
     </div>
   </div>
 
+  <!-- ======================================================= google setup -->
+  <div id="google" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="g-title">
+    <div class="modal-card cyan">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="mc-head">
+        <svg class="warn-hex" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 3 42 13.5v21L24 45 6 34.5v-21Z"/><path d="M16 24h16M24 16v16" class="wh-mark"/></svg>
+        <div><div class="mc-kicker">INTEGRATION · GOOGLE WORKSPACE</div><h2 id="g-title">Link Google Docs &amp; Slides</h2></div>
+      </div>
+      <p class="mc-lead">A small script runs inside <b>your own</b> Google account and lets J.A.R.V.I.S. create and edit your Docs and Slides. Free, no API keys, and you can remove it any time.</p>
+      <ol class="steps">
+        <li><span class="step-n">01</span><div><b>Copy the script</b><small>It already contains your private key.</small></div><button class="btn ghost" id="g-copy">COPY SCRIPT</button></li>
+        <li><span class="step-n">02</span><div><b>Paste it into Apps Script</b><small>Open Apps Script, delete the sample code, paste, then press Save (Ctrl+S).</small></div><button class="btn ghost" data-open="https://script.google.com/home/projects/create">OPEN APPS SCRIPT</button></li>
+        <li><span class="step-n">03</span><div><b>Deploy it</b><small>Deploy ▸ New deployment ▸ gear icon ▸ <i>Web app</i>. Set <i>Execute as: Me</i> and <i>Who has access: Anyone</i>, press Deploy, then Authorize access (choose your account ▸ Advanced ▸ Go to project ▸ Allow).</small></div></li>
+        <li><span class="step-n">04</span><div><b>Paste the Web app URL</b><small>It ends in <code>/exec</code>.</small>
+          <input id="g-url" class="url-input" type="text" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec"></div></li>
+      </ol>
+      <div class="mc-actions">
+        <button class="btn primary" id="g-connect"><span>CONNECT</span></button>
+        <button class="btn ghost" id="g-cancel">CANCEL</button>
+      </div>
+      <div class="mc-foot" id="g-foot">Afterwards try: “Create a Google Doc called Shopping list with eggs, milk and coffee.”</div>
+    </div>
+  </div>
+
   <!-- ======================================================= settings drawer -->
   <aside id="settings" class="drawer" aria-hidden="true">
     <header class="drawer-head">
@@ -268,6 +292,11 @@
         <legend>Abilities</legend>
         <label class="toggle"><input type="checkbox" data-key="allow_files"><i></i><span>Open and read files &amp; apps on this PC</span></label>
         <label class="toggle"><input type="checkbox" data-key="allow_internet"><i></i><span>Search and read the internet</span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Google Docs &amp; Slides</legend>
+        <p class="field-note" id="g-status">Not connected. JARVIS can create and edit your Docs and Slides once you link your Google account (free, about 3 minutes).</p>
+        <div class="row"><button class="btn ghost sm" id="g-setup">SET UP</button><button class="btn ghost sm hidden" id="g-disconnect">DISCONNECT</button></div>
       </fieldset>
       <fieldset>
         <legend>Voice output</legend>

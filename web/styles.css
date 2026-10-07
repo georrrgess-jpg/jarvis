@@ -446,6 +446,16 @@ kbd {
 .pull-bar { height: 6px; margin: 10px 0 8px; background: rgb(var(--cyan) / .1); overflow: hidden; }
 #pull-progress { display: block; height: 100%; width: 0; background: linear-gradient(90deg, rgb(var(--cyan) / .6), rgb(var(--cyan))); box-shadow: 0 0 10px rgb(var(--cyan)); transition: width .3s; }
 .pull-bytes { font: 400 11px/1 var(--font-mono); color: var(--text-faint); }
+.modal-card.cyan { border-color: rgb(var(--cyan) / .4); box-shadow: 0 0 60px rgb(var(--cyan) / .12), inset 0 0 60px rgb(var(--cyan) / .04); }
+.modal-card.cyan .mc-corner { border-color: rgb(var(--cyan)); filter: drop-shadow(0 0 5px rgb(var(--cyan))); }
+.modal-card.cyan .mc-kicker { color: rgb(var(--cyan)); }
+.modal-card.cyan .warn-hex { animation: none; filter: drop-shadow(0 0 8px rgb(var(--cyan))); }
+.modal-card.cyan .warn-hex path { fill: rgb(var(--cyan) / .12); stroke: rgb(var(--cyan)); }
+.url-input { width: 100%; margin-top: 8px; padding: 9px 11px; border: 1px solid var(--line-strong); background: #000; outline: 0;
+  font: 400 13px/1.2 var(--font-mono); color: rgb(var(--green)); user-select: text; }
+.url-input:focus { border-color: rgb(var(--cyan) / .8); }
+.field-note { margin: 0 0 10px; font-size: 14px; color: var(--text-dim); }
+.field-note.ok { color: rgb(var(--green)); }
 .mc-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
 .mc-foot { margin-top: 14px; font: 400 11.5px/1 var(--font-mono); color: var(--text-faint); }
 

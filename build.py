@@ -143,6 +143,7 @@ def pyinstaller_args(args: argparse.Namespace, icon: Path | None, version: str) 
         # Windows needs a real .ico for the window icon (WinForms rejects PNGs and crashes)
         "--add-data", f"{ROOT / 'assets' / 'jarvis.ico'}{sep}assets",
         "--add-data", f"{ROOT / 'assets' / 'wakeword'}{sep}assets/wakeword",
+        "--add-data", f"{ROOT / 'integrations'}{sep}integrations",
         "--additional-hooks-dir", str(ROOT / "hooks"),
         "--hidden-import", "pyaudio",
         "--collect-submodules", "core",

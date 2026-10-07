@@ -30,6 +30,8 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 
+from .google_bridge import BridgeError, GoogleBridge
+
 log = logging.getLogger("jarvis.tools")
 
 USER_AGENT = (
@@ -98,6 +100,45 @@ class Entry:
     is_dir: bool
     root_kind: str  # "user" | "apps"
     mtime: float
+    app_id: str | None = None  # Windows AppUserModelID: launched through shell:AppsFolder
+    label: str | None = None  # display name for registered apps
+
+
+# Built-in Windows tools, launched by fixed command (never by anything a web page or model supplies).
+SYSTEM_APPS = {
+    "settings": "ms-settings:", "windows settings": "ms-settings:", "pc settings": "ms-settings:",
+    "wifi settings": "ms-settings:network-wifi", "bluetooth settings": "ms-settings:bluetooth",
+    "display settings": "ms-settings:display", "sound settings": "ms-settings:sound",
+    "file explorer": "explorer.exe", "explorer": "explorer.exe", "this pc": "explorer.exe", "my computer": "explorer.exe",
+    "task manager": "taskmgr.exe", "control panel": "control.exe", "calculator": "calc.exe", "calc": "calc.exe",
+    "notepad": "notepad.exe", "paint": "mspaint.exe", "snipping tool": "ms-screenclip:", "clock": "ms-clock:",
+    "camera": "microsoft.windows.camera:", "store": "ms-windows-store:", "microsoft store": "ms-windows-store:",
+}
+
+
+def windows_start_apps(runner=subprocess.run) -> list[tuple[str, str]]:
+    """Every app in the Start menu, including Microsoft Store apps that have no shortcut file."""
+    if sys.platform != "win32" and runner is subprocess.run:
+        return []
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+           "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-StartApps | Select-Object Name,AppID | ConvertTo-Json -Compress"]
+    kwargs = {"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace", "timeout": 20}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        out = runner(cmd, **kwargs).stdout.strip()
+        data = json.loads(out) if out else []
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log.info("Get-StartApps unavailable: %s", exc)
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    apps = []
+    for item in data:
+        name, app_id = str(item.get("Name") or "").strip(), str(item.get("AppID") or "").strip()
+        if name and app_id and not name.lower().startswith(("uninstall", "readme", "help")):
+            apps.append((name, app_id))
+    return apps
 
 
 def _normalise(text: str) -> str:
@@ -165,8 +206,10 @@ def search_roots() -> list[tuple[Path, str]]:
 class FileIndex:
     """A small cached filename index over the user's own folders and the Start Menu."""
 
-    def __init__(self, roots_provider: Callable[[], list[tuple[Path, str]]] = search_roots) -> None:
+    def __init__(self, roots_provider: Callable[[], list[tuple[Path, str]]] = search_roots,
+                 apps_provider: Callable[[], list[tuple[str, str]]] = windows_start_apps) -> None:
         self._roots_provider = roots_provider
+        self._apps_provider = apps_provider
         self._entries: list[Entry] = []
         self._built = 0.0
         self._lock = threading.Lock()
@@ -180,6 +223,12 @@ class FileIndex:
 
     def _scan(self) -> list[Entry]:
         entries: list[Entry] = []
+        old = time.time() - 86400 * 365  # registered apps get no "recently used" boost
+        try:
+            for name, app_id in self._apps_provider():
+                entries.append(Entry(Path(name), _normalise(name), False, "apps", old, app_id=app_id, label=name))
+        except Exception:
+            log.exception("Listing installed apps failed")
         started = time.monotonic()
         for root, kind in self._roots_provider():
             max_depth = 8 if kind == "apps" else 6
@@ -221,7 +270,7 @@ class FileIndex:
         now = time.time()
         scored: list[tuple[float, Entry]] = []
         for e in self.entries():
-            if want == "file" and e.is_dir:
+            if want == "file" and (e.is_dir or e.app_id):
                 continue
             if want == "folder" and not e.is_dir:
                 continue
@@ -250,8 +299,9 @@ def _name_score(name: str, tokens: list[str]) -> float:
     if all(t in name for t in tokens):
         return 72.0 + 18.0 * len(phrase) / max(len(name), 1)
     hits = sum(1 for t in tokens if t in name)
-    if not hits:
-        return 0.0
+    if not hits:  # tolerate small misspellings ("spotfy", "calculater")
+        ratio = difflib.SequenceMatcher(None, phrase, name).ratio()
+        return 58.0 * ratio if ratio >= 0.8 else 0.0
     return 45.0 * hits / len(tokens) + 15.0 * difflib.SequenceMatcher(None, phrase, name).ratio()
 
 
@@ -262,6 +312,14 @@ def _launch(path: Path) -> None:
         subprocess.Popen(["open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
         subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _launch_app_id(app_id: str) -> None:
+    os.startfile("shell:AppsFolder\\" + app_id)  # noqa: S606 - Windows registered app
+
+
+def _launch_system(command: str) -> None:
+    os.startfile(command)  # noqa: S606 - fixed entry from SYSTEM_APPS
 
 
 def _launch_url(url: str) -> None:
@@ -416,7 +474,12 @@ class Toolbox:
 
     def __init__(self, config, index: FileIndex | None = None, http: httpx.Client | None = None,
                  launcher: Callable[[Path], None] = _launch, url_launcher: Callable[[str], None] = _launch_url,
-                 host_check: Callable[[str], bool] = _is_public_host) -> None:
+                 host_check: Callable[[str], bool] = _is_public_host,
+                 app_launcher: Callable[[str], None] | None = None,
+                 system_launcher: Callable[[str], None] | None = None) -> None:
+        self.google = GoogleBridge(config)
+        self._launch_app = app_launcher or _launch_app_id
+        self._launch_system = system_launcher or _launch_system
         self._config = config
         self.index = index or FileIndex()
         self._http = http
@@ -455,6 +518,22 @@ class Toolbox:
                 _spec("open_website", "Open a website in the user's web browser.",
                       {"url": "URL or a well-known site name such as youtube"}),
             ]
+            if self.google.configured:
+                tools += [
+                    _spec("google_doc", "Create, edit or read the user's Google Docs. action: create (new doc from "
+                          "title + text), append (add text to the end), replace (replace 'find' with 'text'), read, "
+                          "or list. Text may use '# Heading' and '- bullet' lines.",
+                          {"action": "create | append | replace | read | list",
+                           "document": "document name, link or ID (not needed for create)",
+                           "title": "title for a new document", "text": "text to write, or the replacement",
+                           "find": "text to find (replace only)"}, required=["action"]),
+                    _spec("google_slides", "Create, extend or read the user's Google Slides. action: create (new deck), "
+                          "add (append slides), read, or list. For create/add, text is an outline: slides separated "
+                          "by blank lines, first line of each is the slide title, other lines are bullet points.",
+                          {"action": "create | add | read | list",
+                           "presentation": "presentation name, link or ID (not needed for create)",
+                           "title": "title of a new presentation", "text": "slide outline"}, required=["action"]),
+                ]
         return tools
 
     def run(self, name: str, arguments: dict | None) -> str:
@@ -467,6 +546,8 @@ class Toolbox:
             "web_search": (self.web_enabled, lambda: self.web_search(str(args.get("query", "")))),
             "read_webpage": (self.web_enabled, lambda: self.read_webpage(str(args.get("url", "")))),
             "open_website": (self.web_enabled, lambda: self.open_website(str(args.get("url", "")))),
+            "google_doc": (self.web_enabled, lambda: self._google(self.google.doc, args, ("action", "document", "text", "find", "title"))),
+            "google_slides": (self.web_enabled, lambda: self._google(self.google.slides, args, ("action", "presentation", "title", "text"))),
         }
         if name not in handlers:
             return json.dumps({"ok": False, "error": f"unknown tool {name}"})
@@ -481,26 +562,51 @@ class Toolbox:
             log.exception("Tool %s failed", name)
             return json.dumps({"ok": False, "error": f"{exc.__class__.__name__}: {exc}"})
 
+    @staticmethod
+    def _google(fn, args: dict, keys: tuple[str, ...]) -> dict:
+        try:
+            result = fn(**{k: str(args.get(k) or "") for k in keys})
+        except BridgeError as exc:
+            raise ToolError(str(exc)) from None
+        result.pop("ok", None)
+        return result
+
     # ---------------------------------------------------------------- files
     def resolve(self, query: str, want: str = "any") -> tuple[Path, float]:
+        path, score, _ = self._resolve(query, want)
+        return path, score
+
+    def _resolve(self, query: str, want: str = "any") -> tuple[Path, float, Entry | None]:
         query = query.strip().strip("\"'")
         if not query:
             raise ToolError("no file name given")
         explicit = Path(os.path.expandvars(os.path.expanduser(query)))
         if explicit.is_absolute() and explicit.exists():
-            return explicit, 100.0
+            return explicit, 100.0, None
         folders = known_folders()
         key = " ".join(_query_tokens(query))
         if key in folders and want != "file":
-            return folders[key], 100.0
+            return folders[key], 100.0, None
         matches = self.index.search(query, limit=1, want=want)
         if not matches or matches[0][0] < 40:
             raise ToolError(f"I couldn't find anything called '{query}' in your folders or Start Menu")
         score, entry = matches[0]
-        return entry.path, score
+        return entry.path, score, entry
 
     def open_target(self, query: str, min_score: float = 0.0) -> dict:
-        path, score = self.resolve(query)
+        key = " ".join(_normalise(query).replace("the ", "").split())
+        try:
+            path, score, entry = self._resolve(query)
+        except ToolError:
+            path, score, entry = None, 0.0, None
+        if entry is not None and entry.app_id and score >= max(min_score, 40):
+            self._launch_app(entry.app_id)
+            return {"opened": entry.label, "name": entry.label, "kind": "app", "confidence": round(score)}
+        if key in SYSTEM_APPS and sys.platform == "win32" and score < 95:
+            self._launch_system(SYSTEM_APPS[key])
+            return {"opened": SYSTEM_APPS[key], "name": query.strip().title(), "kind": "app", "confidence": 95}
+        if path is None:
+            raise ToolError(f"I couldn't find anything called '{query}' in your folders or Start Menu")
         if score < min_score:
             raise ToolError(f"no confident match for '{query}'")
         if path.suffix.lower() in RUNNABLE_EXTENSIONS:
@@ -646,7 +752,7 @@ def _looks_textual(path: Path) -> bool:
     return controls <= len(text) * 0.01
 
 
-def _spec(name: str, description: str, params: dict[str, str]) -> dict:
+def _spec(name: str, description: str, params: dict[str, str], required: list[str] | None = None) -> dict:
     return {
         "type": "function",
         "function": {
@@ -655,7 +761,7 @@ def _spec(name: str, description: str, params: dict[str, str]) -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {k: {"type": "string", "description": v} for k, v in params.items()},
-                "required": list(params),
+                "required": list(params) if required is None else required,
             },
         },
     }
@@ -667,6 +773,10 @@ def describe_call(name: str, args: dict) -> str:
     labels = {
         "open_file": "Opening", "find_files": "Looking for", "read_file": "Reading",
         "web_search": "Searching the web", "read_webpage": "Reading", "open_website": "Opening",
+        "google_doc": "Google Docs", "google_slides": "Google Slides",
     }
+    if name in ("google_doc", "google_slides") and isinstance(args, dict):
+        target = args.get("document") or args.get("presentation") or args.get("title") or ""
+        return f"{labels[name]}: {args.get('action', '')} {target}".strip()
     label = labels.get(name, name)
     return f"{label}: {arg[:80]}" if arg else label

@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import threading
 import time
 import zipfile
@@ -79,15 +80,19 @@ class Launches:
 @pytest.fixture
 def box(config, home):
     launched = Launches()
-    tb = Toolbox(config, index=FileIndex(lambda: home["roots"]), launcher=launched.paths.append,
-                 url_launcher=launched.urls.append, host_check=lambda h: h not in ("localhost", "127.0.0.1", "192.168.1.1"))
+    apps = [("Calculator", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
+            ("WhatsApp", "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App")]
+    tb = Toolbox(config, index=FileIndex(lambda: home["roots"], apps_provider=lambda: apps), launcher=launched.paths.append,
+                 url_launcher=launched.urls.append, host_check=lambda h: h not in ("localhost", "127.0.0.1", "192.168.1.1"),
+                 app_launcher=lambda app_id: launched.paths.append(Path("shell:AppsFolder") / app_id),
+                 system_launcher=lambda cmd: launched.paths.append(Path("system") / cmd))
     tb.launched = launched
     return tb
 
 
 def web_box(config, handler):
     client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
-    return Toolbox(config, index=FileIndex(lambda: []), http=client, url_launcher=lambda u: None,
+    return Toolbox(config, index=FileIndex(lambda: [], apps_provider=lambda: []), http=client, url_launcher=lambda u: None,
                    host_check=lambda h: h not in ("localhost", "127.0.0.1", "10.0.0.5"))
 
 
@@ -179,7 +184,7 @@ def test_index_scan_is_bounded(config, tmp_path, monkeypatch):
     for i in range(50):
         (tmp_path / f"f{i}.txt").write_text("x")
     monkeypatch.setattr(tools, "MAX_SCAN_FILES", 10)
-    assert len(FileIndex(lambda: [(tmp_path, "user")]).entries()) == 10
+    assert len(FileIndex(lambda: [(tmp_path, "user")], apps_provider=lambda: []).entries()) == 10
 
 
 # ------------------------------------------------------------------ web
@@ -408,3 +413,57 @@ def test_model_tool_calls_reach_the_hud(config, mock_ollama, box, home):
         assert "Rent 1200" in "".join(p["text"] for p in events.of("assistant_token"))
     finally:
         assistant.shutdown()
+
+
+# ------------------------------------------------------------------ Windows registered apps
+
+
+def test_store_apps_open_by_app_id(box):
+    result = box.open_target("whatsapp")
+    assert result == {"opened": "WhatsApp", "name": "WhatsApp", "kind": "app", "confidence": result["confidence"]}
+    assert box.launched.paths[-1] == Path("shell:AppsFolder") / "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App"
+
+
+def test_registered_apps_are_never_read_as_documents(box):
+    with pytest.raises(ToolError):
+        box.read_file("whatsapp")
+
+
+def test_misspelled_app_is_found_by_the_model_tool_but_not_the_fast_path(box):
+    assert box.open_target("calculater")["name"] == "Calculator"
+    with pytest.raises(ToolError):
+        box.open_target("calculater", min_score=70)
+
+
+def test_system_aliases_on_windows(box, monkeypatch):
+    import core.tools as tools
+
+    monkeypatch.setattr(tools.sys, "platform", "win32")
+    assert box.open_target("settings")["kind"] == "app"
+    assert box.launched.paths[-1] == Path("system") / "ms-settings:"
+    box.open_target("task manager")
+    assert box.launched.paths[-1] == Path("system") / "taskmgr.exe"
+
+
+def test_start_apps_parsing():
+    from types import SimpleNamespace
+
+    from core.tools import windows_start_apps
+
+    def runner(output):
+        return lambda *a, **k: SimpleNamespace(stdout=output)
+
+    listing = json.dumps([{"Name": "Spotify", "AppID": "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"},
+                          {"Name": "Uninstall Foo", "AppID": "x"}, {"Name": "", "AppID": "y"}])
+    assert windows_start_apps(runner(listing)) == [("Spotify", "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify")]
+    assert windows_start_apps(runner('{"Name": "Edge", "AppID": "MSEdge"}')) == [("Edge", "MSEdge")]
+    assert windows_start_apps(runner("not json")) == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs Windows")
+def test_real_windows_start_apps():
+    from core.tools import windows_start_apps
+
+    apps = windows_start_apps()
+    print(f"{len(apps)} Start menu apps, e.g. {apps[:5]}")
+    assert apps, "Get-StartApps returned nothing"

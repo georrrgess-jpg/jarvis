@@ -32,7 +32,7 @@ from core.config import Config, app_data_dir, resource_path  # noqa: E402
 
 log = logging.getLogger("jarvis")
 
-ALLOWED_EXTERNAL_URLS = ("https://ollama.com/", "https://github.com/ollama/")
+ALLOWED_EXTERNAL_URLS = ("https://ollama.com/", "https://github.com/ollama/", "https://script.google.com/")
 WEBVIEW2_DOWNLOAD_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
 # Windows MessageBox flags
@@ -390,6 +390,26 @@ class JarvisAPI:
             return {"ok": True, "settings": self._assistant.update_settings(changes or {})}
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+
+    # -- Google Docs & Slides bridge ---------------------------------------
+    def google_status(self) -> dict:
+        bridge = self._assistant.tools.google
+        return {"configured": bridge.configured, "url": self._assistant.config.get("google_script_url") or ""}
+
+    def google_script(self) -> str:
+        return self._assistant.tools.google.script_source()
+
+    def google_connect(self, url: str) -> dict:
+        from core.google_bridge import BridgeError
+
+        try:
+            info = self._assistant.tools.google.connect(str(url or ""))
+            return {"ok": True, "user": info.get("user")}
+        except BridgeError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def google_disconnect(self) -> None:
+        self._assistant.config.update({"google_script_url": ""})
 
     def list_voices(self) -> list:
         return self._assistant.list_voices()

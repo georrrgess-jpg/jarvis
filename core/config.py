@@ -30,6 +30,9 @@ DEFAULTS: dict[str, Any] = {
     # Abilities (tools the model may use)
     "allow_files": True,  # find, open and read files / apps on this computer
     "allow_internet": True,  # web search, read and open web pages
+    # Google Docs & Slides via the user's own Apps Script bridge
+    "google_script_url": "",
+    "google_bridge_token": "",
     # Voice output (edge-tts)
     "voice": "en-GB-RyanNeural",
     "speech_rate": 0,  # percent, -50..50

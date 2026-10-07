@@ -928,9 +928,47 @@
       if (key === 'frameless') toast('Window style changes on next launch.', 'info');
       if (key === 'voice') toast(`Voice set to ${voiceShort(r.settings.voice)}.`, 'ok', 2500);
     },
-    open() { this.fill(); this.fillVoices(); this.el.classList.add('open'); this.el.setAttribute('aria-hidden', 'false'); },
+    open() { this.fill(); this.fillVoices(); Google.refresh(); this.el.classList.add('open'); this.el.setAttribute('aria-hidden', 'false'); },
     close() { this.el.classList.remove('open'); this.el.setAttribute('aria-hidden', 'true'); },
     toggle() { this.el.classList.contains('open') ? this.close() : this.open(); },
+  };
+
+  // ========================================================================= google docs setup
+  const Google = {
+    async refresh() {
+      const st = await call('google_status');
+      if (!st) return;
+      $('#g-status').textContent = st.configured
+        ? 'Connected. Ask J.A.R.V.I.S. to create, edit or read your Google Docs and Slides.'
+        : 'Not connected. JARVIS can create and edit your Docs and Slides once you link your Google account (free, about 3 minutes).';
+      $('#g-status').classList.toggle('ok', st.configured);
+      $('#g-setup').textContent = st.configured ? 'RECONNECT' : 'SET UP';
+      $('#g-disconnect').classList.toggle('hidden', !st.configured);
+    },
+    open() { $('#google').classList.remove('hidden'); $('#g-url').value = ''; },
+    close() { $('#google').classList.add('hidden'); },
+    async copy() {
+      const script = await call('google_script');
+      if (!script) { toast('Could not load the script.', 'error'); return; }
+      try { await navigator.clipboard.writeText(script); }
+      catch {
+        const ta = Object.assign(document.createElement('textarea'), { value: script });
+        document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove();
+      }
+      $('#g-copy').textContent = 'COPIED ✓';
+      toast('Script copied: paste it into Apps Script.', 'ok');
+    },
+    async connect() {
+      const btn = $('#g-connect');
+      btn.classList.add('busy'); btn.disabled = true;
+      const r = await call('google_connect', $('#g-url').value.trim());
+      btn.classList.remove('busy'); btn.disabled = false;
+      if (r && r.ok) {
+        toast(`Google Docs linked${r.user ? ` · ${r.user}` : ''}.`, 'ok', 6000);
+        Chat.system('Google Docs & Slides linked.', 'ok');
+        this.close(); this.refresh();
+      } else toast((r && r.error) || 'Connection failed.', 'error', 8000);
+    },
   };
 
   // ========================================================================= events from Python
@@ -1083,6 +1121,11 @@
     $$('.pywebview-drag-region').forEach((el) => el.addEventListener('dblclick', () => call('window_toggle_maximize')));
 
     $('#boot-close').onclick = () => (api ? call('window_close') : window.close());
+    $('#g-setup').onclick = () => Google.open();
+    $('#g-disconnect').onclick = async () => { await call('google_disconnect'); Google.refresh(); toast('Google Docs disconnected.', 'info'); };
+    $('#g-copy').onclick = () => Google.copy();
+    $('#g-connect').onclick = () => Google.connect();
+    $('#g-cancel').onclick = () => Google.close();
     $('#ol-retry').onclick = () => Ollama.retry(false);
     $('#ol-start').onclick = () => Ollama.start();
     $('#ol-pull').onclick = () => Ollama.pull();
@@ -1104,7 +1147,8 @@
       if (!S.booted) return;
       if (e.code === 'Space' && !typing()) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
-        if ($('#settings').classList.contains('open')) Settings.close();
+        if (!$('#google').classList.contains('hidden')) Google.close();
+        else if ($('#settings').classList.contains('open')) Settings.close();
         else if (document.activeElement === $('#cmd') && $('#cmd').value) $('#cmd').value = '';
         else call('interrupt');
         return;

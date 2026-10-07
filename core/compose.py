@@ -29,10 +29,10 @@ KINDS: dict[str, tuple[str, int]] = {
     "powerpoint": ("presentation", 0), "document": ("document", 600), "doc": ("document", 600),
     "google doc": ("document", 600),
 }
-SHORT_FORM = {"poem", "paragraph", "description"}  # spoken in chat unless a document is asked for
+# Spoken in chat unless a document is asked for ("give me a summary of..." wants an answer, not a file).
+SHORT_FORM = {"poem", "paragraph", "description", "summary", "overview", "outline", "plan"}
 
-_VERB = (r"(?:write|draft|compose|create|make|prepare|produce|generate|put\s+together|do|type(?:\s+up)?|build|"
-         r"come\s+up\s+with|give\s+me|can\s+i\s+(?:get|have))")
+_VERB = r"(?:write|draft|compose|create|make|prepare|produce|generate|put\s+together|do|type(?:\s+up)?|build)"
 _LEAD = (r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you |will you |i (?:want|need) you to |"
          r"i'd like you to |go ahead and |now )*")
 _KIND_WORDS = "|".join(sorted((re.escape(k).replace(r"\ ", r"\s+") for k in KINDS), key=len, reverse=True))
@@ -119,7 +119,7 @@ def parse_write_request(text: str, google_ready: bool) -> WriteRequest | None:
     if lang:
         language = lang.group(1).capitalize()
         topic = topic[: lang.start()].strip()
-    if not topic or len(topic) > 200:
+    if not topic or len(topic) > 200 or re.fullmatch(r"(?:it|this|that|these|those|them|me|us)", topic, re.I):
         return None
     kind, default_words = KINDS.get(kind_word, ("document", 600))
 

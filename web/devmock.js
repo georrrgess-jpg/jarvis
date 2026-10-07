@@ -18,7 +18,7 @@ window.createJarvisMock = function createJarvisMock() {
   const settings = {
     ollama_host: 'http://localhost:11434', model: 'llama3.2', temperature: 0.7, max_history_turns: 12, custom_instructions: '',
     voice: 'en-GB-RyanNeural', speech_rate: 0, speech_pitch: 0, voice_enabled: true, sfx_enabled: true, sfx_volume: 0.45,
-    allow_files: true, allow_internet: true, wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 0.9,
+    allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 0.9,
     listen_timeout: 8, max_phrase_seconds: 25, auto_listen: false, user_title: 'sir', frameless: true,
   };
   if (params.has('gold')) settings.google_script_url = 'https://script.google.com/macros/s/preview/exec';
@@ -87,7 +87,28 @@ window.createJarvisMock = function createJarvisMock() {
     play_sfx: async () => {},
     send_text: async (text) => {
       cancelAll();
-      emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text' });
+      const spanish = /[¿¡ñ]|\b(qué|hola|escribe|biografía)\b/i.test(text);
+      emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text', ...(spanish ? { lang: 'es', lang_name: 'Spanish' } : {}) });
+      if (/\b(bio|biography|essay|presentation|slides)\b/i.test(text)) {
+        const slides = /presentation|slides/i.test(text);
+        const topic = (text.match(/(?:on|about|of)\s+(.+)$/i) || [, 'Lionel Messi'])[1];
+        setState('THINKING');
+        later(300, () => emit({ type: 'tool_activity', tool: 'web_search', label: `Searching the web: ${topic}` }));
+        later(1100, () => emit({ type: 'tool_activity', tool: 'compose', label: `Writing ${slides ? 'presentation' : 'biography'}: ${topic}` }));
+        [120, 260, 410, 588].forEach((w, i) => later(1400 + i * 500, () => emit({ type: 'activity', label: `Writing · ${w} words` })));
+        later(3600, () => emit({ type: 'document', doc_kind: slides ? 'slides' : 'doc', title: slides ? `${topic}: An Overview` : `${topic}: The Little Genius`, url: 'https://docs.google.com/document/d/preview/edit' }));
+        later(3700, () => reply(`Done. I've written ${slides ? `an 8-slide presentation on ${topic}` : `a 612-word biography of ${topic}`} and opened it for you.`, true));
+        return true;
+      }
+      if (/\be-?mail\b/i.test(text)) {
+        setState('THINKING');
+        later(400, () => emit({ type: 'tool_activity', tool: 'email', label: 'Writing an email to Sarah Connor' }));
+        later(1500, () => emit({ type: 'email_draft', id: `m${++seq}`, to: 'sarah.connor@example.com', to_name: 'Sarah Connor', subject: 'Running a little late',
+          body: "Hi Sarah,\n\nJust a quick note to say I'm running about ten minutes late for our meeting. Sorry for the delay, I'll be there as soon as I can.\n\nBest regards,\nTony",
+          candidates: [{ email: 'sarah.connor@example.com', name: 'Sarah Connor' }, { email: 'slee@school.edu', name: 'Sarah Lee' }], can_send: true }));
+        later(1600, () => reply("I've drafted an email to Sarah Connor. Shall I send it?", true));
+        return true;
+      }
       const pick = /code|python|script/i.test(text) ? 2 : /diagnos|status|system/i.test(text) ? 1 : 0;
       reply(online ? answers[pick] : "I'm afraid my neural core is offline, sir.");
       return true;
@@ -150,6 +171,9 @@ window.createJarvisMock = function createJarvisMock() {
     google_script: async () => '// J.A.R.V.I.S. bridge script (preview)',
     google_connect: async (url) => (!url && settings.google_script_url ? { ok: true, user: 'tony@example.com' } : /\/exec$/.test(url) ? (settings.google_script_url = url, { ok: true, user: 'tony@example.com' }) : { ok: false, error: 'that doesn\'t look like a web app URL (it should end in /exec)' }),
     google_disconnect: async () => { settings.google_script_url = ''; },
+    email_send: async (id, to) => { setTimeout(() => emit({ type: 'email_status', id, status: 'sent', to }), 600); return { ok: true }; },
+    email_open_gmail: async (id) => { emit({ type: 'email_status', id, status: 'opened' }); return { ok: true }; },
+    email_discard: async (id) => { emit({ type: 'email_status', id, status: 'discarded' }); },
     preview_voice: async () => reply('Good day, sir. This is how I will sound from now on.', true),
     open_url: async (url) => { window.open(url, '_blank'); return true; },
     window_minimize: async () => {}, window_toggle_maximize: async () => {}, window_toggle_fullscreen: async () => {}, window_close: async () => {},

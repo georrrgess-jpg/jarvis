@@ -850,8 +850,9 @@ class Assistant:
         self._emit_turn(turn, "email_draft", **draft.as_event(), can_send=google.can_email)
         who = to_name or to
         if not to:
+            button = "Send" if google.can_email else "Open in Gmail"
             yield (f"I've drafted the email, {self.title}, but I couldn't find {req.who}'s address. "
-                   "Type it into the card on screen and press Send.")
+                   f"Type it into the card on screen and press {button}.")
             return
         self._awaiting = draft
         yield f"I've drafted an email to {who}. Shall I send it?"

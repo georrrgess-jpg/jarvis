@@ -255,11 +255,11 @@
         <svg class="warn-hex" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 3 42 13.5v21L24 45 6 34.5v-21Z"/><path d="M16 24h16M24 16v16" class="wh-mark"/></svg>
         <div><div class="mc-kicker">INTEGRATION · GOOGLE WORKSPACE</div><h2 id="g-title">Link Google Docs, Slides &amp; Sheets</h2></div>
       </div>
-      <p class="mc-lead">A small script runs inside <b>your own</b> Google account and lets J.A.R.V.I.S. create and edit your Docs, Slides and Sheets. Free, no API keys, and you can remove it any time.</p>
+      <p class="mc-lead">A small script runs inside <b>your own</b> Google account and lets J.A.R.V.I.S. write your Docs, Slides and Sheets and send the emails you approve. Free, no API keys, and you can remove it any time.</p>
       <ol class="steps">
         <li><span class="step-n">01</span><div><b>Copy the script</b><small>It already contains your private key.</small></div><button class="btn ghost" id="g-copy">COPY SCRIPT</button></li>
         <li><span class="step-n">02</span><div><b>Paste it into Apps Script</b><small class="g-new">Open Apps Script, delete the sample code, paste, then press Save (Ctrl+S).</small><small class="g-upd">Open your existing JARVIS project in Apps Script, select all the old code (Ctrl+A), paste over it, then press Save (Ctrl+S).</small></div><button class="btn ghost" data-open="https://script.google.com/home/projects/create">OPEN APPS SCRIPT</button></li>
-        <li><span class="step-n">03</span><div><b>Deploy it</b><small class="g-upd">Deploy ▸ Manage deployments ▸ pencil icon ▸ <i>Version: New version</i> ▸ Deploy. If Google asks, Authorize access again. Your URL stays the same.</small><small class="g-new">Deploy ▸ New deployment ▸ gear icon ▸ <i>Web app</i>. Set <i>Execute as: Me</i> and <i>Who has access: Anyone</i>, press Deploy, then Authorize access (choose your account ▸ Advanced ▸ Go to project ▸ Allow).</small></div></li>
+        <li><span class="step-n">03</span><div><b>Deploy it</b><small class="g-upd">Deploy ▸ Manage deployments ▸ pencil icon ▸ <i>Version: New version</i> ▸ Deploy. Google will ask you to Authorize access again (the new version can send the emails you approve). Your URL stays the same.</small><small class="g-new">Deploy ▸ New deployment ▸ gear icon ▸ <i>Web app</i>. Set <i>Execute as: Me</i> and <i>Who has access: Anyone</i>, press Deploy, then Authorize access (choose your account ▸ Advanced ▸ Go to project ▸ Allow).</small></div></li>
         <li class="g-new"><span class="step-n">04</span><div><b>Paste the Web app URL</b><small>It ends in <code>/exec</code>.</small>
           <input id="g-url" class="url-input" type="text" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec"></div></li>
       </ol>
@@ -267,7 +267,7 @@
         <button class="btn primary" id="g-connect"><span>CONNECT</span></button>
         <button class="btn ghost" id="g-cancel">CANCEL</button>
       </div>
-      <div class="mc-foot" id="g-foot">Afterwards try: “Create a Google Sheet called Budget with rent 1200 and food 300” or “Delete slide 3 of my Pitch deck.”</div>
+      <div class="mc-foot" id="g-foot">Afterwards try: “Write a bio on Lionel Messi”, “Make a presentation about the solar system” or “Email Sarah saying I'll be late.”</div>
     </div>
   </div>
 
@@ -294,7 +294,7 @@
         <label class="toggle"><input type="checkbox" data-key="allow_internet"><i></i><span>Search and read the internet</span></label>
       </fieldset>
       <fieldset>
-        <legend>Google Docs, Slides &amp; Sheets</legend>
+        <legend>Google: Docs, Slides, Sheets &amp; Gmail</legend>
         <p class="field-note" id="g-status">Not connected. JARVIS can create and edit your Docs, Slides and Sheets once you link your Google account (free, about 3 minutes).</p>
         <div class="row"><button class="btn ghost sm" id="g-setup">SET UP</button><button class="btn ghost sm hidden" id="g-update">UPDATE SCRIPT</button><button class="btn ghost sm hidden" id="g-disconnect">DISCONNECT</button></div>
       </fieldset>
@@ -317,7 +317,18 @@
             <option value="vosk">Vosk (offline, optional)</option>
           </select>
         </label>
-        <label class="field"><span>Language</span><input data-key="stt_language" type="text" spellcheck="false" placeholder="en-US"></label>
+        <label class="field"><span>Main language</span><input data-key="stt_language" type="text" spellcheck="false" placeholder="en-US" list="locales"></label>
+        <label class="toggle"><input type="checkbox" data-key="auto_language"><i></i><span>Detect my language automatically: reply and speak in it</span></label>
+        <label class="field"><span>Other languages I speak</span><input data-key="stt_extra_languages" type="text" spellcheck="false" placeholder="e.g. es-ES, fr-FR (blank = this PC's language)" list="locales"></label>
+        <datalist id="locales">
+          <option value="en-US">English (US)</option><option value="en-GB">English (UK)</option><option value="es-ES">Spanish (Spain)</option>
+          <option value="es-MX">Spanish (Mexico)</option><option value="fr-FR">French</option><option value="de-DE">German</option>
+          <option value="it-IT">Italian</option><option value="pt-BR">Portuguese (Brazil)</option><option value="pt-PT">Portuguese (Portugal)</option>
+          <option value="nl-NL">Dutch</option><option value="pl-PL">Polish</option><option value="tr-TR">Turkish</option>
+          <option value="ru-RU">Russian</option><option value="uk-UA">Ukrainian</option><option value="ar-SA">Arabic</option>
+          <option value="hi-IN">Hindi</option><option value="zh-CN">Chinese (Mandarin)</option><option value="ja-JP">Japanese</option>
+          <option value="ko-KR">Korean</option><option value="sv-SE">Swedish</option><option value="el-GR">Greek</option>
+        </datalist>
         <label class="field"><span>End of speech pause <output id="out-pause"></output></span><input id="set-pause" data-key="pause_threshold" type="range" min="0.4" max="3" step="0.1"></label>
         <label class="toggle"><input type="checkbox" data-key="wake_word"><i></i><span>Wake word: say “Hey Jarvis” to start listening</span></label>
         <label class="field"><span>Wake word sensitivity <output id="out-wake"></output></span><input id="set-wake" data-key="wake_sensitivity" type="range" min="0" max="1" step="0.05"></label>
@@ -328,6 +339,7 @@
         <label class="toggle"><input type="checkbox" data-key="sfx_enabled"><i></i><span>Interface sounds</span></label>
         <label class="field"><span>Sound volume <output id="out-sfx"></output></span><input id="set-sfx" data-key="sfx_volume" type="range" min="0" max="1" step="0.05"></label>
         <label class="field"><span>Address me as</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>
+        <label class="field"><span>Your name (for email sign-offs)</span><input data-key="user_name" type="text" maxlength="60" placeholder="e.g. Tony Stark"></label>
         <label class="toggle"><input type="checkbox" data-key="frameless"><i></i><span>Borderless HUD window (applies on restart)</span></label>
       </fieldset>
       <p class="drawer-foot" id="about">J.A.R.V.I.S. · runs locally · no API keys</p>

@@ -605,6 +605,20 @@ def run_selftest(report_path: str | None) -> int:
             raise RuntimeError(f"silence scored {max(scores):.2f}")
         return {"silence_score": round(max(scores), 3)}
 
+    def assistant_skills():
+        """The bundled request understanding: writing, email, language detection and the Google script."""
+        from core.compose import parse_write_request
+        from core.google_bridge import script_version
+        from core.language import detect
+        from core.mail import parse_email_request
+
+        bio = parse_write_request("write a bio on Lionel Messi", google_ready=True)
+        mail = parse_email_request("email Sarah saying I'm running late")
+        lang = detect("¿Qué hora es?").code
+        if not (bio and bio.topic == "Lionel Messi" and mail and mail.who == "Sarah" and lang == "es"):
+            raise RuntimeError(f"unexpected parse: {bio} {mail} {lang}")
+        return {"script_version": script_version(), "language": lang}
+
     def ollama_probe():
         from core.llm import LLMEngine
 
@@ -619,6 +633,7 @@ def run_selftest(report_path: str | None) -> int:
     check("config", config_roundtrip)
     check("telemetry", telemetry)
     check("wake_word", wake_word)
+    check("assistant_skills", assistant_skills)
     check("ollama_probe", ollama_probe)  # informational: offline is not a failure
     if sys.platform == "win32":  # elsewhere a display server may be absent during the build
         check("gui_backend", gui_backend)

@@ -197,3 +197,26 @@ def test_make_it_shorter_without_a_document_goes_to_the_model(writer):
     assistant.submit_text("make it shorter")
     events.wait_for(events.finished, timeout=20)
     assert not server.posts
+
+
+@pytest.mark.parametrize("text, target", [("give me a summary of the news", None), ("write a summary of this", None),
+                                          ("write a summary of the French Revolution", "chat"),
+                                          ("write a summary of the French Revolution in a google doc", "doc"),
+                                          ("make a plan for the weekend", "chat")])
+def test_short_answers_stay_in_chat(text, target):
+    req = parse_write_request(text, google_ready=True)
+    assert (req.target if req else None) == target
+
+
+def test_written_markdown_formats_correctly_in_google_docs():
+    from tests.test_google import run_gas
+
+    title, body = clean_document(BIO)
+    data = run_gas([{"token": "T0K3N", "action": "doc_create", "title": title, "text": body}])
+    assert data["results"][0]["ok"], data["results"]
+    paragraphs = data["files"][0]["paragraphs"]
+    assert paragraphs[0]["text"] == "Lionel Messi: The Little Genius" and paragraphs[0]["heading"] == "HEADING1"
+    assert any(p["text"] == "Early life" and p["heading"] == "HEADING2" for p in paragraphs)
+    born = next(p for p in paragraphs if p["text"].startswith("Lionel Andrés Messi was born"))
+    assert born["marks"] == [{"kind": "bold", "text": "24 June 1987"}], "**bold** becomes real bold, markers removed"
+    assert [p["text"] for p in paragraphs if p["list"]] == ["Barcelona (2004–2021)", "Paris Saint-Germain (2021–2023)", "Inter Miami (2023–)"]

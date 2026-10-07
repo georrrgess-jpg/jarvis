@@ -436,9 +436,16 @@
 
   // ========================================================================= chat log
   function renderMarkdown(src) {
-    const inline = (t) => esc(t)
+    const links = (t) => t
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, text, url) => `<a href="#" data-url="${url}">${text}</a>`)
+      .replace(/(^|[\s(])(https:\/\/(?:docs|mail)\.google\.com\/[^\s<)]+)/g, (m, pre, url) => `${pre}<a href="#" data-url="${url}">${url.length > 48 ? url.slice(0, 46) + '…' : url}</a>`);
+    const blocks = (t) => t
+      .replace(/^(#{1,3})[ \t]+(.+)$/gm, (m, h, text) => `<span class="md-h md-h${h.length}">${text}</span>`)
+      .replace(/^[ \t]*[-*•][ \t]+/gm, '<span class="md-li">•</span>');
+    const inline = (t) => blocks(links(esc(t)
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)\*(?!\w)/g, '$1<em>$2</em>')));
     const parts = src.split('```');
     return parts.map((part, i) => {
       if (i % 2 === 0) {
@@ -512,7 +519,8 @@
       return el;
     },
     user(ev) {
-      const el = this.make('user', 'YOU', `<span class="src">${ev.source === 'voice' ? 'VOICE' : 'TEXT'}</span>`);
+      const lang = ev.lang ? `<span class="src lang" title="Detected language: ${esc(ev.lang_name || ev.lang)}">${esc(ev.lang.toUpperCase())}</span>` : '';
+      const el = this.make('user', 'YOU', `<span class="src">${ev.source === 'voice' ? 'VOICE' : 'TEXT'}</span>${lang}`);
       $('.msg-body', el).textContent = ev.text;
       this.count++; this.updateCount();
       this.scroll(true);
@@ -526,6 +534,93 @@
       const stick = this.pinned();
       this.log.append(el);
       this.scroll(stick);
+    },
+    card(cls, html) {
+      $('#log-empty')?.remove();
+      const el = document.createElement('div');
+      el.className = `card ${cls}`;
+      el.innerHTML = html;
+      const stick = this.pinned();
+      this.log.append(el);
+      this.scroll(stick || true);
+      return el;
+    },
+    document(ev) {
+      const slides = ev.doc_kind === 'slides';
+      const icon = slides
+        ? '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="12" rx="1.5"/><path d="M8 20h8M12 17v3M7 9h6M7 12h10"/></svg>'
+        : '<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4M9 11h6M9 14h6M9 17h4"/></svg>';
+      const el = this.card(`doc-card ${slides ? 'slides' : 'doc'}`, `
+        <div class="dc-icon">${icon}</div>
+        <div class="dc-main"><div class="dc-kicker">${slides ? 'GOOGLE SLIDES' : 'GOOGLE DOC'} · SAVED</div><div class="dc-title"></div></div>
+        <button class="btn ghost sm dc-open">OPEN ↗</button>`);
+      $('.dc-title', el).textContent = ev.title || 'Untitled';
+      $('.dc-open', el).onclick = () => call('open_url', ev.url);
+      if (!ev.url) $('.dc-open', el).remove();
+    },
+    email(ev) {
+      const el = this.card('mail-card', `
+        <div class="mc-row mc-headline"><span class="mail-kicker">EMAIL DRAFT</span><span class="mail-state">AWAITING YOUR APPROVAL</span></div>
+        <label class="mail-field"><span>TO</span><input class="m-to" type="email" spellcheck="false" placeholder="name@example.com" list="mail-cands-${ev.id}"></label>
+        <datalist id="mail-cands-${ev.id}"></datalist>
+        <label class="mail-field"><span>SUBJECT</span><input class="m-subject" type="text"></label>
+        <textarea class="m-body" rows="6" spellcheck="true"></textarea>
+        <div class="mail-actions">
+          <button class="btn primary sm m-send"><span>${ev.can_send ? 'SEND' : 'OPEN IN GMAIL'}</span></button>
+          ${ev.can_send ? '<button class="btn ghost sm m-gmail">EDIT IN GMAIL</button>' : ''}
+          <button class="btn ghost sm m-discard">DISCARD</button>
+          <span class="mail-note">${ev.can_send ? 'Nothing is sent until you approve it.' : 'Update the Google script in Settings to send directly.'}</span>
+        </div>`);
+      el.dataset.id = ev.id;
+      $('.m-to', el).value = ev.to || '';
+      $('.m-subject', el).value = ev.subject || '';
+      const body = $('.m-body', el);
+      body.value = ev.body || '';
+      const grow = () => { body.style.height = 'auto'; body.style.height = `${Math.min(320, body.scrollHeight + 2)}px`; };
+      body.addEventListener('input', grow); requestAnimationFrame(grow);
+      const list = $(`#mail-cands-${ev.id}`, el);
+      (ev.candidates || []).forEach((c) => { const o = document.createElement('option'); o.value = c.email; o.label = c.name || c.email; list.append(o); });
+      if (!ev.to) { $('.m-to', el).classList.add('need'); setTimeout(() => $('.m-to', el).focus(), 300); }
+      const fields = () => [ev.id, $('.m-to', el).value.trim(), $('.m-subject', el).value, body.value];
+      const busy = (on) => $$('button', el).forEach((b) => { b.disabled = on; });
+      $('.m-send', el).onclick = async () => {
+        if (ev.can_send && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test($('.m-to', el).value.trim())) {
+          $('.m-to', el).classList.add('need'); $('.m-to', el).focus(); toast('Enter the recipient\'s email address.', 'warn'); return;
+        }
+        busy(true); $('.m-send', el).classList.add('busy');
+        const r = await call(ev.can_send ? 'email_send' : 'email_open_gmail', ...fields());
+        $('.m-send', el).classList.remove('busy');
+        if (!r || !r.ok) { busy(false); toast((r && r.error) || 'The email could not be sent.', 'error', 7000); }
+      };
+      const gm = $('.m-gmail', el);
+      if (gm) gm.onclick = () => call('email_open_gmail', ...fields());
+      $('.m-discard', el).onclick = () => call('email_discard', ev.id);
+      $('.m-to', el).addEventListener('input', (e) => e.target.classList.remove('need'));
+    },
+    suggest() {
+      if ($('.suggest-card')) return;
+      const ideas = [
+        'Write a bio on Lionel Messi', 'Make a presentation about the solar system', 'Email Sarah saying I\'m running late',
+        'Open Spotify', 'Play GTA 5', 'What\'s the weather in London?', '¿Qué hora es en Tokio?',
+      ];
+      const el = this.card('suggest-card', '<div class="sg-kicker">TRY ASKING</div><div class="sg-list"></div>');
+      ideas.forEach((idea) => {
+        const b = document.createElement('button');
+        b.className = 'sg-chip'; b.type = 'button'; b.textContent = idea;
+        b.onclick = () => { const input = $('#cmd'); input.value = idea; input.focus(); input.setSelectionRange(idea.length, idea.length); };
+        $('.sg-list', el).append(b);
+      });
+    },
+    emailStatus(ev) {
+      const el = $(`.mail-card[data-id="${ev.id}"]`);
+      if (!el) return;
+      const label = { sent: 'SENT ✓', opened: 'OPENED IN GMAIL', discarded: 'DISCARDED', error: 'NOT SENT' }[ev.status] || ev.status;
+      $('.mail-state', el).textContent = label;
+      el.classList.remove('sent', 'opened', 'discarded', 'error');
+      el.classList.add(ev.status);
+      if (ev.status === 'error') { $$('button', el).forEach((b) => { b.disabled = false; }); toast(ev.error || 'The email could not be sent.', 'error', 7000); return; }
+      $$('input, textarea, button', el).forEach((n) => { n.disabled = true; });
+      if (ev.status === 'sent') call('play_sfx', 'notify');
     },
     start(id) {
       const el = this.make('jarvis pending', 'J.A.R.V.I.S.');
@@ -939,10 +1034,10 @@
       const st = await call('google_status');
       if (!st) return;
       $('#g-status').textContent = !st.configured
-        ? 'Not connected. JARVIS can create and edit your Docs, Slides and Sheets once you link your Google account (free, about 3 minutes).'
+        ? 'Not connected. Link your Google account (free, about 3 minutes) and JARVIS can write Docs and Slides, fill Sheets and send emails.'
         : st.outdated
-          ? 'Connected, but your Google script is an older version. Update it once (about a minute) to unlock Sheets, slide editing and rich formatting.'
-          : 'Connected. Ask J.A.R.V.I.S. to create, edit or read your Google Docs, Slides and Sheets.';
+          ? 'Connected, but your Google script is an older version. Update it once (about a minute) to unlock Gmail, Sheets and slide editing.'
+          : 'Connected. Ask J.A.R.V.I.S. to write Docs and Slides, fill Sheets and send emails.';
       $('#g-status').classList.toggle('ok', st.configured && !st.outdated);
       $('#g-status').classList.toggle('warn', !!(st.configured && st.outdated));
       $('#g-setup').textContent = st.configured ? 'RECONNECT' : 'SET UP';
@@ -1016,6 +1111,10 @@
         $('#mic-btn').classList.remove('woke'); void $('#mic-btn').offsetWidth; $('#mic-btn').classList.add('woke');
         break;
       case 'tool_activity': S.activity = ev.label; Chat.system(ev.label, 'tool'); Hud.updateSub(); break;
+      case 'activity': S.activity = ev.label; Hud.updateSub(); break;
+      case 'document': Chat.document(ev); break;
+      case 'email_draft': Chat.email(ev); break;
+      case 'email_status': Chat.emailStatus(ev); break;
       case 'notice': toast(ev.text, ev.level); break;
       case 'ollama_status': Ollama.update(ev); break;
       case 'core_stats': { const { type, ...c } = ev; S.core = c; Hud.updateCore(); break; }
@@ -1149,6 +1248,10 @@
     $('#ol-cancel-pull').onclick = () => call('cancel_pull');
     $('#ol-dismiss').onclick = () => Ollama.dismiss();
     $$('[data-open]').forEach((b) => (b.onclick = () => call('open_url', b.dataset.open)));
+    $('#log').addEventListener('click', (e) => {
+      const a = e.target.closest('a[data-url]');
+      if (a) { e.preventDefault(); call('open_url', a.dataset.url); }
+    });
     $$('[data-copy]').forEach((b) => (b.onclick = async () => {
       const text = $(b.dataset.copy).textContent;
       try { await navigator.clipboard.writeText(text); }
@@ -1227,10 +1330,11 @@
     S.booted = true;
     setTimeout(() => $('#boot').remove(), 1200);
     call('boot_complete');
+    setTimeout(() => Chat.suggest(), 5200);
     setTimeout(() => { if (S.ollama) Ollama.update(S.ollama); }, 1500);
     setTimeout(async () => {
       const st = await Google.refresh();
-      if (st && st.configured && st.outdated) Chat.system('Your Google script needs a one-time update for Sheets and slide editing: Settings ▸ Google ▸ UPDATE SCRIPT.', 'warn');
+      if (st && st.configured && st.outdated) Chat.system('Your Google script needs a one-time update for Gmail, Sheets and slide editing: Settings ▸ Google ▸ UPDATE SCRIPT.', 'warn');
     }, 4000);
   }
 

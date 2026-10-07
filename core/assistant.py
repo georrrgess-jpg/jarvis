@@ -236,14 +236,20 @@ class Assistant:
     # ================================================================== lifecycle
     def start(self) -> None:
         """Initialise subsystems. Runs on a background thread while the window loads."""
+        steps = (
+            ("audio output", self.audio.init),
+            ("interface sounds", self.sfx.load),
+            ("microphone", lambda: setattr(self, "_mic", self.stt.availability())),
+            ("ollama", self.check_ollama),
+        )
         try:
-            self.audio.init()
-            self.sfx.load()
-            self._mic = self.stt.availability()
-            self.check_ollama()
+            for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
+                log.info("Starting %s", name)
+                try:
+                    step()
+                except Exception:
+                    log.exception("%s failed to start", name)
             self.emit("mic_status", **{**self._mic, "engine": self.stt.engine_label()})
-        except Exception:
-            log.exception("Startup failed")
         finally:
             self._started.set()
 

@@ -97,7 +97,7 @@ def run_tests() -> None:
 
 def ensure_icon() -> Path | None:
     ico, png = ROOT / "assets" / "jarvis.ico", ROOT / "assets" / "jarvis.png"
-    if not ico.exists() and importlib.util.find_spec("PIL"):
+    if not (ico.exists() and png.exists()) and importlib.util.find_spec("PIL"):
         subprocess.run([sys.executable, str(ROOT / "assets" / "make_icon.py")], check=False)
     return ico if ico.exists() else (png if png.exists() else None)
 
@@ -139,6 +139,8 @@ def pyinstaller_args(args: argparse.Namespace, icon: Path | None, version: str) 
         "--onedir" if args.onedir else "--onefile",
         "--add-data", f"{ROOT / 'web'}{sep}web",
         "--add-data", f"{ROOT / 'assets' / 'jarvis.png'}{sep}assets",
+        # Windows needs a real .ico for the window icon (WinForms rejects PNGs and crashes)
+        "--add-data", f"{ROOT / 'assets' / 'jarvis.ico'}{sep}assets",
         "--additional-hooks-dir", str(ROOT / "hooks"),
         "--hidden-import", "pyaudio",
         "--collect-submodules", "core",
@@ -149,6 +151,12 @@ def pyinstaller_args(args: argparse.Namespace, icon: Path | None, version: str) 
         cli += ["--icon", str(icon)]
     if IS_WIN:
         cli += ["--version-file", str(write_version_file(version))]
+    splash = ROOT / "assets" / "splash.png"
+    if IS_WIN and not args.no_splash and splash.exists():
+        if importlib.util.find_spec("tkinter"):  # the bootloader splash bundles its own minimal Tcl/Tk
+            cli += ["--splash", str(splash)]
+        else:
+            print("tkinter is not available; building without the start-up splash screen")
     for mod in EXCLUDES:
         cli += ["--exclude-module", mod]
     return cli
@@ -187,6 +195,7 @@ def main() -> int:
     parser.add_argument("--console", action="store_true", help="keep the console window (debugging)")
     parser.add_argument("--skip-tests", action="store_true", help="skip the unit tests")
     parser.add_argument("--no-selftest", action="store_true", help="skip running the built executable's self-test")
+    parser.add_argument("--no-splash", action="store_true", help="don't show a splash screen while the exe unpacks")
     args = parser.parse_args()
 
     os.chdir(ROOT)

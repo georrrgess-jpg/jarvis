@@ -30,7 +30,7 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
 1. Install **Ollama** from <https://ollama.com/download>, then in a terminal: `ollama run llama3.2`
 2. Run `Jarvis.exe`.
 
-That's it. Settings and logs live in `%APPDATA%\JARVIS\` (`config.json`, `jarvis.log`).
+That's it. Settings and logs live in `%APPDATA%\JARVIS\` (`config.json`, `jarvis.log`). If J.A.R.V.I.S. ever fails to start it shows an error dialog; the details are in `jarvis.log` (and `%TEMP%\jarvis-crash.txt`).
 Because the exe isn't code-signed, Windows SmartScreen may show a warning on first launch: choose *More info → Run anyway*.
 The UI needs the Microsoft Edge **WebView2** runtime, which ships with Windows 10/11.
 
@@ -92,11 +92,11 @@ build.py            automated PyInstaller build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                  # 60+ tests; no microphone, speakers or network needed
+python -m pytest -q                  # 70 tests; no microphone, speakers or network needed
 python -m tests.mock_ollama          # fake Ollama on :11434 for UI work without a model
 ```
 
-Open `web/index.html` in a browser (serve the folder, e.g. `python -m http.server -d web`) to iterate on the HUD against a simulated backend; add `?ollama=offline` or `?ollama=nomodel` to see the setup overlays.
+Preview the HUD in a normal browser against a simulated backend: `python -m http.server -d web`, then open <http://localhost:8000/index.html?mock>; use `?ollama=offline` or `?ollama=nomodel` to see the setup overlays. (The simulated backend is never used inside the desktop app.)
 
 ## Privacy
 

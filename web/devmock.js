@@ -1,5 +1,6 @@
 /* Simulated backend so web/index.html can be previewed in a normal browser.
    Never loaded inside the desktop app (pywebview provides the real API).
+   Open web/index.html?mock (served over http) or straight from disk.
    URL options: ?ollama=offline | ?ollama=nomodel */
 window.createJarvisMock = function createJarvisMock() {
   'use strict';

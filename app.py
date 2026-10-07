@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import logging.handlers
@@ -37,8 +38,25 @@ WEBVIEW2_DOWNLOAD_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 # Windows MessageBox flags
 _MB_OK, _MB_OKCANCEL, _MB_ICONERROR, _MB_ICONWARNING, _MB_ICONINFO = 0x0, 0x1, 0x10, 0x30, 0x40
 _IDOK = 1
-_dialogs_enabled = True  # disabled for unattended runs (--selftest / --smoke-test)
+_dialogs_enabled = os.environ.get("JARVIS_NO_DIALOGS") != "1"  # also disabled for --selftest / --smoke-test
 _instance_mutex = None
+_dotnet_handlers: list = []  # keep .NET delegates alive
+_fault_file = None  # faulthandler needs the file object to stay open
+
+try:  # PyInstaller splash screen, shown by the bootloader while the one-file archive unpacks
+    import pyi_splash  # type: ignore
+except ImportError:
+    pyi_splash = None
+
+
+def close_splash() -> None:
+    global pyi_splash
+    if pyi_splash is not None:
+        try:
+            pyi_splash.close()
+        except Exception:
+            pass
+        pyi_splash = None
 
 
 # ============================================================================ crash visibility
@@ -81,6 +99,18 @@ def report_fatal(exc: BaseException, context: str = "startup") -> None:
     )
 
 
+def enable_fault_log() -> None:
+    """Native crashes (PortAudio, SDL, WebView2 interop) bypass Python entirely; dump their stacks to a file."""
+    global _fault_file
+    try:
+        _fault_file = open(app_data_dir() / "jarvis-fault.log", "a", encoding="utf-8")
+        _fault_file.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} J.A.R.V.I.S. {APP_VERSION} pid {os.getpid()}\n")
+        _fault_file.flush()
+        faulthandler.enable(_fault_file, all_threads=True)
+    except Exception:
+        log.debug("faulthandler unavailable", exc_info=True)
+
+
 def install_crash_handlers() -> None:
     def excepthook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):
@@ -95,6 +125,40 @@ def install_crash_handlers() -> None:
 
     sys.excepthook = excepthook
     threading.excepthook = thread_excepthook
+
+
+def hook_dotnet_crashes() -> bool:
+    """Report unhandled .NET exceptions (WinForms/WebView2 threads) instead of dying silently.
+
+    Such an exception terminates the process with 0xE0434352 and bypasses every Python handler;
+    AppDomain.UnhandledException is the last hook that still runs before termination.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import clr  # noqa: F401 - loaded by pywebview's WinForms backend
+        from System import AppDomain, UnhandledExceptionEventHandler
+
+        def on_unhandled(_sender, event) -> None:
+            report_fatal(RuntimeError(f"Unhandled .NET exception: {event.ExceptionObject}"), "native window layer")
+
+        handler = UnhandledExceptionEventHandler(on_unhandled)
+        AppDomain.CurrentDomain.UnhandledException += handler
+        _dotnet_handlers.append(handler)
+        return True
+    except Exception:
+        log.warning("Could not install the .NET crash handler", exc_info=True)
+        return False
+
+
+def window_icon(platform_name: str = sys.platform) -> str | None:
+    """Icon for the window title bar / taskbar.
+
+    pywebview's Windows backend passes this path straight to System.Drawing.Icon, which accepts only
+    .ico files: a PNG throws on the .NET GUI thread and kills the process before the window appears.
+    """
+    path = resource_path("assets", "jarvis.ico" if platform_name == "win32" else "jarvis.png")
+    return str(path) if path.is_file() else None
 
 
 def webview2_version() -> str | None:
@@ -388,15 +452,21 @@ def ensure_std_streams() -> None:
         sys.stderr = sys.stderr or sink
 
 
-def window_geometry(webview) -> tuple[int, int]:
+def window_geometry(webview) -> tuple[int, int, tuple[int, int], bool]:
+    """Initial size, minimum size and whether to start maximised, fitted to the primary screen."""
     width, height = 1480, 920
+    screen_w = screen_h = None
     try:
         screen = webview.screens[0]
-        width = int(min(max(screen.width * 0.86, 1120), 1720))
-        height = int(min(max(screen.height * 0.86, 720), 1040))
+        screen_w, screen_h = int(screen.width), int(screen.height)
     except Exception:
-        pass
-    return width, height
+        log.warning("Could not read the screen size", exc_info=True)
+    if screen_w and screen_h:
+        width = int(min(max(screen_w * 0.86, min(1120, screen_w * 0.96)), 1720, screen_w))
+        height = int(min(max(screen_h * 0.86, min(720, screen_h * 0.92)), 1040, screen_h))
+    min_size = (min(1000, width), min(640, height))
+    small = bool(screen_w and screen_h and (screen_w < 1280 or screen_h < 760))
+    return width, height, min_size, small
 
 
 def run_selftest(report_path: str | None) -> int:
@@ -582,6 +652,48 @@ class SmokeTest:
         threading.Timer(20, lambda: os._exit(0 if self.passed else 1)).start()
 
 
+def _watch_ui(window, api: JarvisAPI) -> None:
+    """Never leave the user staring at nothing: report a window that never appears or a page that never connects."""
+    if not window.events.shown.wait(90):
+        log.error("The window did not appear within 90 s; thread stacks follow in jarvis-fault.log")
+        if _fault_file is not None:
+            faulthandler.dump_traceback(_fault_file, all_threads=True)
+        message_box(
+            "J.A.R.V.I.S. is taking unusually long to open its window.\n\n"
+            f"If nothing appears, close it from Task Manager and send this log file:\n{app_data_dir() / 'jarvis.log'}",
+            "J.A.R.V.I.S. - still starting",
+            _MB_OK | _MB_ICONWARNING,
+        )
+        return
+    if api._ready.wait(60):
+        return
+    log.error("The interface did not connect to the backend within 60 s of the window appearing")
+    message_box(
+        "J.A.R.V.I.S. opened its window, but the interface did not load.\n\n"
+        "This usually means the Microsoft Edge WebView2 Runtime is damaged or blocked. "
+        f"Try reinstalling it from Microsoft, then start J.A.R.V.I.S. again.\n\nLog file:\n{app_data_dir() / 'jarvis.log'}",
+        "J.A.R.V.I.S. - interface failed to load",
+        _MB_OK | _MB_ICONERROR,
+    )
+    try:
+        window.destroy()
+    except Exception:
+        pass
+
+
+def _diag_dotnet_crash() -> int:
+    """CI check: throw on a .NET thread and let the AppDomain hook report it (process ends with 0xE0434352)."""
+    from System.Threading import Thread as NetThread
+    from System.Threading import ThreadStart
+
+    def boom() -> None:
+        raise RuntimeError("diagnostic .NET crash test")
+
+    NetThread(ThreadStart(boom)).Start()
+    time.sleep(15)  # releases the GIL so the crash handler can run; the process should terminate first
+    return 3
+
+
 # ============================================================================ main
 def log_environment() -> None:
     log.info("Platform: %s | Python %s | frozen=%s | exe=%s", platform.platform(), platform.python_version(),
@@ -599,12 +711,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--smoke-test", action="store_true", help="open the real window, verify the HUD boots, then exit")
     parser.add_argument("--smoke-report", metavar="PATH", help="write the smoke-test JSON report to PATH")
     parser.add_argument("--smoke-hold", type=float, default=0.0, metavar="SECONDS", help="keep the window open after passing")
+    parser.add_argument("--diag-dotnet-crash", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--gui", help="force a pywebview backend (edgechromium, qt, gtk, cef)")
     parser.add_argument("--framed", action="store_true", help="use a normal OS window frame")
     args, _unknown = parser.parse_known_args(argv)
 
     ensure_std_streams()
     configure_logging(args.debug)
+    enable_fault_log()
     if args.selftest or args.smoke_test:
         _dialogs_enabled = False
     log.info("J.A.R.V.I.S. %s starting", APP_VERSION)
@@ -641,15 +755,19 @@ def main(argv: list[str] | None = None) -> int:
     api = JarvisAPI(None, bridge, frameless)
     assistants: list = []
 
-    width, height = window_geometry(webview)
-    log.info("Creating window %dx%d (frameless=%s)", width, height, frameless)
+    width, height, min_size, maximized = window_geometry(webview)  # also loads the native GUI backend
+    hook_dotnet_crashes()
+    if args.diag_dotnet_crash:
+        return _diag_dotnet_crash()
+    log.info("Creating window %dx%d min=%s maximized=%s frameless=%s", width, height, min_size, maximized, frameless)
     window = webview.create_window(
         "J.A.R.V.I.S.",
         url=str(resource_path("web", "index.html")),
         js_api=api,
         width=width,
         height=height,
-        min_size=(1100, 700),
+        min_size=min_size,
+        maximized=maximized,
         frameless=frameless,
         easy_drag=False,
         background_color="#02070d",
@@ -657,8 +775,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     api._attach(window)
     bridge.attach(window)
-    window.events.shown += lambda: log.info("Window shown after %.1fs (renderer: %s)",
-                                            time.monotonic() - started, getattr(webview, "renderer", "?"))
+    def on_shown() -> None:
+        close_splash()
+        log.info("Window shown after %.1fs (renderer: %s)", time.monotonic() - started, getattr(webview, "renderer", "?"))
+
+    window.events.shown += on_shown
 
     def load_assistant() -> None:
         """Runs on pywebview's worker thread once the GUI loop is up: heavy imports happen behind the boot screen."""
@@ -689,15 +810,16 @@ def main(argv: list[str] | None = None) -> int:
     smoke = SmokeTest(window, api, args.smoke_report, args.smoke_hold) if args.smoke_test else None
     if smoke:
         smoke.start()
+    else:
+        threading.Thread(target=_watch_ui, args=(window, api), name="ui-watchdog", daemon=True).start()
 
-    icon = resource_path("assets", "jarvis.png")
     webview.start(
         load_assistant,
         debug=args.debug,
         http_server=True,
         private_mode=True,
         gui=args.gui,
-        icon=str(icon) if icon.is_file() else None,
+        icon=window_icon(),
     )
     log.info("GUI loop ended")
     return (0 if smoke.passed else 1) if smoke else 0

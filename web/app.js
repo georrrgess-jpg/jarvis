@@ -955,19 +955,37 @@
     if (!skip) await sleep(650);
   }
 
+  /** Browser preview only: index.html?mock (or ?ollama=offline|nomodel) or a file:// URL. Never inside the app. */
+  const PREVIEW = location.protocol === 'file:' || /[?&](mock|ollama)\b/.test(location.search);
+
+  function bootNotice(text, cls = 'warn') {
+    const log = $('#boot-log');
+    if (!log) return;
+    const row = document.createElement('div');
+    row.innerHTML = `> <span class="${cls}"></span>`;
+    row.lastChild.textContent = text;
+    log.append(row);
+    log.scrollTop = log.scrollHeight;
+  }
+
   function waitForApi() {
     return new Promise((resolve) => {
       let settled = false;
       const done = (a) => { if (!settled) { settled = true; resolve(a); } };
-      if (window.pywebview && window.pywebview.api && window.pywebview.api.ui_ready) return done(window.pywebview.api);
-      window.addEventListener('pywebviewready', () => done(window.pywebview.api));
-      setTimeout(() => {
-        if (settled || window.pywebview) return;
+      if (PREVIEW) {
         const s = document.createElement('script');
         s.src = 'devmock.js';
         s.onload = () => done(window.createJarvisMock());
         document.head.append(s);
-      }, 1200);
+        return;
+      }
+      if (window.pywebview && window.pywebview.api && window.pywebview.api.ui_ready) return done(window.pywebview.api);
+      window.addEventListener('pywebviewready', () => done(window.pywebview.api));
+      // pywebview injects its bridge after the page loads; on a slow first start that can take a while.
+      setTimeout(() => { if (!settled) bootNotice('Waiting for the J.A.R.V.I.S. core to respond...'); }, 12000);
+      setTimeout(() => {
+        if (!settled) bootNotice('The core is not responding. Close this window and start J.A.R.V.I.S. again; details are in %APPDATA%\\JARVIS\\jarvis.log', 'bad');
+      }, 45000);
     });
   }
 
@@ -993,6 +1011,7 @@
     $('#btn-close').onclick = () => call('window_close');
     $$('.pywebview-drag-region').forEach((el) => el.addEventListener('dblclick', () => call('window_toggle_maximize')));
 
+    $('#boot-close').onclick = () => (api ? call('window_close') : window.close());
     $('#ol-retry').onclick = () => Ollama.retry(false);
     $('#ol-start').onclick = () => Ollama.start();
     $('#ol-pull').onclick = () => Ollama.pull();
@@ -1052,7 +1071,10 @@
 
     api = await waitForApi();
     const p = await call('ui_ready');
-    if (!p) { toast('Backend did not respond.', 'error', 10000); return; }
+    if (!p) {
+      bootNotice('The J.A.R.V.I.S. core failed to start. Details are in %APPDATA%\\JARVIS\\jarvis.log', 'bad');
+      return;
+    }
     S.settings = p.settings; S.mic = { ...p.mic, engine: p.stt_engine }; S.audio = p.audio; S.core = p.core; S.system = p.system;
     S.ollama = p.ollama;
     document.body.classList.toggle('framed', !(p.window ? p.window.frameless : true));

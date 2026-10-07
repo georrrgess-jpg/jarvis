@@ -64,6 +64,21 @@ jobs:
           Get-Content "$env:JARVIS_HOME\jarvis.log" -ErrorAction SilentlyContinue
           Get-Content "$env:TEMP\jarvis-crash.txt" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Native crash reporting check (a .NET thread crash must be reported, not silent)
+        shell: pwsh
+        env:
+          JARVIS_HOME: ${{ runner.temp }}\jarvis-home
+          JARVIS_NO_DIALOGS: "1"
+        run: |
+          $crashFile = Join-Path $env:TEMP 'jarvis-crash.txt'
+          Remove-Item $crashFile -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath dist\Jarvis.exe -ArgumentList '--diag-dotnet-crash' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Stop-Process -Id $p.Id -Force }
+          Write-Host ("Jarvis.exe exit code: 0x{0:X8}" -f $p.ExitCode)
+          $report = Get-Content $crashFile -Raw -ErrorAction SilentlyContinue
+          Write-Host $report
+          if ($report -notmatch 'diagnostic \.NET crash test') { Write-Error 'The .NET crash handler did not report the crash'; exit 1 }
       - name: Upload smoke-test evidence
         if: always()
         uses: actions/upload-artifact@v4

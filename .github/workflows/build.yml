@@ -1,0 +1,57 @@
+name: Build Jarvis.exe
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: System audio headers for PyAudio
+        run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+        env:
+          SDL_AUDIODRIVER: dummy
+
+  build-windows:
+    name: Build Jarvis.exe (Windows)
+    runs-on: windows-latest
+    permissions:
+      contents: write # only used to attach the exe to a release on v* tags
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements-dev.txt
+      - name: Test, build and self-test the executable
+        run: python build.py
+        env:
+          SDL_AUDIODRIVER: dummy
+          PYTHONIOENCODING: utf-8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-windows-x64
+          path: dist/Jarvis.exe
+          if-no-files-found: error
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Jarvis.exe

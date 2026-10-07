@@ -1,0 +1,4 @@
+# Optional fully-offline speech recognition engines.
+# With either installed, set "Recognition engine" in Settings (or leave it on Automatic).
+faster-whisper>=1.0     # Whisper on CPU; downloads the model (base.en, ~150 MB) on first use
+vosk>=0.3.45            # needs a model folder: https://alphacephei.com/vosk/models

@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>J.A.R.V.I.S.</title>
+  <link rel="stylesheet" href="fonts/fonts.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="state-idle booting">
+  <!-- ======================================================= backdrop -->
+  <div id="backdrop" aria-hidden="true">
+    <div class="bd-glow"></div>
+    <div class="bd-grid"></div>
+    <div class="bd-scan"></div>
+    <div class="bd-vignette"></div>
+  </div>
+
+  <!-- ======================================================= title bar -->
+  <header id="titlebar">
+    <div class="brand pywebview-drag-region">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+        <circle cx="20" cy="20" r="17" class="bm-ring"/>
+        <circle cx="20" cy="20" r="12" class="bm-ring2"/>
+        <path d="M20 11 L28 25 L12 25 Z" class="bm-tri"/>
+        <circle cx="20" cy="20" r="4" class="bm-core"/>
+      </svg>
+      <div class="brand-text">
+        <h1>J.A.R.V.I.S.</h1>
+        <span>Just A Rather Very Intelligent System</span>
+      </div>
+    </div>
+
+    <div class="tb-fill pywebview-drag-region"></div>
+
+    <div class="chips">
+      <div class="chip" id="chip-core" title="Local language model (Ollama)">
+        <i class="dot"></i><b>NEURAL CORE</b><span id="chip-core-val">LINKING</span>
+      </div>
+      <div class="chip" id="chip-voice" title="Voice output (Microsoft Edge neural voice)">
+        <i class="dot"></i><b>VOICE</b><span id="chip-voice-val">—</span>
+      </div>
+      <div class="chip" id="chip-mic" title="Speech recognition">
+        <i class="dot"></i><b>MIC</b><span id="chip-mic-val">—</span>
+      </div>
+    </div>
+
+    <div class="tb-fill pywebview-drag-region"></div>
+
+    <div class="clock pywebview-drag-region">
+      <span id="clock-time">00:00:00</span>
+      <span id="clock-date">—</span>
+    </div>
+
+    <div class="win-buttons">
+      <button class="wb" id="btn-settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.4 4.6-.03-1.2 1.9-1.5-1.9-3.3-2.3.8c-.6-.5-1.3-.9-2-1.2L15.6 3h-3.8l-.4 2.4c-.7.3-1.4.7-2 1.2l-2.3-.8-1.9 3.3 1.9 1.5a6.6 6.6 0 0 0 0 2.4l-1.9 1.5 1.9 3.3 2.3-.8c.6.5 1.3.9 2 1.2l.4 2.4h3.8l.4-2.4c.7-.3 1.4-.7 2-1.2l2.3.8 1.9-3.3-1.9-1.5Z"/></svg>
+      </button>
+      <span class="wb-sep frame-only"></span>
+      <button class="wb frame-only" id="btn-min" title="Minimise" aria-label="Minimise"><svg viewBox="0 0 24 24"><path d="M5 12.5h14"/></svg></button>
+      <button class="wb frame-only" id="btn-max" title="Maximise" aria-label="Maximise"><svg viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13"/></svg></button>
+      <button class="wb wb-close frame-only" id="btn-close" title="Close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+  </header>
+
+  <!-- ======================================================= HUD -->
+  <main id="hud">
+    <!-- left: telemetry -->
+    <aside id="col-left" class="col">
+      <section class="panel" id="panel-diag">
+        <header class="panel-head"><i></i><span>System Diagnostics</span><em>SYS-01</em></header>
+        <div class="gauges">
+          <div class="gauge" id="g-cpu">
+            <svg viewBox="0 0 120 120">
+              <circle class="g-ticks" cx="60" cy="60" r="56"/>
+              <circle class="g-track" cx="60" cy="60" r="47"/>
+              <circle class="g-val" cx="60" cy="60" r="47"/>
+            </svg>
+            <div class="g-center"><span class="g-num">0</span><span class="g-unit">%</span><span class="g-label">CPU</span></div>
+          </div>
+          <div class="gauge" id="g-ram">
+            <svg viewBox="0 0 120 120">
+              <circle class="g-ticks" cx="60" cy="60" r="56"/>
+              <circle class="g-track" cx="60" cy="60" r="47"/>
+              <circle class="g-val" cx="60" cy="60" r="47"/>
+            </svg>
+            <div class="g-center"><span class="g-num">0</span><span class="g-unit">%</span><span class="g-label">MEMORY</span></div>
+          </div>
+        </div>
+        <div class="spark-wrap">
+          <canvas id="spark"></canvas>
+          <div class="spark-legend"><span class="lg-cpu">CPU</span><span class="lg-ram">MEM</span><span class="lg-win">60s</span></div>
+        </div>
+        <div class="cores" id="cores" title="Per-core load"></div>
+        <dl class="stats" id="sys-stats">
+          <div><dt>Processor</dt><dd id="st-cpu-name">—</dd></div>
+          <div><dt>Memory</dt><dd id="st-ram">—</dd></div>
+          <div><dt>System disk</dt><dd id="st-disk">—</dd></div>
+          <div><dt>Network</dt><dd id="st-net">—</dd></div>
+          <div><dt>Processes</dt><dd id="st-proc">—</dd></div>
+          <div><dt>Uptime</dt><dd id="st-uptime">—</dd></div>
+          <div id="row-battery" hidden><dt>Power</dt><dd id="st-battery">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel" id="panel-core">
+        <header class="panel-head"><i></i><span>Neural Core</span><em>AI-02</em></header>
+        <dl class="stats">
+          <div><dt>Link</dt><dd id="nc-link" class="tag">—</dd></div>
+          <div><dt>Model</dt><dd id="nc-model">—</dd></div>
+          <div><dt>Host</dt><dd id="nc-host">—</dd></div>
+          <div><dt>First token</dt><dd id="nc-latency">—</dd></div>
+          <div><dt>Throughput</dt><dd id="nc-tps">—</dd></div>
+          <div><dt>Memory</dt><dd id="nc-memory">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel" id="panel-audio">
+        <header class="panel-head"><i></i><span>Audio Matrix</span><em>AUD-03</em></header>
+        <dl class="stats">
+          <div><dt>Voice</dt><dd id="am-voice">—</dd></div>
+          <div><dt>Output</dt><dd id="am-output">—</dd></div>
+          <div><dt>Microphone</dt><dd id="am-mic">—</dd></div>
+          <div><dt>Recognition</dt><dd id="am-stt">—</dd></div>
+        </dl>
+      </section>
+    </aside>
+
+    <!-- center: arc reactor -->
+    <section id="col-center">
+      <div id="reactor-wrap">
+        <canvas id="reactor"></canvas>
+        <div id="state-readout">
+          <div id="state-title"><i></i><span>STANDING BY</span></div>
+          <div id="state-sub">Initialising…</div>
+        </div>
+      </div>
+      <canvas id="wave"></canvas>
+
+      <div id="console">
+        <button id="mic-btn" title="Click to talk · hold for push-to-talk [Space]" aria-label="Talk">
+          <span class="mic-rings"><i></i><i></i><i></i></span>
+          <svg viewBox="0 0 24 24" class="mic-icon"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg>
+        </button>
+        <form id="cmd-form" autocomplete="off">
+          <span class="cmd-prompt">&gt;_</span>
+          <input id="cmd" type="text" maxlength="4000" spellcheck="false" placeholder="Type a command, sir…">
+          <button type="submit" id="send-btn">TRANSMIT</button>
+        </form>
+        <button id="stop-btn" title="Interrupt [Esc]" aria-label="Interrupt">
+          <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+        </button>
+      </div>
+      <div id="hints">
+        <span><kbd>SPACE</kbd> hold to talk</span>
+        <span><kbd>ENTER</kbd> transmit</span>
+        <span><kbd>ESC</kbd> interrupt</span>
+        <span><kbd>/</kbd> type</span>
+      </div>
+    </section>
+
+    <!-- right: comms log -->
+    <aside id="col-right" class="col">
+      <section class="panel" id="panel-comms">
+        <header class="panel-head">
+          <i></i><span>Comms Log</span><em>LOCAL · ENCRYPTED</em>
+          <button class="ph-btn" id="btn-clear-log" title="Clear the log (Ctrl+L)">CLEAR</button>
+        </header>
+        <div id="log" aria-live="polite"></div>
+        <div id="log-footer"><span id="log-count">0 transmissions</span><span id="log-memory">memory: 0 exchanges</span></div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- ======================================================= boot overlay -->
+  <div id="boot" class="overlay">
+    <div class="boot-inner">
+      <svg class="boot-ring" viewBox="0 0 200 200" aria-hidden="true">
+        <circle cx="100" cy="100" r="92" class="br1"/>
+        <circle cx="100" cy="100" r="78" class="br2"/>
+        <circle cx="100" cy="100" r="64" class="br3"/>
+        <circle cx="100" cy="100" r="22" class="br-core"/>
+      </svg>
+      <div class="boot-title">J.A.R.V.I.S.</div>
+      <div class="boot-sub">STARK INDUSTRIES · NEURAL INTERFACE MK VII</div>
+      <pre id="boot-log"></pre>
+      <div class="boot-bar"><i id="boot-progress"></i></div>
+    </div>
+  </div>
+
+  <!-- ======================================================= ollama overlay -->
+  <div id="ollama" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="ol-title">
+    <div class="modal-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="mc-head">
+        <svg class="warn-hex" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 3 42 13.5v21L24 45 6 34.5v-21Z"/><path d="M24 15v13M24 33v1" class="wh-mark"/></svg>
+        <div>
+          <div class="mc-kicker" id="ol-kicker">CRITICAL · AI-02</div>
+          <h2 id="ol-title">Neural core offline</h2>
+        </div>
+      </div>
+      <p class="mc-lead" id="ol-lead">
+        J.A.R.V.I.S. thinks with a local language model served by <b>Ollama</b> — free, private and with no API keys.
+        I couldn't reach it at <code id="ol-host">http://localhost:11434</code>.
+      </p>
+
+      <ol class="steps" id="ol-steps-offline">
+        <li>
+          <span class="step-n">01</span>
+          <div><b>Install Ollama</b><small>Free download for Windows, macOS and Linux.</small></div>
+          <button class="btn ghost" data-open="https://ollama.com/download">OPEN OLLAMA.COM</button>
+        </li>
+        <li>
+          <span class="step-n">02</span>
+          <div><b>Download &amp; run the model</b><small>Open a terminal and run:</small>
+            <code class="cmdline" id="ol-cmd">ollama run llama3.2</code></div>
+          <button class="btn ghost" data-copy="#ol-cmd">COPY</button>
+        </li>
+        <li>
+          <span class="step-n">03</span>
+          <div><b>Reconnect</b><small>Leave Ollama running, then retry the link.</small></div>
+          <button class="btn ghost hidden" id="ol-start">START OLLAMA</button>
+        </li>
+      </ol>
+
+      <div class="steps-model hidden" id="ol-steps-model">
+        <p>Ollama is running, but no chat model is installed. Download <b id="ol-model-name">llama3.2</b> (about 2&nbsp;GB) now, or run
+          <code class="cmdline" id="ol-pull-cmd">ollama pull llama3.2</code></p>
+        <div class="pull-box hidden" id="pull-box">
+          <div class="pull-status"><span id="pull-status">Preparing…</span><span id="pull-pct">0%</span></div>
+          <div class="pull-bar"><i id="pull-progress"></i></div>
+          <div class="pull-bytes" id="pull-bytes"></div>
+        </div>
+      </div>
+
+      <div class="mc-actions">
+        <button class="btn primary" id="ol-retry"><span>RETRY CONNECTION</span></button>
+        <button class="btn primary hidden" id="ol-pull"><span>DOWNLOAD MODEL</span></button>
+        <button class="btn ghost hidden" id="ol-cancel-pull">CANCEL</button>
+        <button class="btn ghost" id="ol-dismiss">CONTINUE WITHOUT AI</button>
+      </div>
+      <div class="mc-foot" id="ol-foot">Auto-retry in <span id="ol-countdown">10</span>s</div>
+    </div>
+  </div>
+
+  <!-- ======================================================= settings drawer -->
+  <aside id="settings" class="drawer" aria-hidden="true">
+    <header class="drawer-head">
+      <span>CONFIGURATION</span>
+      <button class="wb" id="settings-close" aria-label="Close settings"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </header>
+    <div class="drawer-body">
+      <fieldset>
+        <legend>Neural core</legend>
+        <label class="field"><span>Model</span>
+          <div class="row"><select id="set-model" data-key="model"></select><button class="btn ghost sm" id="set-model-refresh" title="Rescan models">↻</button></div>
+        </label>
+        <label class="field"><span>Ollama host</span><input id="set-host" data-key="ollama_host" type="text" spellcheck="false"></label>
+        <label class="field"><span>Creativity <output id="out-temp"></output></span><input id="set-temp" data-key="temperature" type="range" min="0" max="1.5" step="0.05"></label>
+        <label class="field"><span>Custom instructions</span><textarea id="set-custom" data-key="custom_instructions" rows="3" placeholder="e.g. Keep answers under two sentences. I live in London."></textarea></label>
+        <button class="btn ghost sm" id="set-clear-memory">PURGE CONVERSATION MEMORY</button>
+      </fieldset>
+      <fieldset>
+        <legend>Voice output</legend>
+        <label class="toggle"><input type="checkbox" data-key="voice_enabled"><i></i><span>Speak replies aloud</span></label>
+        <label class="field"><span>Voice</span>
+          <div class="row"><select id="set-voice" data-key="voice"></select><button class="btn ghost sm" id="set-voice-preview" title="Preview">▶</button></div>
+        </label>
+        <label class="field"><span>Speech rate <output id="out-rate"></output></span><input id="set-rate" data-key="speech_rate" type="range" min="-50" max="50" step="1"></label>
+        <label class="field"><span>Pitch <output id="out-pitch"></output></span><input id="set-pitch" data-key="speech_pitch" type="range" min="-20" max="20" step="1"></label>
+      </fieldset>
+      <fieldset>
+        <legend>Voice input</legend>
+        <label class="field"><span>Recognition engine</span>
+          <select data-key="stt_engine">
+            <option value="auto">Automatic (best available)</option>
+            <option value="google">Google Web Speech (online)</option>
+            <option value="whisper">Whisper (offline, optional)</option>
+            <option value="vosk">Vosk (offline, optional)</option>
+          </select>
+        </label>
+        <label class="field"><span>Language</span><input data-key="stt_language" type="text" spellcheck="false" placeholder="en-US"></label>
+        <label class="field"><span>End of speech pause <output id="out-pause"></output></span><input id="set-pause" data-key="pause_threshold" type="range" min="0.4" max="3" step="0.1"></label>
+        <label class="toggle"><input type="checkbox" data-key="auto_listen"><i></i><span>Conversation mode (listen again after replying)</span></label>
+      </fieldset>
+      <fieldset>
+        <legend>Interface</legend>
+        <label class="toggle"><input type="checkbox" data-key="sfx_enabled"><i></i><span>Interface sounds</span></label>
+        <label class="field"><span>Sound volume <output id="out-sfx"></output></span><input id="set-sfx" data-key="sfx_volume" type="range" min="0" max="1" step="0.05"></label>
+        <label class="field"><span>Address me as</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>
+        <label class="toggle"><input type="checkbox" data-key="frameless"><i></i><span>Borderless HUD window (applies on restart)</span></label>
+      </fieldset>
+      <p class="drawer-foot" id="about">J.A.R.V.I.S. · runs locally · no API keys</p>
+    </div>
+  </aside>
+
+  <div id="toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

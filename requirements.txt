@@ -1,0 +1,15 @@
+# J.A.R.V.I.S. - everything here is free and needs no API key.
+pywebview>=5.3          # native window for the HUD (Microsoft WebView2 on Windows)
+ollama>=0.4.0           # local language model client
+edge-tts>=7.0.0         # Microsoft Edge neural voices (en-GB-RyanNeural by default)
+pygame>=2.5.0           # audio playback and interface sounds
+SpeechRecognition>=3.10 # Google Web Speech recogniser + audio containers
+PyAudio>=0.2.14         # microphone capture (Linux: install portaudio19-dev first)
+numpy>=1.26             # spectrum analysis for the visualisers
+psutil>=5.9             # CPU / RAM telemetry widgets
+
+# packaging
+pyinstaller>=6.6
+pillow>=10.0            # renders the app icon during the build
+
+# Linux only: pywebview needs a GUI backend, e.g.  pip install "pywebview[qt]"

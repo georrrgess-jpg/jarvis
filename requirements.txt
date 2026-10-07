@@ -7,6 +7,7 @@ SpeechRecognition>=3.10 # Google Web Speech recogniser + audio containers
 PyAudio>=0.2.14         # microphone capture (Linux: install portaudio19-dev first)
 numpy>=1.26             # spectrum analysis for the visualisers
 psutil>=5.9             # CPU / RAM telemetry widgets
+onnxruntime>=1.17       # offline "Hey Jarvis" wake word (openWakeWord models in assets/wakeword)
 
 # packaging
 pyinstaller>=6.6

@@ -40,6 +40,7 @@ RUNTIME_MODULES = {
     "pyaudio": "PyAudio",
     "numpy": "numpy",
     "psutil": "psutil",
+    "onnxruntime": "onnxruntime",
     "PyInstaller": "pyinstaller",
 }
 
@@ -47,7 +48,7 @@ RUNTIME_MODULES = {
 EXCLUDES = [
     "tkinter", "_tkinter", "matplotlib", "scipy", "pandas", "IPython", "notebook", "jupyter",
     "pytest", "playwright", "lameenc", "PIL.ImageQt", "PySide2", "PySide6", "PyQt5",
-    "faster_whisper", "ctranslate2", "onnxruntime", "vosk", "torch",
+    "faster_whisper", "ctranslate2", "vosk", "torch",
 ]
 
 
@@ -141,6 +142,7 @@ def pyinstaller_args(args: argparse.Namespace, icon: Path | None, version: str) 
         "--add-data", f"{ROOT / 'assets' / 'jarvis.png'}{sep}assets",
         # Windows needs a real .ico for the window icon (WinForms rejects PNGs and crashes)
         "--add-data", f"{ROOT / 'assets' / 'jarvis.ico'}{sep}assets",
+        "--add-data", f"{ROOT / 'assets' / 'wakeword'}{sep}assets/wakeword",
         "--additional-hooks-dir", str(ROOT / "hooks"),
         "--hidden-import", "pyaudio",
         "--collect-submodules", "core",

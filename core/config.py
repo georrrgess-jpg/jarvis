@@ -47,6 +47,8 @@ DEFAULTS: dict[str, Any] = {
     "listen_timeout": 8,  # seconds to wait for speech to begin
     "max_phrase_seconds": 25,
     "auto_listen": False,  # keep the conversation going hands-free
+    "wake_word": True,  # say "Hey Jarvis" to start listening
+    "wake_sensitivity": 0.5,  # 0 = strict, 1 = very sensitive
     # Personality / window
     "user_title": "sir",
     "frameless": True,
@@ -65,6 +67,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "pause_threshold": (0.4, 3.0),
     "listen_timeout": (2, 30),
     "max_phrase_seconds": (5, 60),
+    "wake_sensitivity": (0.0, 1.0),
 }
 
 _MAX_TEXT = {"custom_instructions": 2000, "user_title": 40}

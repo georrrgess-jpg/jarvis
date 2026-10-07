@@ -103,3 +103,7 @@ Preview the HUD in a normal browser against a simulated backend: `python -m http
 ## Privacy
 
 Conversation text goes only to your local Ollama. Spoken replies are synthesised by Microsoft's Edge voice service, and the default recogniser sends your speech to Google; install faster-whisper or Vosk to keep speech recognition entirely on your machine.
+
+## Credits
+
+The "Hey Jarvis" wake-word models in `assets/wakeword/` come from [openWakeWord](https://github.com/dscripka/openWakeWord) (code Apache-2.0; pretrained models CC BY-NC-SA 4.0, so non-commercial use only).

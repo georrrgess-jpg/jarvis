@@ -559,6 +559,20 @@ def run_selftest(report_path: str | None) -> int:
                 raise RuntimeError(f"renderer is {info['renderer']!r}, expected 'edgechromium' (WebView2 runtime missing?)")
         return info
 
+    def wake_word():
+        import numpy as np
+
+        from core.wakeword import CHUNK, WakeWordDetector, available
+
+        ok, why = available()
+        if not ok:
+            raise RuntimeError(why)
+        detector = WakeWordDetector()
+        scores = [detector.process(np.zeros(CHUNK, np.int16)) for _ in range(8)]
+        if max(scores) > 0.5:
+            raise RuntimeError(f"silence scored {max(scores):.2f}")
+        return {"silence_score": round(max(scores), 3)}
+
     def ollama_probe():
         from core.llm import LLMEngine
 
@@ -572,11 +586,12 @@ def run_selftest(report_path: str | None) -> int:
     check("text_pipeline", text_pipeline)
     check("config", config_roundtrip)
     check("telemetry", telemetry)
+    check("wake_word", wake_word)
     check("ollama_probe", ollama_probe)  # informational: offline is not a failure
     if sys.platform == "win32":  # elsewhere a display server may be absent during the build
         check("gui_backend", gui_backend)
 
-    required = ["web_assets", "imports", "audio_pipeline", "text_pipeline", "config", "telemetry"]
+    required = ["web_assets", "imports", "audio_pipeline", "text_pipeline", "config", "telemetry", "wake_word"]
     if sys.platform == "win32":
         required.append("gui_backend")
     results["ok"] = all(results["checks"][k]["ok"] for k in required)

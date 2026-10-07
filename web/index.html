@@ -140,18 +140,20 @@
       <div id="console">
         <button id="mic-btn" title="Click to talk · hold for push-to-talk [Space]" aria-label="Talk">
           <span class="mic-rings"><i></i><i></i><i></i></span>
+          <svg class="mic-level" viewBox="0 0 80 80" aria-hidden="true"><circle class="ml-track" cx="40" cy="40" r="37"/><circle class="ml-val" cx="40" cy="40" r="37"/></svg>
           <svg viewBox="0 0 24 24" class="mic-icon"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg>
         </button>
         <form id="cmd-form" autocomplete="off">
           <span class="cmd-prompt">&gt;_</span>
           <input id="cmd" type="text" maxlength="4000" spellcheck="false" placeholder="Type a command, sir…">
-          <button type="submit" id="send-btn">TRANSMIT</button>
+          <button type="submit" id="send-btn"><span>TRANSMIT</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h13M12 6l6 6-6 6"/></svg></button>
         </form>
         <button id="stop-btn" title="Interrupt [Esc]" aria-label="Interrupt">
           <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
         </button>
       </div>
       <div id="hints">
+        <span id="wake-hint" class="wake-hint hidden"><i></i>Say <b>“Hey Jarvis”</b></span>
         <span><kbd>SPACE</kbd> hold to talk</span>
         <span><kbd>ENTER</kbd> transmit</span>
         <span><kbd>ESC</kbd> interrupt</span>
@@ -288,6 +290,8 @@
         </label>
         <label class="field"><span>Language</span><input data-key="stt_language" type="text" spellcheck="false" placeholder="en-US"></label>
         <label class="field"><span>End of speech pause <output id="out-pause"></output></span><input id="set-pause" data-key="pause_threshold" type="range" min="0.4" max="3" step="0.1"></label>
+        <label class="toggle"><input type="checkbox" data-key="wake_word"><i></i><span>Wake word: say “Hey Jarvis” to start listening</span></label>
+        <label class="field"><span>Wake word sensitivity <output id="out-wake"></output></span><input id="set-wake" data-key="wake_sensitivity" type="range" min="0" max="1" step="0.05"></label>
         <label class="toggle"><input type="checkbox" data-key="auto_listen"><i></i><span>Conversation mode (listen again after replying)</span></label>
       </fieldset>
       <fieldset>

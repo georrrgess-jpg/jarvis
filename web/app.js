@@ -22,10 +22,11 @@
 
   const S = {
     state: 'IDLE', listenPhase: null, settings: {}, ollama: null, mic: null, audio: null,
-    core: null, voiceOk: true, voices: null, booted: false, system: null, activity: null,
+    core: null, voiceOk: true, voices: null, booted: false, system: null, activity: null, wake: null,
   };
 
   let api = null;
+  let reactorRef = null;
   async function call(name, ...args) {
     if (!api || typeof api[name] !== 'function') return null;
     try { return await api[name](...args); } catch (err) { console.error(`api.${name}`, err); return null; }
@@ -98,6 +99,7 @@
       this.rot = 0; this.rot2 = 0; this.spin = 0; this.sweep = 0;
       this.rings = []; this.lastRing = 0; this.lastIdleRing = 0;
       this.power = 0; this.powerTarget = 0;
+      this.flareAt = -1e9;
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       this.particles = Array.from({ length: reduce ? 30 : 110 }, () => this.particle(true));
       this.resize();
@@ -118,6 +120,8 @@
         s: Math.random() * 1.5 + 0.4, o: Math.random() * 0.6 + 0.2, d: Math.random() * 0.05 + 0.012,
       };
     }
+    /** Wake-word acknowledgement: a bright shock ring and an anamorphic lens streak. */
+    flare() { this.flareAt = performance.now(); this.rings.push({ r: this.lastR * 0.2 || 30, a: 1 }); }
     ring(ctx, r, stroke, lw) { ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
 
     draw(now, dt) {
@@ -131,6 +135,8 @@
       const R = Math.max(40, Math.min(w * 0.3, (h - 110) * 0.4)) * (0.82 + 0.18 * P);
       const C = (a) => Col.rgba(a * P);
       const E = Feed.level, st = S.state, bands = Feed.bands;
+      const flare = Math.max(0, 1 - (now - this.flareAt) / 1100);
+      this.lastR = R;
 
       this.rot += dt * (0.08 + E * 0.5);
       this.rot2 -= dt * (0.05 + E * 0.25);
@@ -145,6 +151,11 @@
       let g = ctx.createRadialGradient(0, 0, R * 0.1, 0, 0, R * 1.7);
       g.addColorStop(0, C(0.2 + 0.32 * E)); g.addColorStop(0.45, C(0.05 + 0.08 * E)); g.addColorStop(1, C(0));
       ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R * 1.7, 0, TAU); ctx.fill();
+
+      // soft halo band just outside the reactor
+      g = ctx.createRadialGradient(0, 0, R * 1.22, 0, 0, R * 1.5);
+      g.addColorStop(0, C(0)); g.addColorStop(0.35, C(0.05 + 0.12 * E + 0.35 * flare)); g.addColorStop(1, C(0));
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R * 1.5, 0, TAU); ctx.fill();
 
       // outer degree ring + labels
       this.ring(ctx, R * 1.2, C(0.2), 1);
@@ -205,6 +216,10 @@
           ctx.beginPath(); ctx.moveTo(ca * r0, sa * r0); ctx.lineTo(ca * (r0 + len), sa * (r0 + len));
           ctx.strokeStyle = pass === 0 ? C(0.07 + 0.2 * v) : C(0.28 + 0.72 * v);
           ctx.stroke();
+          if (pass === 1 && v > 0.18) {  // hot white tip on loud bands
+            ctx.fillStyle = `rgba(255,255,255,${(v - 0.18) * 0.9 * P})`;
+            ctx.beginPath(); ctx.arc(ca * (r0 + len), sa * (r0 + len), bw * 0.55, 0, TAU); ctx.fill();
+          }
         }
       }
       ctx.lineCap = 'butt';
@@ -236,6 +251,19 @@
         ctx.lineTo(Math.cos(a) * R * 0.5, Math.sin(a) * R * 0.5);
         ctx.strokeStyle = C(0.22); ctx.lineWidth = 1; ctx.stroke();
       }
+
+      // rotating hexagon frame
+      ctx.save();
+      ctx.rotate(this.rot2 * 0.6);
+      ctx.beginPath();
+      for (let i = 0; i <= 6; i++) {
+        const a = (i / 6) * TAU, rr = R * 0.56;
+        i ? ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr) : ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      }
+      ctx.setLineDash([R * 0.04, R * 0.03]);
+      ctx.strokeStyle = C(0.18 + E * 0.25); ctx.lineWidth = 1; ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
 
       // coils
       for (let i = 0; i < 10; i++) {
@@ -296,6 +324,22 @@
       }
       ctx.closePath(); ctx.strokeStyle = `rgba(255,255,255,${0.5 * P})`; ctx.lineWidth = 1.6; ctx.stroke();
       ctx.restore();
+
+      // glass reflection on the core
+      g = ctx.createRadialGradient(-R * 0.06, -R * 0.09, 0, -R * 0.06, -R * 0.09, R * 0.13);
+      g.addColorStop(0, `rgba(255,255,255,${0.32 * P})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(-R * 0.06, -R * 0.09, R * 0.13, 0, TAU); ctx.fill();
+
+      // anamorphic lens streak: always faint, bright when the wake word fires
+      const streak = 0.05 + E * 0.18 + flare * 0.75;
+      g = ctx.createLinearGradient(-R * 2.2, 0, R * 2.2, 0);
+      g.addColorStop(0, C(0)); g.addColorStop(0.5, `rgba(235,252,255,${streak * P})`); g.addColorStop(1, C(0));
+      ctx.fillStyle = g; ctx.fillRect(-R * 2.2, -1.2 - flare * 1.5, R * 4.4, 2.4 + flare * 3);
+      if (flare > 0) {
+        g = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 0.9);
+        g.addColorStop(0, `rgba(255,255,255,${0.35 * flare * P})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R * 0.9, 0, TAU); ctx.fill();
+      }
 
       ctx.restore();
 
@@ -380,10 +424,12 @@
   }
 
   // ========================================================================= toasts
+  const TOAST_ICON = { info: 'i', ok: '✓', warn: '!', error: '×' };
   function toast(text, level = 'info', ms = 4200) {
     const el = document.createElement('div');
     el.className = `toast ${level}`;
-    el.textContent = text;
+    el.innerHTML = `<b class="t-icon">${TOAST_ICON[level] || 'i'}</b><span class="t-text"></span><i class="t-bar" style="animation-duration:${ms}ms"></i>`;
+    $('.t-text', el).textContent = text;
     $('#toasts').append(el);
     setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 400); }, ms);
   }
@@ -455,7 +501,10 @@
       $('#log-empty')?.remove();
       const el = document.createElement('div');
       el.className = `msg ${kind}`;
-      el.innerHTML = `<div class="msg-meta"><span class="who">${who}</span><time>${fmtTime()}</time>${extra}</div><div class="msg-body"></div>`;
+      const avatar = kind.startsWith('jarvis')
+        ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5.5"/><path d="M12 7.5 15.6 14H8.4Z"/></svg>'
+        : '<svg viewBox="0 0 24 24"><circle cx="12" cy="9" r="3.6"/><path d="M5 19.5c1.2-3.4 3.8-5 7-5s5.8 1.6 7 5"/></svg>';
+      el.innerHTML = `<div class="avatar">${avatar}</div><div class="msg-main"><div class="msg-meta"><span class="who">${who}</span><time>${fmtTime()}</time>${extra}</div><div class="msg-body"></div></div>`;
       const stick = this.pinned();
       this.log.append(el);
       while (this.log.children.length > 300) this.log.firstElementChild.remove();
@@ -526,7 +575,11 @@
     updateSub() {
       const st = S.state, ph = S.listenPhase, o = S.ollama;
       let sub = '';
-      if (st === 'IDLE') sub = o && o.online && o.model ? `Awaiting your command, ${title()}` : 'Neural core offline · limited functionality';
+      if (st === 'IDLE') {
+        const wake = S.wake && S.wake.active;
+        sub = !(o && o.online && o.model) ? 'Neural core offline · limited functionality'
+          : wake ? `Awaiting your command, ${title()} · say “Hey Jarvis”` : `Awaiting your command, ${title()}`;
+      }
       else if (st === 'LISTENING') {
         sub = ph === 'calibrating' ? 'Calibrating to ambient noise…'
           : ph === 'capturing' ? (Ptt.holding ? 'Receiving · release to transmit' : 'Receiving audio…')
@@ -573,8 +626,12 @@
       else if (!S.voiceOk) this.chip('#chip-voice', 'bad', 'OFFLINE');
       else this.chip('#chip-voice', 'ok', voiceShort(set.voice).toUpperCase());
       const engine = (mic.engine || '').replace(/ \(.*\)/, '').toUpperCase();
-      if (mic.available) this.chip('#chip-mic', 'ok', engine || 'READY');
+      const wake = S.wake || {};
+      if (mic.available && wake.active) this.chip('#chip-mic', 'ok', 'HEY JARVIS');
+      else if (mic.available) this.chip('#chip-mic', 'ok', engine || 'READY');
       else this.chip('#chip-mic', 'bad', 'NO DEVICE');
+      $('#wake-hint').classList.toggle('hidden', !(mic.available && wake.active));
+      $('#chip-mic').title = wake.active ? 'Listening for “Hey Jarvis”' : `Wake word off${wake.reason ? `: ${wake.reason}` : ''}`;
       $('#mic-btn').classList.toggle('disabled', !mic.available);
 
       this.setDD('#am-voice', `${voiceShort(set.voice)} · ${(set.voice || '').split('-').slice(0, 2).join('-')}`, voiceOn && S.voiceOk ? '' : 'warn');
@@ -589,7 +646,7 @@
     },
     clock() {
       const d = new Date();
-      $('#clock-time').textContent = fmtTime(d);
+      $('#clock-time').innerHTML = fmtTime(d).replace(/:/g, '<span class="colon">:</span>');
       $('#clock-date').textContent = d.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' }).replace(/,/g, '').toUpperCase();
     },
   };
@@ -825,7 +882,8 @@
     output(input) {
       const map = { 'set-temp': ['#out-temp', (v) => (+v).toFixed(2)], 'set-rate': ['#out-rate', (v) => `${v > 0 ? '+' : ''}${v}%`],
         'set-pitch': ['#out-pitch', (v) => `${v > 0 ? '+' : ''}${v} Hz`], 'set-pause': ['#out-pause', (v) => `${(+v).toFixed(1)} s`],
-        'set-sfx': ['#out-sfx', (v) => `${Math.round(v * 100)}%`] };
+        'set-sfx': ['#out-sfx', (v) => `${Math.round(v * 100)}%`],
+        'set-wake': ['#out-wake', (v) => (v < 0.34 ? 'strict' : v < 0.67 ? 'balanced' : 'sensitive')] };
       const m = map[input.id];
       if (m) $(m[0]).textContent = m[1](input.value);
     },
@@ -882,11 +940,15 @@
         S.state = ev.state;
         if (ev.state !== 'LISTENING' && ev.state !== 'THINKING') S.listenPhase = null;
         if (ev.state !== 'THINKING') S.activity = null;
-        if (ev.state === 'IDLE') { Feed.mic = null; document.body.style.setProperty('--mic-level', 0); }
+        if (ev.state === 'IDLE') { Feed.mic = null; document.body.style.setProperty('--mic-level', 0); $('.ml-val').style.strokeDashoffset = 232.5; }
         Hud.setState(ev.state);
         break;
       case 'listen_phase': S.listenPhase = ev.phase; Hud.updateSub(); break;
-      case 'mic_frame': Feed.setMic(ev); document.body.style.setProperty('--mic-level', (ev.level || 0) / 100); break;
+      case 'mic_frame':
+        Feed.setMic(ev);
+        document.body.style.setProperty('--mic-level', (ev.level || 0) / 100);
+        $('.ml-val').style.strokeDashoffset = (232.5 * (1 - Math.min(1, (ev.level || 0) / 70))).toFixed(1);
+        break;
       case 'speech_clip': Feed.setClip(ev); break;
       case 'speech_stop': Feed.stop(); break;
       case 'user_message': Chat.user(ev); break;
@@ -894,6 +956,11 @@
       case 'assistant_token': Chat.token(ev.id, ev.text); break;
       case 'assistant_end': Chat.end(ev); if (ev.stats) { S.core = ev.stats; Hud.updateCore(); } break;
       case 'system_message': Chat.system(ev.text, ev.level); break;
+      case 'wake_status': { const { type, ...w } = ev; S.wake = w; Hud.updateAudio(); Hud.updateSub(); break; }
+      case 'wake':
+        reactorRef && reactorRef.flare();
+        $('#mic-btn').classList.remove('woke'); void $('#mic-btn').offsetWidth; $('#mic-btn').classList.add('woke');
+        break;
       case 'tool_activity': S.activity = ev.label; Chat.system(ev.label, 'tool'); Hud.updateSub(); break;
       case 'notice': toast(ev.text, ev.level); break;
       case 'ollama_status': Ollama.update(ev); break;
@@ -1059,6 +1126,7 @@
     setInterval(() => Hud.clock(), 1000);
 
     const reactor = new Reactor($('#reactor'));
+    reactorRef = reactor;
     const wave = new Wave($('#wave'));
     let last = performance.now();
     const frame = (now) => {
@@ -1081,6 +1149,7 @@
     }
     S.settings = p.settings; S.mic = { ...p.mic, engine: p.stt_engine }; S.audio = p.audio; S.core = p.core; S.system = p.system;
     S.ollama = p.ollama;
+    S.wake = p.wake || null;
     document.body.classList.toggle('framed', !(p.window ? p.window.frameless : true));
     $('#st-cpu-name').textContent = p.system.cpu_name;
     $('#st-cpu-name').title = p.system.cpu_name;

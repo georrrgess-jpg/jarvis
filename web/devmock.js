@@ -18,7 +18,7 @@ window.createJarvisMock = function createJarvisMock() {
   const settings = {
     ollama_host: 'http://localhost:11434', model: 'llama3.2', temperature: 0.7, max_history_turns: 12, custom_instructions: '',
     voice: 'en-GB-RyanNeural', speech_rate: 0, speech_pitch: 0, voice_enabled: true, sfx_enabled: true, sfx_volume: 0.45,
-    allow_files: true, allow_internet: true, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 0.9,
+    allow_files: true, allow_internet: true, wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 0.9,
     listen_timeout: 8, max_phrase_seconds: 25, auto_listen: false, user_title: 'sir', frameless: true,
   };
   const later = (ms, fn) => timers.push(setTimeout(fn, ms));
@@ -78,6 +78,7 @@ window.createJarvisMock = function createJarvisMock() {
       system: { hostname: 'stark-tower', os: 'Windows 11', cpu_name: 'Preview CPU @ 4.20GHz', cores_physical: 8, cores_logical: 16, ram_total_gb: 32, python: '3.12' },
       core: { online, model: models[0] || null, host: settings.ollama_host, first_token_ms: null, tokens_per_sec: null, memory_turns: 0 },
       window: { frameless: true },
+      wake: { enabled: true, active: true, phrase: 'Hey Jarvis', reason: null },
     }),
     boot_complete: async () => reply(online && models.length
       ? 'Good evening, sir. All systems are online. How may I help?'

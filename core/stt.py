@@ -113,6 +113,10 @@ class SpeechInput:
         self._vosk = None
         self._vosk_path: str | None = None
 
+    def set_source_provider(self, provider: Callable[[], AudioSource] | None) -> None:
+        """Use a shared live stream (the wake-word listener's) instead of opening the microphone."""
+        self._source_factory = provider or _PyAudioSource
+
     # ------------------------------------------------------------------ status
     def availability(self) -> dict:
         info = {"available": False, "device": None, "reason": None, "engine": self.engine_label()}

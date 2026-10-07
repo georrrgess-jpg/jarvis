@@ -26,12 +26,19 @@ from .state import State, StateMachine
 from .stt import ENGINE_LABELS, SpeechInput, STTError
 from .system import SystemMonitor
 from .tools import Toolbox, ToolError, describe_call
+from . import wakeword
 from .tts import CODE_MARK, EdgeTTS, SentenceSplitter, TTSError, clean_for_speech
 
 log = logging.getLogger("jarvis.assistant")
 
 Emit = Callable[[str, dict], None]
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:]{0,120}$")
+_WAKE_PREFIX = re.compile(r"^\s*(?:(?:hey|hi|okay|ok)\s+)?jarvis\b[\s,.!?]*", re.IGNORECASE)
+_STOP_PHRASES = {
+    "stop", "stop it", "stop talking", "stop listening", "cancel", "never mind", "nevermind", "forget it",
+    "that's all", "thats all", "that is all", "nothing", "be quiet", "quiet", "shut up", "hush", "enough",
+    "thank you that's all", "thanks that's all", "no thanks", "dismiss", "go to sleep", "standby", "stand by",
+}
 _OPEN_COMMAND = re.compile(
     r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you )*(?:open|launch|start|run|load|pull up|bring up|show me)"
     r"\s+(?:up\s+)?(?:the\s+|my\s+)?(?P<target>.+?)(?:\s+(?:please|for me|now))?[\s.!?]*$",
@@ -171,6 +178,8 @@ class Assistant:
         self._last_voice_notice = 0.0
         self._pull_cancel: threading.Event | None = None
         self._pull_thread: threading.Thread | None = None
+        self.wake: wakeword.WakeListener | None = None
+        self._wake_error: str | None = None
 
     # ================================================================== plumbing
     @property
@@ -250,6 +259,7 @@ class Assistant:
             ("microphone", lambda: setattr(self, "_mic", self.stt.availability())),
             ("ollama", self.check_ollama),
             ("file index", self._warm_file_index),
+            ("wake word", self._sync_wake_word),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -275,6 +285,7 @@ class Assistant:
             "audio": {"available": self.audio.available, "output": self.audio.has_output, "error": self.audio.error},
             "system": self.monitor.static_info(),
             "core": self.core_stats(),
+            "wake": self.wake_status(),
         }
 
     def boot_complete(self) -> None:
@@ -293,6 +304,8 @@ class Assistant:
         self.speak(text, delay=0.45)
 
     def shutdown(self) -> None:
+        if self.wake is not None:
+            self.wake.stop()
         with self._turn_lock:
             if self._turn is not None:
                 self._turn.abort()
@@ -302,6 +315,55 @@ class Assistant:
         self.audio.stop_voice(0)
         self.tts.close()
         self.audio.shutdown()
+
+    # ================================================================== wake word
+    def wake_status(self) -> dict:
+        ok, why = wakeword.available()
+        active = bool(self.wake and self.wake.running)
+        reason = None
+        if not self.config.get("wake_word", True):
+            reason = "turned off in Settings"
+        elif not ok:
+            reason = why
+        elif not self._mic.get("available"):
+            reason = "no microphone"
+        elif not active:
+            reason = self._wake_error or (self.wake.error if self.wake else None) or "not running"
+        return {"enabled": bool(self.config.get("wake_word", True)), "active": active, "phrase": "Hey Jarvis", "reason": reason}
+
+    def _sync_wake_word(self) -> None:
+        """Start or stop the background "Hey Jarvis" listener to match settings and hardware."""
+        ok, why = wakeword.available()
+        want = bool(self.config.get("wake_word", True)) and ok and self._mic.get("available")
+        if want and not (self.wake and self.wake.running):
+            self.wake = wakeword.WakeListener(self._on_wake, lambda: float(self.config.get("wake_sensitivity", 0.5)))
+            if self.wake.start():
+                self.stt.set_source_provider(self.wake.borrow)
+                self._wake_error = None
+            else:
+                self._wake_error = self.wake.error
+                self.stt.set_source_provider(None)
+        elif not want and self.wake is not None:
+            self.wake.stop()
+            self.wake = None
+            self.stt.set_source_provider(None)
+        if not ok and self.config.get("wake_word", True):
+            log.info("Wake word unavailable: %s", why)
+        self.emit("wake_status", **self.wake_status())
+
+    def _on_wake(self, score: float) -> None:
+        """Called from the wake-word thread: barge in if busy, then listen for the command."""
+        self.emit("wake", score=round(score, 2))
+        if self.state.state in (State.SPEAKING, State.THINKING):
+            with self._turn_lock:
+                turn, self._turn = self._turn, None
+                if turn is not None:
+                    turn.abort()
+            self.audio.stop_voice(80)
+            self.emit("speech_stop")
+            self.state.transition(State.IDLE, "wake word")
+        if self.state.state != State.LISTENING:
+            self.start_listening()
 
     # ================================================================== public actions
     def submit_text(self, text: str, source: str = "text") -> bool:
@@ -406,8 +468,14 @@ class Assistant:
             return
         if not self._is_current(turn):
             return
+        text = _WAKE_PREFIX.sub("", text, count=1).strip()
         if not text:
             self.emit("notice", level="info", text=f"I didn't quite catch that, {self.title}.")
+            self._finish_turn(turn)
+            return
+        if re.sub(r"[^\w' ]+", "", text.lower()).strip() in _STOP_PHRASES:
+            self.sfx.play("interrupt")
+            self.emit("notice", level="info", text="Standing by.")
             self._finish_turn(turn)
             return
         self._converse(turn, text, "voice")
@@ -593,6 +661,8 @@ class Assistant:
             self._spawn(self.check_ollama, name="recheck")
         if {"stt_engine", "vosk_model_path", "whisper_model"} & applied.keys():
             self.emit("mic_status", **{**self._mic, "engine": self.stt.engine_label()})
+        if "wake_word" in applied:
+            self._spawn(self._sync_wake_word, name="wake-sync")
         self.emit("settings", **self.config.as_dict())
         return self.config.as_dict()
 

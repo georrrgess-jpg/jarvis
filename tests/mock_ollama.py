@@ -22,7 +22,8 @@ DEFAULT_REPLY = (
 
 class MockOllama:
     def __init__(self, port: int = 0, models: list[str] | None = None, reply: str | None = None,
-                 token_delay: float = 0.0, tools_supported: bool = True) -> None:
+                 token_delay: float = 0.0, tools_supported: bool = True, text_tool_calls: bool = False) -> None:
+        self.text_tool_calls = text_tool_calls  # misbehave like llama3.2: type the tool call as JSON text
         self.models = ["llama3.2:latest"] if models is None else models
         self.tools_supported = tools_supported
         self.reply = reply or DEFAULT_REPLY
@@ -119,6 +120,12 @@ class MockOllama:
                 call = {"name": "web_search", "arguments": {"query": last["content"]}}
             elif "read" in ask and "read_file" in tool_names:
                 call = {"name": "read_file", "arguments": {"query": ask.split("read", 1)[1].strip(" ?.")}}
+            if call and self.text_tool_calls:
+                typed = "<|python_tag|>" + json.dumps({"name": call["name"], "parameters": call["arguments"]})
+                for i in range(0, len(typed), 7):
+                    yield {"model": model, "message": {"role": "assistant", "content": typed[i : i + 7]}, "done": False}
+                yield {"model": model, "message": {"role": "assistant", "content": ""}, "done": True, "done_reason": "stop"}
+                return
             if call:
                 yield {"model": model, "message": {"role": "assistant", "content": "", "tool_calls": [{"function": call}]},
                        "done": False}

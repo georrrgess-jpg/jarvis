@@ -6,6 +6,8 @@ no Cloud project and no payment: the user deploys the script once and pastes its
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 import secrets
 from pathlib import Path
@@ -30,6 +32,12 @@ def script_template() -> str:
     raise BridgeError("bridge script is missing from this build")
 
 
+def script_version() -> int:
+    """BRIDGE_VERSION of the script bundled with this build."""
+    match = re.search(r"var BRIDGE_VERSION = (\d+);", script_template())
+    return int(match.group(1)) if match else 1
+
+
 def parse_outline(text: str) -> list[dict]:
     """Turn a model-friendly outline into slides.
 
@@ -51,6 +59,41 @@ def parse_outline(text: str) -> list[dict]:
     return [{"title": b[0], "body": b[1:]} for b in blocks if b]
 
 
+_NUMBER = re.compile(r"^-?(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*|0)(?:\.\d+)?$")  # no leading zeros: keeps 007 / zip codes as text
+UPDATE_HINT = ("your Google bridge script is out of date: open Settings > Google Docs & Slides, copy the script again, "
+               "paste it over the old one in Apps Script, then Deploy > Manage deployments > Edit > Version: New version > Deploy")
+
+
+def _cell(value: str):
+    value = value.strip()
+    if _NUMBER.match(value):
+        number = float(value.replace(",", ""))
+        return int(number) if number.is_integer() and "." not in value else number
+    return value
+
+
+def parse_rows(text) -> list[list]:
+    """Rows for a spreadsheet from what a model writes: a Markdown table, tab- or comma-separated lines,
+    or already-structured lists. Numbers become numbers so Sheets can add them up."""
+    if isinstance(text, list):
+        return [[_cell(str(c)) if isinstance(c, str) else c for c in (r if isinstance(r, list) else [r])] for r in text]
+    rows, text = [], str(text or "").replace("\r", "")
+    if "\n" not in text and "\\n" in text:
+        text = text.replace("\\n", "\n")  # the model escaped its newlines
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line or re.fullmatch(r"\|?[\s:|-]+\|?", line) and "-" in line:
+            continue  # blank line or a Markdown table separator like |---|---|
+        if "|" in line:
+            cells = line.strip("|").split("|")
+        elif "\t" in line:
+            cells = line.split("\t")
+        else:
+            cells = next(csv.reader(io.StringIO(line), skipinitialspace=True))
+        rows.append([_cell(re.sub(r"\*\*(.+?)\*\*", r"\1", c)) for c in cells])
+    return rows
+
+
 class GoogleBridge:
     def __init__(self, config, http: httpx.Client | None = None) -> None:
         self._config = config
@@ -59,6 +102,14 @@ class GoogleBridge:
     @property
     def configured(self) -> bool:
         return bool(SCRIPT_URL.match(self._config.get("google_script_url") or "")) and bool(self.token(create=False))
+
+    @property
+    def outdated(self) -> bool:
+        """True when the deployed script predates the one in this build (new actions would fail)."""
+        try:
+            return self.configured and int(self._config.get("google_bridge_version") or 0) < script_version()
+        except BridgeError:
+            return False
 
     def token(self, create: bool = True) -> str:
         token = self._config.get("google_bridge_token") or ""
@@ -95,6 +146,9 @@ class GoogleBridge:
             error = data.get("error") or "unknown error"
             if error == "unauthorized":
                 error = "the bridge rejected JARVIS's token: re-copy the script from Settings and redeploy"
+            elif error.startswith("unknown action"):
+                self._config.update({"google_bridge_version": 1})
+                error = UPDATE_HINT
             raise BridgeError(error)
         return data
 
@@ -103,7 +157,9 @@ class GoogleBridge:
         if not SCRIPT_URL.match(url):
             raise BridgeError("that doesn't look like a web app URL (it should end in /exec)")
         info = self.call("ping", url=url)
-        self._config.update({"google_script_url": url})
+        version = info.get("version")
+        self._config.update({"google_script_url": url,
+                             "google_bridge_version": version if isinstance(version, int) and version > 0 else 1})
         return info
 
     # ------------------------------------------------------------------ tool entry points
@@ -113,15 +169,18 @@ class GoogleBridge:
             return self.call("doc_create", title=title or document or "Untitled document", text=text)
         if action == "append":
             return self.call("doc_append", document=document, text=text)
+        if action == "rewrite":
+            return self.call("doc_rewrite", document=document, text=text)
         if action == "replace":
             return self.call("doc_replace", document=document, find=find, replace=text)
         if action == "read":
             return self.call("doc_read", document=document)
         if action == "list":
             return self.call("list", kind="docs", query=document)
-        raise BridgeError("action must be one of create, append, replace, read, list")
+        raise BridgeError("action must be one of create, append, rewrite, replace, read, list")
 
-    def slides(self, action: str, presentation: str = "", title: str = "", text: str = "") -> dict:
+    def slides(self, action: str, presentation: str = "", title: str = "", text: str = "",
+               number=None, to=None, find: str = "") -> dict:
         action = (action or "").lower().strip()
         if action == "create":
             outline = parse_outline(text)
@@ -136,4 +195,52 @@ class GoogleBridge:
             return self.call("slides_read", presentation=presentation)
         if action == "list":
             return self.call("list", kind="slides", query=presentation)
-        raise BridgeError("action must be one of create, add, read, list")
+        if action == "replace":
+            return self.call("slides_replace", presentation=presentation, find=find, replace=text)
+        if action in ("delete", "move", "edit"):
+            number = _slide_number(number)
+            if action == "delete":
+                return self.call("slides_delete", presentation=presentation, number=number)
+            if action == "move":
+                return self.call("slides_move", presentation=presentation, number=number, to=_slide_number(to, "to"))
+            lines = [re.sub(r"^[-*•]\s*|^\d+[.)]\s*", "", ln.strip()) for ln in str(text or "").replace("\r", "").split("\n")]
+            return self.call("slides_edit", presentation=presentation, number=number, title=title,
+                             body=[ln for ln in lines if ln] or None)
+        raise BridgeError("action must be one of create, add, edit, delete, move, replace, read, list")
+
+    def sheets(self, action: str, spreadsheet: str = "", title: str = "", text="", range: str = "", tab: str = "") -> dict:
+        action = (action or "").lower().strip()
+        if action == "create":
+            return self.call("sheet_create", title=title or spreadsheet or "Untitled spreadsheet", rows=parse_rows(text))
+        if action in ("append", "add"):
+            rows = parse_rows(text)
+            if not rows:
+                raise BridgeError("give the rows to add in text, one row per line with cells separated by |")
+            return self.call("sheet_append", spreadsheet=spreadsheet, tab=tab, rows=rows)
+        if action in ("write", "update"):
+            rows = parse_rows(text)
+            if not rows:
+                raise BridgeError("give the values to write in text")
+            return self.call("sheet_write", spreadsheet=spreadsheet, tab=tab, range=_a1(range or "A1"), rows=rows)
+        if action == "read":
+            return self.call("sheet_read", spreadsheet=spreadsheet, tab=tab, range=_a1(range) if range else "")
+        if action == "list":
+            return self.call("list", kind="sheets", query=spreadsheet)
+        raise BridgeError("action must be one of create, append, write, read, list")
+
+
+def _slide_number(value, name: str = "number") -> int:
+    try:
+        n = int(str(value).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        raise BridgeError(f"say which slide by its position ({name}=1 for the first slide)") from None
+    if n < 1:
+        raise BridgeError(f"{name} must be 1 or more")
+    return n
+
+
+def _a1(ref: str) -> str:
+    ref = str(ref or "").strip().upper().replace(" ", "")
+    if not re.fullmatch(r"[A-Z]{1,3}\d{1,7}(?::[A-Z]{1,3}\d{1,7})?", ref):
+        raise BridgeError(f'"{ref}" isn\'t a cell range like B2 or A1:C10')
+    return ref

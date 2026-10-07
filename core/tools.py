@@ -101,7 +101,9 @@ class Entry:
     root_kind: str  # "user" | "apps"
     mtime: float
     app_id: str | None = None  # Windows AppUserModelID: launched through shell:AppsFolder
-    label: str | None = None  # display name for registered apps
+    label: str | None = None  # display name for registered apps and games
+    launch: str | None = None  # game launch target: a store URI (steam://...) or an installed program's exe
+    alt: str = ""  # extra matchable text: acronyms, numerals ("grand theft auto v" -> "gta 5")
 
 
 # Built-in Windows tools, launched by fixed command (never by anything a web page or model supplies).
@@ -143,12 +145,74 @@ def windows_start_apps(runner=subprocess.run) -> list[tuple[str, str]]:
 
 def _normalise(text: str) -> str:
     text = re.sub(r"[_\-.()\[\]]+", " ", text.lower())
+    text = re.sub(r"[^\w\s']+", " ", text)  # ™ ® : , ! etc.
     return re.sub(r"\s+", " ", text).strip()
 
 
+ROMAN = {"ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
+         "xi": "11", "xii": "12", "xiii": "13", "xiv": "14", "xv": "15", "xvi": "16"}
+NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
+                "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12"}
+# Spoken nicknames -> words found in the real title. Tried as an *extra* reading, never instead of the original.
+GAME_ALIASES = {
+    "gta": "grand theft auto", "fifa": "ea sports fc", "cod": "call of duty", "rdr": "red dead redemption",
+    "csgo": "counter strike", "cs2": "counter strike 2", "cs": "counter strike", "r6": "rainbow six",
+    "lol": "league of legends", "nfs": "need for speed", "wow": "world of warcraft", "ow": "overwatch",
+    "bf": "battlefield", "fh5": "forza horizon 5", "fh": "forza horizon", "mc": "minecraft", "pubg": "pubg battlegrounds",
+    "botw": "breath of the wild", "ac": "assassin's creed", "tlou": "the last of us", "gow": "god of war",
+}
+
+
+def _numerals(text: str) -> str:
+    """Spell numbers one way: 'five' -> 5 and roman 'v' -> 5 (only after another word, so 'v for vendetta' survives)."""
+    words = text.split()
+    out = []
+    for i, w in enumerate(words):
+        if w in NUMBER_WORDS:
+            w = NUMBER_WORDS[w]
+        elif w in ROMAN and i > 0:
+            w = ROMAN[w]
+        out.append(w)
+    return " ".join(out)
+
+
+def _acronyms(name: str) -> str:
+    """Initials of every run of 2-4 words plus a trailing number: 'grand theft auto 5' -> 'gta gta5 ...'."""
+    words = name.split()
+    acr = set()
+    for i in range(len(words)):
+        for n in (2, 3, 4):
+            chunk = words[i : i + n]
+            if len(chunk) == n and all(w[0].isalpha() for w in chunk):
+                initials = "".join(w[0] for w in chunk)
+                acr.add(initials)
+                nxt = words[i + n] if i + n < len(words) else ""
+                if nxt.isdigit():
+                    acr.add(initials + nxt)
+    return " ".join(sorted(acr))
+
+
+def matchable(name: str) -> tuple[str, str]:
+    """Canonical name and the extra searchable text (acronyms) for an app or game title."""
+    canon = _numerals(_normalise(name))
+    return canon, _acronyms(canon)
+
+
 def _query_tokens(query: str) -> list[str]:
-    tokens = [t for t in _normalise(query).split() if t not in STOPWORDS]
-    return tokens or _normalise(query).split()
+    norm = _numerals(_normalise(query))
+    tokens = [t for t in norm.split() if t not in STOPWORDS]
+    return tokens or norm.split()
+
+
+def _alias_reading(tokens: list[str]) -> list[str] | None:
+    out, changed = [], False
+    for t in tokens:
+        if t in GAME_ALIASES:
+            out += GAME_ALIASES[t].split()
+            changed = True
+        else:
+            out.append(t)
+    return out if changed else None
 
 
 def _split_type_words(tokens: list[str]) -> tuple[list[str], set[str]]:
@@ -203,13 +267,146 @@ def search_roots() -> list[tuple[Path, str]]:
     return roots
 
 
+# ---------------------------------------------------------------------------- games & installed programs
+_NOT_GAMES = re.compile(r"redistributable|runtime|steamworks|proton|sdk|dedicated server|soundtrack|benchmark|"
+                        r"\bdriver\b|\bupdate\b|uninstall|anti.?cheat|easyanticheat|battleye", re.I)
+
+
+def _steam_roots() -> list[Path]:
+    roots = []
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+                roots.append(Path(winreg.QueryValueEx(key, "SteamPath")[0]))
+        except OSError:
+            pass
+        for env in ("ProgramFiles(x86)", "ProgramFiles"):
+            if os.environ.get(env):
+                roots.append(Path(os.environ[env]) / "Steam")
+    else:
+        roots += [Path.home() / ".steam" / "steam", Path.home() / ".local" / "share" / "Steam"]
+    return [r for r in dict.fromkeys(roots) if (r / "steamapps").is_dir()]
+
+
+def steam_games(roots: list[Path] | None = None) -> list[tuple[str, str]]:
+    """(title, steam://rungameid/<id>) for every installed Steam game, across all library folders."""
+    games: dict[str, tuple[str, str]] = {}
+    for root in roots if roots is not None else _steam_roots():
+        libraries = [root]
+        vdf = root / "steamapps" / "libraryfolders.vdf"
+        try:
+            for raw in re.findall(r'"path"\s+"([^"]+)"', vdf.read_text(encoding="utf-8", errors="ignore")):
+                libraries.append(Path(raw.replace("\\\\", "\\")))
+        except OSError:
+            pass
+        for lib in dict.fromkeys(libraries):
+            for manifest in (lib / "steamapps").glob("appmanifest_*.acf"):
+                try:
+                    text = manifest.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                appid = re.search(r'"appid"\s+"(\d+)"', text)
+                name = re.search(r'"name"\s+"([^"]+)"', text)
+                if appid and name and not _NOT_GAMES.search(name.group(1)):
+                    games[appid.group(1)] = (name.group(1), f"steam://rungameid/{appid.group(1)}")
+    return list(games.values())
+
+
+def epic_games(manifest_dir: Path | None = None) -> list[tuple[str, str]]:
+    """(title, launcher URI) for games installed through the Epic Games Launcher."""
+    if manifest_dir is None:
+        program_data = os.environ.get("ProgramData")
+        if not program_data:
+            return []
+        manifest_dir = Path(program_data) / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
+    games = []
+    for item in Path(manifest_dir).glob("*.item") if Path(manifest_dir).is_dir() else []:
+        try:
+            data = json.loads(item.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, ValueError):
+            continue
+        name, app = data.get("DisplayName"), data.get("AppName")
+        if name and app and not _NOT_GAMES.search(name) and data.get("bIsApplication", True):
+            games.append((name, f"com.epicgames.launcher://apps/{app}?action=launch&silent=true"))
+    return games
+
+
+def installed_programs(reader: Callable[[], list[dict]] | None = None) -> list[tuple[str, str]]:
+    """(name, exe) from Windows' list of installed programs: covers EA app, Ubisoft, Riot, GOG and others.
+
+    Only exes Windows itself registered for an installed program are used, never a path a model supplies.
+    """
+    entries = reader() if reader else _uninstall_entries()
+    programs = []
+    for e in entries:
+        name = str(e.get("DisplayName") or "").strip()
+        if not name or e.get("SystemComponent") or e.get("ParentKeyName") or _NOT_GAMES.search(name):
+            continue
+        steam = re.match(r"^Steam App (\d+)$", str(e.get("key") or ""))
+        if steam:
+            programs.append((name, f"steam://rungameid/{steam.group(1)}"))
+            continue
+        icon = str(e.get("DisplayIcon") or "").split(",")[0].strip().strip('"')
+        if icon.lower().endswith(".exe") and not re.search(r"unins|uninstall|setup|installer", Path(icon).name, re.I):
+            if Path(icon).is_file():
+                programs.append((name, icon))
+    return programs
+
+
+def _uninstall_entries() -> list[dict]:
+    if sys.platform != "win32":
+        return []
+    import winreg
+
+    out = []
+    locations = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                 (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")]
+    for hive, path in locations:
+        try:
+            root = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        with root:
+            for i in range(winreg.QueryInfoKey(root)[0]):
+                try:
+                    sub = winreg.EnumKey(root, i)
+                    with winreg.OpenKey(root, sub) as key:
+                        entry = {"key": sub}
+                        for field in ("DisplayName", "DisplayIcon", "InstallLocation", "SystemComponent", "ParentKeyName"):
+                            try:
+                                entry[field] = winreg.QueryValueEx(key, field)[0]
+                            except OSError:
+                                pass
+                        out.append(entry)
+                except OSError:
+                    continue
+    return out
+
+
+def installed_games() -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for source in (steam_games, epic_games, installed_programs):
+        try:
+            found += source()
+        except Exception:
+            log.exception("Game/program discovery failed in %s", source.__name__)
+    return found
+
+
 class FileIndex:
     """A small cached filename index over the user's own folders and the Start Menu."""
 
     def __init__(self, roots_provider: Callable[[], list[tuple[Path, str]]] = search_roots,
-                 apps_provider: Callable[[], list[tuple[str, str]]] = windows_start_apps) -> None:
+                 apps_provider: Callable[[], list[tuple[str, str]]] = windows_start_apps,
+                 games_provider: Callable[[], list[tuple[str, str]]] | None = None) -> None:
         self._roots_provider = roots_provider
         self._apps_provider = apps_provider
+        if games_provider is None:  # real discovery only alongside the real app list (tests pass fakes)
+            games_provider = installed_games if apps_provider is windows_start_apps else (lambda: [])
+        self._games_provider = games_provider
         self._entries: list[Entry] = []
         self._built = 0.0
         self._lock = threading.Lock()
@@ -226,9 +423,20 @@ class FileIndex:
         old = time.time() - 86400 * 365  # registered apps get no "recently used" boost
         try:
             for name, app_id in self._apps_provider():
-                entries.append(Entry(Path(name), _normalise(name), False, "apps", old, app_id=app_id, label=name))
+                canon, alt = matchable(name)
+                entries.append(Entry(Path(name), canon, False, "apps", old, app_id=app_id, label=name, alt=alt))
         except Exception:
             log.exception("Listing installed apps failed")
+        try:
+            seen = set()
+            for name, target in self._games_provider():
+                if (name.lower(), target) in seen:
+                    continue
+                seen.add((name.lower(), target))
+                canon, alt = matchable(name)
+                entries.append(Entry(Path(name), canon, False, "apps", old, label=name, launch=target, alt=alt))
+        except Exception:
+            log.exception("Listing games failed")
         started = time.monotonic()
         for root, kind in self._roots_provider():
             max_depth = 8 if kind == "apps" else 6
@@ -253,7 +461,11 @@ class FileIndex:
                                 continue
                             path = Path(item.path)
                             stem = name if is_dir else path.stem
-                            entries.append(Entry(path, _normalise(stem), is_dir, kind, mtime))
+                            if kind == "apps":  # shortcuts: "Grand Theft Auto V.lnk" must match "gta 5"
+                                canon, alt = matchable(stem)
+                                entries.append(Entry(path, canon, is_dir, kind, mtime, alt=alt))
+                            else:
+                                entries.append(Entry(path, _normalise(stem), is_dir, kind, mtime))
                             if is_dir and depth < max_depth and name.lower() not in SKIP_DIRS:
                                 stack.append((path, depth + 1))
                 except OSError:
@@ -265,16 +477,21 @@ class FileIndex:
         name_tokens, type_exts = _split_type_words(all_tokens)
         # "budget notes" may be a file *named* budget notes, or notes *about* the budget: try both readings
         readings = [all_tokens] if name_tokens == all_tokens else [all_tokens, name_tokens]
+        alias = _alias_reading(all_tokens)
+        if alias:
+            readings.append(alias)
         if not all_tokens:
             return []
         now = time.time()
         scored: list[tuple[float, Entry]] = []
         for e in self.entries():
-            if want == "file" and (e.is_dir or e.app_id):
+            if want == "file" and (e.is_dir or e.app_id or e.launch):
+                continue
+            if want == "app" and not (e.app_id or e.launch or e.root_kind == "apps") or (want == "app" and e.is_dir):
                 continue
             if want == "folder" and not e.is_dir:
                 continue
-            score = max(_name_score(e.name, tokens) for tokens in readings)
+            score = max(_name_score(e.name, tokens, e.alt) for tokens in readings)
             if score <= 0:
                 continue
             if type_exts:
@@ -292,13 +509,18 @@ class FileIndex:
         return scored[:limit]
 
 
-def _name_score(name: str, tokens: list[str]) -> float:
+def _name_score(name: str, tokens: list[str], alt: str = "") -> float:
     phrase = " ".join(tokens)
     if name == phrase:
         return 100.0
-    if all(t in name for t in tokens):
-        return 72.0 + 18.0 * len(phrase) / max(len(name), 1)
-    hits = sum(1 for t in tokens if t in name)
+    alt_words = set(alt.split())
+    def hit(t: str) -> bool:
+        return t in name or t in alt_words
+    if all(hit(t) for t in tokens):
+        # an acronym hit ("gta") stands for the words it abbreviates when judging coverage
+        covered = sum(len(t) if t in name else 3 * len(t) for t in tokens) + len(tokens) - 1
+        return 72.0 + 18.0 * min(1.0, covered / max(len(name), 1))
+    hits = sum(1 for t in tokens if hit(t))
     if not hits:  # tolerate small misspellings ("spotfy", "calculater")
         ratio = difflib.SequenceMatcher(None, phrase, name).ratio()
         return 58.0 * ratio if ratio >= 0.8 else 0.0
@@ -521,18 +743,35 @@ class Toolbox:
             if self.google.configured:
                 tools += [
                     _spec("google_doc", "Create, edit or read the user's Google Docs. action: create (new doc from "
-                          "title + text), append (add text to the end), replace (replace 'find' with 'text'), read, "
-                          "or list. Text may use '# Heading' and '- bullet' lines.",
-                          {"action": "create | append | replace | read | list",
+                          "title + text), append (add text to the end), rewrite (replace the whole document with text), "
+                          "replace (replace 'find' with 'text'), read, or list. Text is Markdown: '# Heading', "
+                          "'## Subheading', '- bullet', '1. numbered', **bold**, *italic*, and '| a | b |' table rows.",
+                          {"action": "create | append | rewrite | replace | read | list",
                            "document": "document name, link or ID (not needed for create)",
                            "title": "title for a new document", "text": "text to write, or the replacement",
                            "find": "text to find (replace only)"}, required=["action"]),
-                    _spec("google_slides", "Create, extend or read the user's Google Slides. action: create (new deck), "
-                          "add (append slides), read, or list. For create/add, text is an outline: slides separated "
-                          "by blank lines, first line of each is the slide title, other lines are bullet points.",
-                          {"action": "create | add | read | list",
+                    _spec("google_slides", "Create, change or read the user's Google Slides. action: create (new deck), "
+                          "add (append slides), edit (change slide 'number': title and/or text as bullet lines), "
+                          "delete (remove slide 'number'), move (move slide 'number' to position 'to'), "
+                          "replace (replace 'find' with 'text' on every slide), read, or list. Slides are numbered "
+                          "from 1 (the title slide). For create/add, text is an outline: slides separated by blank "
+                          "lines, first line of each is the slide title, other lines are bullet points. "
+                          "Read the deck first if you don't know the slide numbers.",
+                          {"action": "create | add | edit | delete | move | replace | read | list",
                            "presentation": "presentation name, link or ID (not needed for create)",
-                           "title": "title of a new presentation", "text": "slide outline"}, required=["action"]),
+                           "title": "title of a new presentation, or the new title for edit",
+                           "text": "slide outline, new bullet text for edit, or the replacement",
+                           "number": "slide number for edit/delete/move", "to": "new position for move",
+                           "find": "text to find (replace only)"}, required=["action"]),
+                    _spec("google_sheets", "Create, fill or read the user's Google Sheets spreadsheets. action: create "
+                          "(new spreadsheet; text holds the rows, the first row is the header), append (add rows at "
+                          "the bottom), write (put values at a cell range such as B2), read, or list. Rows go in text, "
+                          "one row per line with cells separated by |, e.g. 'Item | Cost\\nRent | 1200'.",
+                          {"action": "create | append | write | read | list",
+                           "spreadsheet": "spreadsheet name, link or ID (not needed for create)",
+                           "title": "title for a new spreadsheet", "text": "rows, one per line, cells separated by |",
+                           "range": "cell or range such as A1 or B2:D10 (write/read, optional)",
+                           "tab": "tab name (optional, defaults to the first tab)"}, required=["action"]),
                 ]
         return tools
 
@@ -547,7 +786,10 @@ class Toolbox:
             "read_webpage": (self.web_enabled, lambda: self.read_webpage(str(args.get("url", "")))),
             "open_website": (self.web_enabled, lambda: self.open_website(str(args.get("url", "")))),
             "google_doc": (self.web_enabled, lambda: self._google(self.google.doc, args, ("action", "document", "text", "find", "title"))),
-            "google_slides": (self.web_enabled, lambda: self._google(self.google.slides, args, ("action", "presentation", "title", "text"))),
+            "google_slides": (self.web_enabled, lambda: self._google(
+                self.google.slides, args, ("action", "presentation", "title", "text", "number", "to", "find"))),
+            "google_sheets": (self.web_enabled, lambda: self._google(
+                self.google.sheets, args, ("action", "spreadsheet", "title", "text", "range", "tab"))),
         }
         if name not in handlers:
             return json.dumps({"ok": False, "error": f"unknown tool {name}"})
@@ -565,7 +807,9 @@ class Toolbox:
     @staticmethod
     def _google(fn, args: dict, keys: tuple[str, ...]) -> dict:
         try:
-            result = fn(**{k: str(args.get(k) or "") for k in keys})
+            # Models sometimes send rows as real lists; keep those, stringify everything else.
+            result = fn(**{k: args[k] if k == "text" and isinstance(args.get(k), list)
+                           else ("" if args.get(k) is None else str(args.get(k))) for k in keys})
         except BridgeError as exc:
             raise ToolError(str(exc)) from None
         result.pop("ok", None)
@@ -585,7 +829,7 @@ class Toolbox:
             return explicit, 100.0, None
         folders = known_folders()
         key = " ".join(_query_tokens(query))
-        if key in folders and want != "file":
+        if key in folders and want not in ("file", "app"):
             return folders[key], 100.0, None
         matches = self.index.search(query, limit=1, want=want)
         if not matches or matches[0][0] < 40:
@@ -593,15 +837,19 @@ class Toolbox:
         score, entry = matches[0]
         return entry.path, score, entry
 
-    def open_target(self, query: str, min_score: float = 0.0) -> dict:
+    def open_target(self, query: str, min_score: float = 0.0, apps_only: bool = False) -> dict:
         key = " ".join(_normalise(query).replace("the ", "").split())
         try:
-            path, score, entry = self._resolve(query)
+            path, score, entry = self._resolve(query, want="app" if apps_only else "any")
         except ToolError:
             path, score, entry = None, 0.0, None
         if entry is not None and entry.app_id and score >= max(min_score, 40):
             self._launch_app(entry.app_id)
             return {"opened": entry.label, "name": entry.label, "kind": "app", "confidence": round(score)}
+        if entry is not None and entry.launch and score >= max(min_score, 40):
+            # registered by Steam/Epic/Windows itself, never a path supplied by the model or a web page
+            self._launch_system(entry.launch)
+            return {"opened": entry.label, "name": entry.label, "kind": "game", "confidence": round(score)}
         if key in SYSTEM_APPS and sys.platform == "win32" and score < 95:
             self._launch_system(SYSTEM_APPS[key])
             return {"opened": SYSTEM_APPS[key], "name": query.strip().title(), "kind": "app", "confidence": 95}
@@ -773,10 +1021,10 @@ def describe_call(name: str, args: dict) -> str:
     labels = {
         "open_file": "Opening", "find_files": "Looking for", "read_file": "Reading",
         "web_search": "Searching the web", "read_webpage": "Reading", "open_website": "Opening",
-        "google_doc": "Google Docs", "google_slides": "Google Slides",
+        "google_doc": "Google Docs", "google_slides": "Google Slides", "google_sheets": "Google Sheets",
     }
-    if name in ("google_doc", "google_slides") and isinstance(args, dict):
-        target = args.get("document") or args.get("presentation") or args.get("title") or ""
+    if name in ("google_doc", "google_slides", "google_sheets") and isinstance(args, dict):
+        target = args.get("document") or args.get("presentation") or args.get("spreadsheet") or args.get("title") or ""
         return f"{labels[name]}: {args.get('action', '')} {target}".strip()
     label = labels.get(name, name)
     return f"{label}: {arg[:80]}" if arg else label

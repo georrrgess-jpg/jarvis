@@ -391,10 +391,11 @@ class JarvisAPI:
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
 
-    # -- Google Docs & Slides bridge ---------------------------------------
+    # -- Google Docs, Slides & Sheets bridge ---------------------------------------
     def google_status(self) -> dict:
         bridge = self._assistant.tools.google
-        return {"configured": bridge.configured, "url": self._assistant.config.get("google_script_url") or ""}
+        return {"configured": bridge.configured, "outdated": bridge.outdated,
+                "url": self._assistant.config.get("google_script_url") or ""}
 
     def google_script(self) -> str:
         return self._assistant.tools.google.script_source()
@@ -403,8 +404,9 @@ class JarvisAPI:
         from core.google_bridge import BridgeError
 
         try:
-            info = self._assistant.tools.google.connect(str(url or ""))
-            return {"ok": True, "user": info.get("user")}
+            bridge = self._assistant.tools.google
+            info = bridge.connect(str(url or "") or self._assistant.config.get("google_script_url") or "")
+            return {"ok": True, "user": info.get("user"), "outdated": bridge.outdated}
         except BridgeError as exc:
             return {"ok": False, "error": str(exc)}
 

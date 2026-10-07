@@ -938,14 +938,27 @@
     async refresh() {
       const st = await call('google_status');
       if (!st) return;
-      $('#g-status').textContent = st.configured
-        ? 'Connected. Ask J.A.R.V.I.S. to create, edit or read your Google Docs and Slides.'
-        : 'Not connected. JARVIS can create and edit your Docs and Slides once you link your Google account (free, about 3 minutes).';
-      $('#g-status').classList.toggle('ok', st.configured);
+      $('#g-status').textContent = !st.configured
+        ? 'Not connected. JARVIS can create and edit your Docs, Slides and Sheets once you link your Google account (free, about 3 minutes).'
+        : st.outdated
+          ? 'Connected, but your Google script is an older version. Update it once (about a minute) to unlock Sheets, slide editing and rich formatting.'
+          : 'Connected. Ask J.A.R.V.I.S. to create, edit or read your Google Docs, Slides and Sheets.';
+      $('#g-status').classList.toggle('ok', st.configured && !st.outdated);
+      $('#g-status').classList.toggle('warn', !!(st.configured && st.outdated));
       $('#g-setup').textContent = st.configured ? 'RECONNECT' : 'SET UP';
+      $('#g-update').classList.toggle('hidden', !(st.configured && st.outdated));
       $('#g-disconnect').classList.toggle('hidden', !st.configured);
+      return st;
     },
-    open() { $('#google').classList.remove('hidden'); $('#g-url').value = ''; },
+    open(update = false) {
+      this.updating = update;
+      const modal = $('#google');
+      modal.classList.toggle('updating', update);
+      $('#g-title').textContent = update ? 'Update the Google script' : 'Link Google Docs, Slides & Sheets';
+      $('#g-connect span').textContent = update ? 'CHECK UPDATE' : 'CONNECT';
+      $('#g-copy').textContent = 'COPY SCRIPT';
+      modal.classList.remove('hidden'); $('#g-url').value = '';
+    },
     close() { $('#google').classList.add('hidden'); },
     async copy() {
       const script = await call('google_script');
@@ -961,11 +974,14 @@
     async connect() {
       const btn = $('#g-connect');
       btn.classList.add('busy'); btn.disabled = true;
-      const r = await call('google_connect', $('#g-url').value.trim());
+      const r = await call('google_connect', this.updating ? '' : $('#g-url').value.trim());
       btn.classList.remove('busy'); btn.disabled = false;
-      if (r && r.ok) {
-        toast(`Google Docs linked${r.user ? ` · ${r.user}` : ''}.`, 'ok', 6000);
-        Chat.system('Google Docs & Slides linked.', 'ok');
+      if (r && r.ok && r.outdated) {
+        toast('Google still has the old script: make sure you saved, then Deploy ▸ Manage deployments ▸ Edit ▸ New version.', 'error', 10000);
+        this.refresh();
+      } else if (r && r.ok) {
+        toast(`Google ${this.updating ? 'script updated' : 'linked'}${r.user ? ` · ${r.user}` : ''}.`, 'ok', 6000);
+        Chat.system(this.updating ? 'Google bridge updated: Sheets and slide editing unlocked.' : 'Google Docs, Slides & Sheets linked.', 'ok');
         this.close(); this.refresh();
       } else toast((r && r.error) || 'Connection failed.', 'error', 8000);
     },
@@ -1122,6 +1138,7 @@
 
     $('#boot-close').onclick = () => (api ? call('window_close') : window.close());
     $('#g-setup').onclick = () => Google.open();
+    $('#g-update').onclick = () => Google.open(true);
     $('#g-disconnect').onclick = async () => { await call('google_disconnect'); Google.refresh(); toast('Google Docs disconnected.', 'info'); };
     $('#g-copy').onclick = () => Google.copy();
     $('#g-connect').onclick = () => Google.connect();
@@ -1211,6 +1228,10 @@
     setTimeout(() => $('#boot').remove(), 1200);
     call('boot_complete');
     setTimeout(() => { if (S.ollama) Ollama.update(S.ollama); }, 1500);
+    setTimeout(async () => {
+      const st = await Google.refresh();
+      if (st && st.configured && st.outdated) Chat.system('Your Google script needs a one-time update for Sheets and slide editing: Settings ▸ Google ▸ UPDATE SCRIPT.', 'warn');
+    }, 4000);
   }
 
   document.addEventListener('DOMContentLoaded', main);

@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from core.google_bridge import BridgeError, GoogleBridge, parse_outline, script_template
+from core.google_bridge import BridgeError, GoogleBridge, parse_outline, parse_rows, script_template
 from core.tools import FileIndex, Toolbox
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -176,7 +176,7 @@ def test_tools_offered_only_when_connected(config):
     assert "google_doc" not in names()
     config.update({"google_script_url": URL})
     tb.google.token()
-    assert {"google_doc", "google_slides"} <= names()
+    assert {"google_doc", "google_slides", "google_sheets"} <= names()
     google_spec = next(s for s in tb.specs() if s["function"]["name"] == "google_doc")
     assert google_spec["function"]["parameters"]["required"] == ["action"]
     config.update({"allow_internet": False})
@@ -189,3 +189,148 @@ def test_tool_run_reports_bridge_errors_as_json(config):
     tb.google = bridge_with(config, FakeAppsScript(lambda p: {"ok": False, "error": 'no document named "ghost"'}))
     out = json.loads(tb.run("google_doc", {"action": "read", "document": "ghost"}))
     assert out == {"ok": False, "error": 'no document named "ghost"'}
+
+
+# ------------------------------------------------------------------ bridge v2: formatting, slide editing, Sheets
+
+
+def test_script_formats_rich_documents():
+    t = "T0K3N"
+    data_requests = [
+        {"token": t, "action": "doc_create", "title": "Report",
+         "text": "# Q3 **Summary**\n### Detail\n1. first step\n2. *second* step\nRevenue was **up** and costs *down*.\n"
+                 "| Item | Cost |\n|---|---|\n| **Suit** | 100 |\n| Repulsor |"},
+        {"token": t, "action": "doc_rewrite", "document": "Report", "text": "Fresh start\n- only this"},
+        {"token": t, "action": "doc_read", "document": "Report"},
+    ]
+    data = run_gas(data_requests)
+    assert all(r["ok"] for r in data["results"]), data["results"]
+    assert data["results"][2]["text"] == "Fresh start\nonly this", "rewrite replaces the whole body"
+
+    first = run_gas(data_requests[:1])
+    doc = first["files"][0]
+    p = doc["paragraphs"]
+    assert p[0] == {"text": "Q3 Summary", "heading": "HEADING1", "list": False, "marks": [{"kind": "bold", "text": "Summary"}]}
+    assert p[1]["heading"] == "HEADING3"
+    assert p[2]["glyph"] == "NUMBER" and p[3]["marks"] == [{"kind": "italic", "text": "second"}]
+    assert p[4]["marks"] == [{"kind": "bold", "text": "up"}, {"kind": "italic", "text": "down"}]
+    assert doc["tables"] == [[["Item", "Cost"], ["Suit", "100"], ["Repulsor", ""]]], "separator skipped, rows padded"
+
+
+def test_script_edits_reorders_and_deletes_slides():
+    t = "T0K3N"
+    data = run_gas([
+        {"token": t, "action": "slides_create", "title": "Pitch",
+         "slides": [{"title": "Problem", "body": ["slow"]}, {"title": "Solution", "body": ["JARVIS"]}, {"title": "Team", "body": ["Tony"]}]},
+        {"token": t, "action": "slides_move", "presentation": "Pitch", "number": 4, "to": 2},
+        {"token": t, "action": "slides_delete", "presentation": "Pitch", "number": 3},
+        {"token": t, "action": "slides_edit", "presentation": "Pitch", "number": 3, "title": "The fix", "body": ["JARVIS", "fast"]},
+        {"token": t, "action": "slides_replace", "presentation": "Pitch", "find": "Tony", "replace": "Pepper"},
+        {"token": t, "action": "slides_read", "presentation": "Pitch"},
+        {"token": t, "action": "slides_delete", "presentation": "Pitch", "number": 9},
+    ])
+    r = data["results"]
+    assert r[2]["slides"] == 3 and r[4]["replaced"] == 1
+    assert [s["text"] for s in r[5]["slides"]] == ["Pitch", "Team\nPepper", "The fix\nJARVIS\nfast"]
+    assert "between 1 and 3" in r[6]["error"]
+
+
+def test_script_creates_appends_writes_and_reads_sheets():
+    t = "T0K3N"
+    data = run_gas([
+        {"token": t, "action": "sheet_create", "title": "Budget", "rows": [["Item", "Cost"], ["Rent", 1200]]},
+        {"token": t, "action": "sheet_append", "spreadsheet": "budget", "rows": [["Food", 300], ["Fuel"]]},
+        {"token": t, "action": "sheet_write", "spreadsheet": "Budget", "range": "C1", "rows": [["Paid"], ["yes"]]},
+        {"token": t, "action": "sheet_read", "spreadsheet": "Budget"},
+        {"token": t, "action": "sheet_read", "spreadsheet": "Budget", "range": "A2:B3"},
+        {"token": t, "action": "sheet_read", "spreadsheet": "Budget", "tab": "Nope"},
+        {"token": t, "action": "list", "kind": "sheets"},
+        {"token": t, "action": "sheet_read", "spreadsheet": "ghost"},
+    ])
+    r = data["results"]
+    assert r[0]["url"].startswith("https://docs.google.com/spreadsheets/d/")
+    assert r[1]["rows_added"] == 2
+    assert r[3]["rows"] == [["Item", "Cost", "Paid"], ["Rent", "1200", "yes"], ["Food", "300", ""], ["Fuel", "", ""]]
+    assert r[3]["tabs"] == ["Sheet1"] and r[4]["rows"] == [["Rent", "1200"], ["Food", "300"]]
+    assert 'no tab named "Nope"' in r[5]["error"]
+    assert [f["title"] for f in r[6]["files"]] == ["Budget"]
+    assert 'no spreadsheet named "ghost"' in r[7]["error"]
+    assert data["files"][0]["tabs"][0]["bold"] == [{"row": 1, "w": "bold"}], "header row is bold"
+
+
+def test_parse_rows_variants():
+    assert parse_rows("| Item | Cost |\n|---|:--:|\n| **Rent** | 1,200 |\n| Food | 30.5 |") == [
+        ["Item", "Cost"], ["Rent", 1200], ["Food", 30.5]]
+    assert parse_rows('Name, Age\n"Stark, Tony", 48') == [["Name", "Age"], ["Stark, Tony", 48]]
+    assert parse_rows("a\tb\n1\t-2") == [["a", "b"], [1, -2]]
+    assert parse_rows("007 | 02134 | 0.5") == [["007", "02134", 0.5]], "leading zeros stay text"
+    assert parse_rows(r"Item | Cost\nRent | 1200") == [["Item", "Cost"], ["Rent", 1200]], "escaped newlines"
+    assert parse_rows([["a", "1"], ["b"]]) == [["a", 1], ["b"]]
+    assert parse_rows("") == []
+
+
+def test_sheets_and_slide_edits_map_to_script_calls(config):
+    config.update({"google_script_url": URL})
+    server = FakeAppsScript()
+    bridge = bridge_with(config, server)
+    bridge.sheets("create", title="Budget", text="Item | Cost\nRent | 1200")
+    bridge.sheets("append", spreadsheet="Budget", text="Food | 300")
+    bridge.sheets("write", spreadsheet="Budget", range="c 2", text="yes")
+    bridge.sheets("read", spreadsheet="Budget", tab="Q3")
+    bridge.slides("delete", presentation="Pitch", number="3")
+    bridge.slides("move", presentation="Pitch", number=4, to="2")
+    bridge.slides("edit", presentation="Pitch", number="2", title="New", text="- one\n- two")
+    bridge.slides("replace", presentation="Pitch", find="2025", text="2026")
+    bridge.doc("rewrite", document="Notes", text="# Fresh")
+    actions = [(p["action"], {k: v for k, v in p.items() if k not in ("token", "action")}) for p in server.posts]
+    assert actions == [
+        ("sheet_create", {"title": "Budget", "rows": [["Item", "Cost"], ["Rent", 1200]]}),
+        ("sheet_append", {"spreadsheet": "Budget", "rows": [["Food", 300]]}),
+        ("sheet_write", {"spreadsheet": "Budget", "range": "C2", "rows": [["yes"]]}),
+        ("sheet_read", {"spreadsheet": "Budget", "tab": "Q3"}),
+        ("slides_delete", {"presentation": "Pitch", "number": 3}),
+        ("slides_move", {"presentation": "Pitch", "number": 4, "to": 2}),
+        ("slides_edit", {"presentation": "Pitch", "number": 2, "title": "New", "body": ["one", "two"]}),
+        ("slides_replace", {"presentation": "Pitch", "find": "2025", "replace": "2026"}),
+        ("doc_rewrite", {"document": "Notes", "text": "# Fresh"}),
+    ]
+    for bad in (lambda: bridge.slides("delete", presentation="Pitch", number="first"),
+                lambda: bridge.slides("move", presentation="Pitch", number=2),
+                lambda: bridge.sheets("write", spreadsheet="Budget", range="the top", text="x"),
+                lambda: bridge.sheets("append", spreadsheet="Budget", text="")):
+        with pytest.raises(BridgeError):
+            bad()
+
+
+def test_old_script_versions_get_update_instructions(config):
+    config.update({"google_script_url": URL})
+    bridge = bridge_with(config, FakeAppsScript(lambda p: {"ok": False, "error": "unknown action: sheet_create"}))
+    with pytest.raises(BridgeError, match="New version"):
+        bridge.sheets("create", title="Budget")
+
+
+def test_sheets_tool_accepts_rows_as_lists(config):
+    config.update({"google_script_url": URL})
+    tb = Toolbox(config, index=FileIndex(lambda: [], apps_provider=lambda: []))
+    server = FakeAppsScript(lambda p: {"ok": True, "url": "https://docs.google.com/spreadsheets/d/x/edit"})
+    tb.google = bridge_with(config, server)
+    out = json.loads(tb.run("google_sheets", {"action": "create", "title": "Gear", "text": [["Suit", "Mark 85"], ["Cost", "1e6"]]}))
+    assert out["ok"] and server.posts[0]["rows"] == [["Suit", "Mark 85"], ["Cost", "1e6"]]
+    out = json.loads(tb.run("google_slides", {"action": "delete", "presentation": "Pitch", "number": 2}))
+    assert out["ok"] and server.posts[1]["number"] == 2
+
+
+def test_outdated_scripts_are_detected(config):
+    from core.google_bridge import script_version
+
+    assert script_version() >= 2
+    old = bridge_with(config, FakeAppsScript(lambda p: {"ok": True, "user": "t@x", "version": 1}))
+    old.connect(URL)
+    assert old.outdated, "a v1 script can't do Sheets"
+    new = bridge_with(config, FakeAppsScript(lambda p: {"ok": True, "user": "t@x", "version": script_version()}))
+    new.connect(URL)
+    assert not new.outdated
+    stale = bridge_with(config, FakeAppsScript(lambda p: {"ok": False, "error": "unknown action: sheet_read"}))
+    with pytest.raises(BridgeError):
+        stale.sheets("read", spreadsheet="Budget")
+    assert stale.outdated, "an unknown-action reply marks the script as needing an update"

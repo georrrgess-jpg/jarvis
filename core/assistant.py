@@ -39,6 +39,27 @@ _STOP_PHRASES = {
     "that's all", "thats all", "that is all", "nothing", "be quiet", "quiet", "shut up", "hush", "enough",
     "thank you that's all", "thanks that's all", "no thanks", "dismiss", "go to sleep", "standby", "stand by",
 }
+_LEAD = r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you |will you |let's |lets |i want to |i wanna )*"
+_PLAY_COMMAND = re.compile(
+    _LEAD + r"(?:play|fire up|boot up|game on)\s+(?:the\s+game\s+|a\s+game\s+of\s+|some\s+)?(?P<target>.+?)"
+    r"(?:\s+(?:please|for me|now))?[\s.!?]*$", re.IGNORECASE)
+_SEARCH_COMMAND = re.compile(
+    _LEAD + r"(?:search(?:\s+(?:the\s+web|the\s+internet|online|google))?(?:\s+for)?|look\s+up|google(?!\s+(?:docs?|sheets?|slides?|drive|calendar|maps)\b)|find\s+out(?:\s+about)?)"
+    r"\s+(?P<query>.+?)[\s.!?]*$", re.IGNORECASE)
+# Questions whose answer changes over time: always ground them in a fresh search.
+_LIVE_INFO = re.compile(
+    r"\b(weather|forecast|temperature (?:in|outside)|news|headlines?|latest|scores?|who won|stock|share price|"
+    r"price of|exchange rate|bitcoin|crypto|right now|today'?s|tonight|this week|traffic|release date|"
+    r"when is the next|when does .* come out)\b", re.IGNORECASE)
+_CLOCK = re.compile(
+    r"^(?:(?:hey |ok )?jarvis[, ]+)?(?:what(?:'s| is)?\s+(?:the\s+)?(?P<what>time|date|day)(?:\s+is\s+it)?(?:\s+(?:today|now|right now))?"
+    r"|what\s+day\s+is\s+(?:it|today)|what(?:'s| is)\s+today'?s\s+date)[\s?.!]*$", re.IGNORECASE)
+# Only offer tools when the request plausibly needs one: small models otherwise call them for small talk.
+_TOOL_CUES = re.compile(
+    r"\b(open|launch|start|run|play|close|file|files|folder|document|doc|docs|docx|pdf|read|find|desktop|downloads|"
+    r"spreadsheet|sheet|sheets|slides?|presentation|deck|app|game|search|look up|google|internet|online|web|website|"
+    r"news|weather|latest|current|price|who|what|when|where|which|how much|how many|define|meaning|summari[sz]e|"
+    r"write|create|make|add|edit|update|replace|list|delete|remove|move|reorder|rearrange|rename|table|row|rows|column|cell)\b", re.IGNORECASE)
 _OPEN_COMMAND = re.compile(
     r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you )*(?:open|launch|start|run|load|pull up|bring up|show me)"
     r"\s+(?:up\s+)?(?:the\s+|my\s+)?(?P<target>.+?)(?:\s+(?:please|for me|now))?[\s.!?]*$",
@@ -493,8 +514,27 @@ class Assistant:
     def _tool_used(self, turn: Turn, name: str, args: dict) -> None:
         self._emit_turn(turn, "tool_activity", tool=name, label=describe_call(name, args))
 
+    def _clock_answer(self, text: str) -> str | None:
+        match = _CLOCK.match(text.strip())
+        if not match:
+            return None
+        now = datetime.now()
+        if (match.group("what") or "day").lower() == "time":
+            hour = now.hour % 12 or 12
+            return f"It's {hour}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}, {self.title}."
+        return f"Today is {now.strftime('%A')}, {now.day} {now.strftime('%B %Y')}, {self.title}."
+
     def _direct_command(self, turn: Turn, text: str) -> str | None:
-        """Handle plain "open X" requests without the model: instant, and reliable even with small models."""
+        """Handle plain "open X" / "play X" requests without the model: instant, and reliable even with small models."""
+        play = _PLAY_COMMAND.match(text.strip())
+        if play and self.tools.files_enabled:
+            target = play.group("target").strip(" \"'")
+            try:
+                result = self.tools.open_target(target, min_score=70, apps_only=True)
+                self._tool_used(turn, "open_file", {"query": target})
+                return f"Launching {result['name']}. Enjoy, {self.title}."
+            except ToolError:
+                return None  # "play some jazz" etc. goes to the model
         match = _OPEN_COMMAND.match(text.strip())
         if not match:
             return None
@@ -528,6 +568,10 @@ class Assistant:
         if direct:
             self._deliver(turn, [direct])
             return
+        clock = self._clock_answer(text)
+        if clock:
+            self._deliver(turn, [clock])
+            return
 
         if not (self.llm.online and self.llm.model):
             self.check_ollama()  # maybe the user just started it
@@ -537,8 +581,16 @@ class Assistant:
                                  "The setup steps are on screen."])
             return
         toolbox = self.tools if (self.tools.files_enabled or self.tools.web_enabled) else None
+        prefetch = []
+        if self.tools.web_enabled:
+            search = _SEARCH_COMMAND.match(text.strip())
+            query = search.group("query") if search else (text if _LIVE_INFO.search(text) else None)
+            if query:
+                self._tool_used(turn, "web_search", {"query": query})
+                prefetch.append(("web_search", {"query": query}, self.tools.run("web_search", {"query": query})))
         self._deliver(turn, self.llm.stream_reply(
-            text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args)))
+            text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args),
+            offer_tools=bool(_TOOL_CUES.search(text)), prefetch=prefetch))
 
     def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None) -> None:
         mid = f"a{next(self._ids)}"

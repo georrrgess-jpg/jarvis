@@ -467,3 +467,106 @@ def test_real_windows_start_apps():
     apps = windows_start_apps()
     print(f"{len(apps)} Start menu apps, e.g. {apps[:5]}")
     assert apps, "Get-StartApps returned nothing"
+
+
+# ------------------------------------------------------------------ games: Steam, Epic, EA app
+
+
+@pytest.fixture
+def game_library(tmp_path):
+    steam = tmp_path / "Steam"
+    second = tmp_path / "Games" / "SteamLibrary"
+    (steam / "steamapps").mkdir(parents=True)
+    (second / "steamapps").mkdir(parents=True)
+    escaped = str(second).replace("\\", "\\\\")
+    (steam / "steamapps" / "libraryfolders.vdf").write_text(
+        f'"libraryfolders"\n{{\n\t"0"\n\t{{\n\t\t"path"\t\t"{steam}"\n\t}}\n\t"1"\n\t{{\n\t\t"path"\t\t"{escaped}"\n\t}}\n}}\n')
+
+    def manifest(lib, appid, name):
+        (lib / "steamapps" / f"appmanifest_{appid}.acf").write_text(
+            f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"Universe"\t\t"1"\n\t"name"\t\t"{name}"\n\t"StateFlags"\t\t"4"\n}}\n')
+
+    manifest(steam, 271590, "Grand Theft Auto V Legacy")
+    manifest(second, 1174180, "Red Dead Redemption 2")
+    manifest(second, 228980, "Steamworks Common Redistributables")
+    epic = tmp_path / "Epic"
+    epic.mkdir()
+    (epic / "a.item").write_text(json.dumps({"DisplayName": "Fortnite", "AppName": "Fortnite", "bIsApplication": True}))
+    fc_exe = tmp_path / "EA Games" / "EA SPORTS FC 26" / "FC26.exe"
+    fc_exe.parent.mkdir(parents=True)
+    fc_exe.write_bytes(b"MZ")
+    uninstall = [
+        {"key": "{EA-FC26}", "DisplayName": "EA SPORTS FC™ 26", "DisplayIcon": f'"{fc_exe}",0'},
+        {"key": "{EA-FC26-UNINST}", "DisplayName": "EA app", "DisplayIcon": str(tmp_path / "missing.exe")},
+        {"key": "Steam App 271590", "DisplayName": "Grand Theft Auto V Legacy"},
+        {"key": "{VC}", "DisplayName": "Microsoft Visual C++ 2022 Redistributable", "DisplayIcon": str(fc_exe)},
+    ]
+    return {"steam": [steam], "epic": epic, "uninstall": uninstall, "fc_exe": fc_exe}
+
+
+def test_steam_library_parsing(game_library):
+    from core.tools import steam_games
+
+    games = dict(steam_games(game_library["steam"]))
+    assert games == {"Grand Theft Auto V Legacy": "steam://rungameid/271590",
+                     "Red Dead Redemption 2": "steam://rungameid/1174180"}, "both libraries, no redistributables"
+
+
+def test_epic_and_installed_programs(game_library):
+    from core.tools import epic_games, installed_programs
+
+    assert epic_games(game_library["epic"]) == [
+        ("Fortnite", "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true")]
+    programs = installed_programs(lambda: game_library["uninstall"])
+    assert ("EA SPORTS FC™ 26", str(game_library["fc_exe"])) in programs
+    assert ("Grand Theft Auto V Legacy", "steam://rungameid/271590") in programs
+    assert not any("Redistributable" in n or n == "EA app" for n, _ in programs)
+
+
+@pytest.fixture
+def gamer_box(config, game_library):
+    from core.tools import epic_games, installed_programs, steam_games
+
+    launched = Launches()
+
+    def games():
+        return (steam_games(game_library["steam"]) + epic_games(game_library["epic"])
+                + installed_programs(lambda: game_library["uninstall"]))
+
+    index = FileIndex(lambda: [], apps_provider=lambda: [("Steam", "Valve.Steam"), ("EA", "Electronic Arts.EA")],
+                      games_provider=games)
+    tb = Toolbox(config, index=index, launcher=launched.paths.append, url_launcher=launched.urls.append,
+                 system_launcher=lambda target: launched.paths.append(target),
+                 app_launcher=lambda app_id: launched.paths.append(f"app:{app_id}"))
+    tb.launched = launched
+    return tb
+
+
+@pytest.mark.parametrize("spoken, expected", [
+    ("gta 5", "steam://rungameid/271590"),
+    ("GTA V", "steam://rungameid/271590"),
+    ("gta five", "steam://rungameid/271590"),
+    ("grand theft auto", "steam://rungameid/271590"),
+    ("red dead redemption 2", "steam://rungameid/1174180"),
+    ("rdr2", "steam://rungameid/1174180"),
+    ("rdr 2", "steam://rungameid/1174180"),
+    ("fortnite", "com.epicgames.launcher://apps/Fortnite?action=launch&silent=true"),
+    ("fifa 26", "EA SPORTS FC 26/FC26.exe"),
+    ("fc 26", "EA SPORTS FC 26/FC26.exe"),
+    ("ea sports fc", "EA SPORTS FC 26/FC26.exe"),
+])
+def test_games_open_by_nickname(gamer_box, spoken, expected):
+    result = gamer_box.open_target(spoken, min_score=70, apps_only=True)
+    assert result["kind"] == "game"
+    assert str(gamer_box.launched.paths[-1]).replace("\\", "/").endswith(expected)
+
+
+def test_launchers_still_open_as_apps(gamer_box):
+    assert gamer_box.open_target("steam", min_score=70)["name"] == "Steam"
+    assert gamer_box.launched.paths[-1] == "app:Valve.Steam"
+
+
+def test_play_never_opens_documents(box):
+    with pytest.raises(ToolError):
+        box.open_target("budget notes", min_score=70, apps_only=True)
+    assert box.launched.paths == []

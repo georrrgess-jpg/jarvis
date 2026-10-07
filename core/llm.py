@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import platform
 import shutil
 import socket
@@ -34,6 +35,7 @@ Guidelines:
 - Do not use markdown, bullet points, headings or emoji unless the user asks for code, a list or a table.
 - When you write code, put it in a fenced code block and keep the spoken explanation short.
 - Never invent facts. If you are unsure, or the question is about news, weather, prices or anything recent, search the web.
+- Answer only the user's latest message. Don't repeat earlier answers, don't narrate what you are about to do, and don't ask follow-up questions unless you truly need information.
 {abilities}
 Context: it is {now}. The host computer is "{host}" running {os_name}."""
 
@@ -43,6 +45,41 @@ ABILITIES = """- You have tools: you can open files, folders and apps on this co
 """
 NO_ABILITIES = "- You cannot browse the internet or open files on this computer (those abilities are switched off).\n"
 MAX_TOOL_ROUNDS = 4
+TOOL_TEMPERATURE = 0.4  # small models pick tools far more reliably when they're not being creative
+
+# Small models (llama3.2 in particular) often *write* a tool call as text instead of making one.
+_TEXT_CALL_START = re.compile(r'^\s*(?:<\|python_tag\|>|```(?:json)?\s*[\[{]|\{\s*"(?:name|function|type)"|\[\s*\{\s*"(?:name|type)")')
+
+
+def parse_text_tool_calls(text: str, known: set[str]) -> list[dict] | None:
+    """Recover tool calls a model typed out as JSON. Returns None unless *every* item is a valid call."""
+    t = re.sub(r"^\s*<\|python_tag\|>", "", text).strip()
+    t = re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", t).strip()
+    t = t.replace("<|eom_id|>", "").replace("<|eot_id|>", "").strip()
+    try:
+        data, end = json.JSONDecoder().raw_decode(t)
+    except ValueError:
+        return None
+    if t[end:].strip(" ;\n"):
+        return None  # prose after the JSON: it was an answer that happened to start with a brace
+    items = data if isinstance(data, list) else [data]
+    calls = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        if item.get("type") == "function" and isinstance(item.get("function"), dict):
+            item = item["function"]
+        name = item.get("name")
+        args = item.get("parameters", item.get("arguments", {}))
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                return None
+        if name not in known or not isinstance(args, dict):
+            return None
+        calls.append({"name": name, "arguments": args})
+    return calls or None
 
 
 class LLMError(Exception):
@@ -211,16 +248,28 @@ class LLMEngine:
             self._history.clear()
 
     def stream_reply(self, text: str, cancel: threading.Event | None = None, toolbox=None,
-                     on_tool: Callable[[str, dict], None] | None = None) -> Iterator[str]:
-        """Yield the reply token by token, running any tool calls in between. Memory is updated at the end."""
+                     on_tool: Callable[[str, dict], None] | None = None, offer_tools: bool = True,
+                     prefetch: list[tuple[str, dict, str]] | None = None) -> Iterator[str]:
+        """Yield the reply token by token, running any tool calls in between. Memory is updated at the end.
+
+        ``prefetch`` holds tool results gathered before the model runs (e.g. a web search the
+        assistant already knew it needed); they are presented as if the model had called them.
+        """
         if not self.model:
             raise LLMModelError("No language model is selected.")
         cancel = cancel or threading.Event()
-        specs = toolbox.specs() if toolbox is not None and self._tools_supported.get(self.model, True) else []
+        specs = (toolbox.specs() if toolbox is not None and offer_tools
+                 and self._tools_supported.get(self.model, True) else [])
         with self._lock:
             history = list(self._history)
-        messages = [{"role": "system", "content": self.system_prompt(tools=bool(specs))}, *history,
+        messages = [{"role": "system", "content": self.system_prompt(tools=bool(specs) or bool(prefetch))}, *history,
                     {"role": "user", "content": text}]
+        for name, args, result in prefetch or []:
+            messages.append({"role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": args}}]})
+            messages.append({"role": "tool", "content": result[:12000], "tool_name": name})
+        temperature = float(self._config.get("temperature", 0.7))
+        if specs or prefetch:
+            temperature = min(temperature, TOOL_TEMPERATURE)
 
         client = self._client_factory(httpx.Timeout(300.0, connect=4.0))
         parts: list[str] = []
@@ -230,8 +279,11 @@ class LLMEngine:
         try:
             for round_no in range(MAX_TOOL_ROUNDS + 1):
                 tools_now = specs if round_no < MAX_TOOL_ROUNDS else []
+                known = {t["function"]["name"] for t in tools_now}
                 round_text: list[str] = []
                 calls: list[dict] = []
+                pending = ""  # start of the round, held back until we know it isn't a typed-out tool call
+                holding = bool(tools_now)
                 try:
                     stream = client.chat(
                         model=self.model,
@@ -239,23 +291,33 @@ class LLMEngine:
                         tools=tools_now or None,
                         stream=True,
                         keep_alive="30m",
-                        options={"temperature": float(self._config.get("temperature", 0.7)), "num_ctx": 8192 if specs else 4096},
+                        options={"temperature": temperature, "num_ctx": 8192 if (specs or prefetch) else 4096},
                     )
                     for chunk in stream:
                         if cancel.is_set():
                             break
                         message = chunk["message"]
                         piece = message["content"] or ""
-                        if piece:
-                            if first is None:
-                                first = time.monotonic()
-                            chunks += 1
-                            parts.append(piece)
-                            round_text.append(piece)
-                            yield piece
                         for call in message.get("tool_calls") or []:
                             fn = call["function"]
                             calls.append({"name": fn["name"], "arguments": dict(fn.get("arguments") or {})})
+                        if piece:
+                            round_text.append(piece)
+                            if holding:
+                                pending += piece
+                                stripped = pending.lstrip()
+                                if _TEXT_CALL_START.match(pending):
+                                    piece = ""  # keep holding until the round ends
+                                elif len(stripped) >= 14 or (stripped and stripped[0] not in "{[<`"):
+                                    holding, piece, pending = False, pending, ""
+                                else:
+                                    piece = ""
+                            if piece:
+                                if first is None:
+                                    first = time.monotonic()
+                                chunks += 1
+                                parts.append(piece)
+                                yield piece
                         if chunk.get("done"):
                             break
                 except ollama.ResponseError as exc:
@@ -263,9 +325,19 @@ class LLMEngine:
                         log.info("Model %s does not support tools; continuing without them", self.model)
                         self._tools_supported[self.model] = False
                         specs = []
-                        messages[0]["content"] = self.system_prompt(tools=False)
+                        messages[0]["content"] = self.system_prompt(tools=bool(prefetch))
                         continue
                     raise
+                if pending and not calls:
+                    rescued = parse_text_tool_calls(pending, known)
+                    if rescued:
+                        log.info("Recovered %d tool call(s) the model typed as text", len(rescued))
+                        calls, round_text = rescued, []
+                    elif pending.strip():
+                        if first is None:
+                            first = time.monotonic()
+                        parts.append(pending)
+                        yield pending
                 if cancel.is_set() or not calls or toolbox is None:
                     break
                 messages.append({"role": "assistant", "content": "".join(round_text),

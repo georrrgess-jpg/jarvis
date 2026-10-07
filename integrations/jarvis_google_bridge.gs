@@ -11,10 +11,13 @@
  *   3. Authorize access when Google asks, then copy the Web app URL into JARVIS.
  */
 var JARVIS_TOKEN = '__JARVIS_TOKEN__';
+var BRIDGE_VERSION = 2;
 var MIME = {
   docs: 'application/vnd.google-apps.document',
   slides: 'application/vnd.google-apps.presentation',
+  sheets: 'application/vnd.google-apps.spreadsheet',
 };
+var MAX_ROWS = 200;
 var MAX_TEXT = 20000;
 
 function doPost(e) {
@@ -39,16 +42,16 @@ function doPost(e) {
 }
 
 function doGet() {
-  return reply_({ ok: true, service: 'jarvis-google-bridge', version: 1 });
+  return reply_({ ok: true, service: 'jarvis-google-bridge', version: BRIDGE_VERSION });
 }
 
 var ACTIONS = {
   ping: function () {
-    return { service: 'jarvis-google-bridge', version: 1, user: Session.getEffectiveUser().getEmail() };
+    return { service: 'jarvis-google-bridge', version: BRIDGE_VERSION, user: Session.getEffectiveUser().getEmail() };
   },
 
   list: function (req) {
-    return { files: findFiles_(req.kind === 'slides' ? MIME.slides : MIME.docs, req.query || '', 10) };
+    return { files: findFiles_(MIME[req.kind] || MIME.docs, req.query || '', 10) };
   },
 
   // ---------------------------------------------------------------- Docs
@@ -68,6 +71,15 @@ var ACTIONS = {
   doc_append: function (req) {
     var doc = openDoc_(req.document);
     writeLines_(doc.getBody(), req.text || '', false);
+    doc.saveAndClose();
+    return describe_(doc);
+  },
+
+  doc_rewrite: function (req) {
+    var doc = openDoc_(req.document);
+    var body = doc.getBody();
+    body.clear();
+    writeLines_(body, req.text || '', true);
     doc.saveAndClose();
     return describe_(doc);
   },
@@ -100,6 +112,100 @@ var ACTIONS = {
     addSlide_(deck, req.title, req.body);
     deck.saveAndClose();
     return describe_(deck);
+  },
+
+  slides_delete: function (req) {
+    var deck = openDeck_(req.presentation);
+    var slide = slideAt_(deck, req.number);
+    slide.remove();
+    deck.saveAndClose();
+    var out = describe_(deck);
+    out.slides = deck.getSlides().length;
+    return out;
+  },
+
+  slides_move: function (req) {
+    var deck = openDeck_(req.presentation);
+    var slide = slideAt_(deck, req.number);
+    var count = deck.getSlides().length;
+    var to = Math.max(1, Math.min(count, parseInt(req.to, 10) || count));
+    slide.move(to - 1);
+    deck.saveAndClose();
+    return describe_(deck);
+  },
+
+  slides_edit: function (req) {
+    var deck = openDeck_(req.presentation);
+    var slide = slideAt_(deck, req.number);
+    var shapes = textShapes_(slide);
+    if (req.title !== undefined && req.title !== '') {
+      if (!setPlaceholder_(slide, [SlidesApp.PlaceholderType.TITLE, SlidesApp.PlaceholderType.CENTERED_TITLE], req.title) && shapes[0]) {
+        shapes[0].getText().setText(req.title);
+      }
+    }
+    if (req.body !== undefined && req.body !== '') {
+      var text = Array.isArray(req.body) ? req.body.join('\n') : String(req.body);
+      if (!setPlaceholder_(slide, [SlidesApp.PlaceholderType.BODY, SlidesApp.PlaceholderType.SUBTITLE], text) && shapes[1]) {
+        shapes[1].getText().setText(text);
+      }
+    }
+    deck.saveAndClose();
+    return describe_(deck);
+  },
+
+  slides_replace: function (req) {
+    if (!req.find) throw new Error('nothing to find');
+    var deck = openDeck_(req.presentation);
+    var count = deck.replaceAllText(req.find, req.replace || '');
+    deck.saveAndClose();
+    var out = describe_(deck);
+    out.replaced = count;
+    return out;
+  },
+
+  // ---------------------------------------------------------------- Sheets
+  sheet_create: function (req) {
+    var ss = SpreadsheetApp.create(req.title || 'Untitled spreadsheet');
+    var sheet = ss.getSheets()[0];
+    var rows = rows_(req.rows);
+    if (rows.length) {
+      sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+      sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold');
+      sheet.autoResizeColumns(1, rows[0].length);
+    }
+    return describe_(ss);
+  },
+
+  sheet_append: function (req) {
+    var ss = openSheet_(req.spreadsheet);
+    var sheet = tab_(ss, req.tab);
+    var rows = rows_(req.rows);
+    if (!rows.length) throw new Error('no rows to add');
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    var out = describe_(ss);
+    out.rows_added = rows.length;
+    return out;
+  },
+
+  sheet_write: function (req) {
+    var ss = openSheet_(req.spreadsheet);
+    var sheet = tab_(ss, req.tab);
+    var rows = rows_(req.rows);
+    if (!rows.length) throw new Error('no values to write');
+    sheet.getRange(req.range || 'A1').offset(0, 0, rows.length, rows[0].length).setValues(rows);
+    return describe_(ss);
+  },
+
+  sheet_read: function (req) {
+    var ss = openSheet_(req.spreadsheet);
+    var sheet = tab_(ss, req.tab);
+    var range = req.range ? sheet.getRange(req.range) : sheet.getDataRange();
+    var values = range.getDisplayValues();
+    return {
+      title: ss.getName(), url: ss.getUrl(), tab: sheet.getName(),
+      tabs: ss.getSheets().map(function (s) { return s.getName(); }),
+      rows: values.slice(0, MAX_ROWS), truncated: values.length > MAX_ROWS,
+    };
   },
 
   slides_read: function (req) {
@@ -135,7 +241,8 @@ function resolveId_(ref, mime) {
   if (m) return m[1];
   if (/^[A-Za-z0-9_-]{25,}$/.test(ref)) return ref;
   var found = findFiles_(mime, ref, 1);
-  if (!found.length) throw new Error('no ' + (mime === MIME.slides ? 'presentation' : 'document') + ' named "' + ref + '"');
+  var kind = mime === MIME.slides ? 'presentation' : mime === MIME.sheets ? 'spreadsheet' : 'document';
+  if (!found.length) throw new Error('no ' + kind + ' named "' + ref + '"');
   return found[0].id;
 }
 
@@ -156,30 +263,106 @@ function findFiles_(mime, query, limit) {
 
 function openDoc_(ref) { return DocumentApp.openById(resolveId_(ref, MIME.docs)); }
 function openDeck_(ref) { return SlidesApp.openById(resolveId_(ref, MIME.slides)); }
+function openSheet_(ref) { return SpreadsheetApp.openById(resolveId_(ref, MIME.sheets)); }
 
-/** Writes text line by line: "# " / "## " headings, "- " or "* " bullets, everything else paragraphs. */
+function tab_(ss, name) {
+  if (!name) return ss.getSheets()[0];
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) throw new Error('no tab named "' + name + '"');
+  return sheet;
+}
+
+/** Rectangular 2-D array (Sheets rejects ragged rows). */
+function rows_(rows) {
+  rows = Array.isArray(rows) ? rows.filter(function (r) { return Array.isArray(r); }) : [];
+  var width = rows.reduce(function (w, r) { return Math.max(w, r.length); }, 0);
+  return rows.map(function (r) {
+    var out = r.slice();
+    while (out.length < width) out.push('');
+    return out;
+  });
+}
+
+function slideAt_(deck, number) {
+  var slides = deck.getSlides();
+  var n = parseInt(number, 10);
+  if (!n || n < 1 || n > slides.length) throw new Error('slide number must be between 1 and ' + slides.length);
+  return slides[n - 1];
+}
+
+function textShapes_(slide) {
+  return slide.getShapes().filter(function (shape) {
+    try { shape.getText(); return true; } catch (err) { return false; }
+  });
+}
+
+/**
+ * Writes Markdown-ish text: "#"/"##"/"###" headings, "- "/"* " bullets, "1. " numbered items,
+ * "| a | b |" tables, and **bold** / *italic* inline. Everything else becomes a paragraph.
+ */
 function writeLines_(body, text, replaceFirst) {
   var lines = String(text).replace(/\r/g, '').split('\n');
-  var firstUsed = !replaceFirst;
-  lines.forEach(function (line) {
-    var heading = null, bullet = false, content = line;
-    if (/^##\s+/.test(line)) { heading = DocumentApp.ParagraphHeading.HEADING2; content = line.replace(/^##\s+/, ''); }
-    else if (/^#\s+/.test(line)) { heading = DocumentApp.ParagraphHeading.HEADING1; content = line.replace(/^#\s+/, ''); }
-    else if (/^\s*[-*]\s+/.test(line)) { bullet = true; content = line.replace(/^\s*[-*]\s+/, ''); }
-    var para;
-    if (!firstUsed && !bullet) {
-      para = body.getParagraphs()[0];
-      para.setText(content);
-      firstUsed = true;
-    } else if (bullet) {
-      para = body.appendListItem(content);
-      para.setGlyphType(DocumentApp.GlyphType.BULLET);
-      firstUsed = true;
-    } else {
-      para = body.appendParagraph(content);
+  var firstFree = replaceFirst;
+  var H = DocumentApp.ParagraphHeading;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(line)) {  // table block
+      var cells = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        if (!/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) {
+          cells.push(lines[i].trim().replace(/^\||\|$/g, '').split('|').map(function (c) { return stripMarks_(c.trim()); }));
+        }
+        i++;
+      }
+      i--;
+      if (cells.length) body.appendTable(rows_(cells));
+      continue;
     }
+    var heading = null, glyph = null, content = line, m;
+    if ((m = line.match(/^(#{1,3})\s+(.*)$/))) {
+      heading = [H.HEADING1, H.HEADING2, H.HEADING3][m[1].length - 1];
+      content = m[2];
+    } else if ((m = line.match(/^\s*[-*\u2022]\s+(.*)$/))) {
+      glyph = DocumentApp.GlyphType.BULLET; content = m[1];
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      glyph = DocumentApp.GlyphType.NUMBER; content = m[1];
+    }
+    var rich = inline_(content);
+    var para;
+    if (glyph) {
+      para = body.appendListItem(rich.text);
+      para.setGlyphType(glyph);
+    } else if (firstFree) {
+      para = body.getParagraphs()[0];
+      para.setText(rich.text);
+    } else {
+      para = body.appendParagraph(rich.text);
+    }
+    firstFree = false;
     if (heading) para.setHeading(heading);
-  });
+    if (rich.text) {
+      var t = para.editAsText();
+      rich.spans.forEach(function (s) {
+        if (s.end > s.start) (s.bold ? t.setBold(s.start, s.end - 1, true) : t.setItalic(s.start, s.end - 1, true));
+      });
+    }
+  }
+}
+
+function stripMarks_(s) { return s.replace(/\*\*(.+?)\*\*/g, '$1').replace(/(^|[^*])\*(?!\s)(.+?)\*/g, '$1$2'); }
+
+/** Removes **bold** / *italic* markers and records where the formatted spans are in the plain text. */
+function inline_(content) {
+  var out = '', spans = [], re = /\*\*(.+?)\*\*|\*(?!\s)([^*]+?)\*/g, last = 0, m;
+  while ((m = re.exec(content))) {
+    out += content.slice(last, m.index);
+    var inner = m[1] !== undefined ? m[1] : m[2];
+    spans.push({ start: out.length, end: out.length + inner.length, bold: m[1] !== undefined });
+    out += inner;
+    last = re.lastIndex;
+  }
+  out += content.slice(last);
+  return { text: out, spans: spans };
 }
 
 function setPlaceholder_(slide, types, text) {

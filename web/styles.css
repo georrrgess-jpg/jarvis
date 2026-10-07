@@ -360,6 +360,8 @@ kbd {
 .msg.system.error .msg-body { color: rgb(var(--red)); }
 .msg.system.error::before { background: rgb(var(--red)); box-shadow: 0 0 8px rgb(var(--red)); }
 .msg.system.ok .msg-body { color: rgb(var(--green)); }
+.msg.system.warn .msg-body { color: rgb(var(--amber)); }
+.msg.system.warn::before { background: rgb(var(--amber)); box-shadow: 0 0 8px rgb(var(--amber)); }
 .msg.system.tool { padding: 0 0 0 52px; margin: -6px 0 12px; }
 .msg.system.tool::before { display: none; }
 .msg.system.tool .msg-body { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; border: 1px solid rgb(var(--amber) / .35);
@@ -456,6 +458,8 @@ kbd {
 .url-input:focus { border-color: rgb(var(--cyan) / .8); }
 .field-note { margin: 0 0 10px; font-size: 14px; color: var(--text-dim); }
 .field-note.ok { color: rgb(var(--green)); }
+.field-note.warn { color: rgb(var(--amber)); }
+#google:not(.updating) .g-upd, #google.updating .g-new { display: none; }
 .mc-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
 .mc-foot { margin-top: 14px; font: 400 11.5px/1 var(--font-mono); color: var(--text-faint); }
 

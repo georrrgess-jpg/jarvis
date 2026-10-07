@@ -21,6 +21,7 @@ window.createJarvisMock = function createJarvisMock() {
     allow_files: true, allow_internet: true, wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 0.9,
     listen_timeout: 8, max_phrase_seconds: 25, auto_listen: false, user_title: 'sir', frameless: true,
   };
+  if (params.has('gold')) settings.google_script_url = 'https://script.google.com/macros/s/preview/exec';
   const later = (ms, fn) => timers.push(setTimeout(fn, ms));
   const cancelAll = () => { timers.forEach(clearTimeout); timers = []; clearInterval(micTimer); };
   const setState = (s) => { const prev = state; state = s; emit({ type: 'state', state: s, prev }); };
@@ -145,9 +146,9 @@ window.createJarvisMock = function createJarvisMock() {
       { id: 'en-GB-RyanNeural', label: 'Ryan · en-GB · Male' }, { id: 'en-GB-ThomasNeural', label: 'Thomas · en-GB · Male' },
       { id: 'en-GB-SoniaNeural', label: 'Sonia · en-GB · Female' }, { id: 'en-US-AndrewNeural', label: 'Andrew · en-US · Male' },
     ],
-    google_status: async () => ({ configured: !!settings.google_script_url, url: settings.google_script_url || '' }),
+    google_status: async () => ({ configured: !!settings.google_script_url, outdated: params.has('gold'), url: settings.google_script_url || '' }),
     google_script: async () => '// J.A.R.V.I.S. bridge script (preview)',
-    google_connect: async (url) => (/\/exec$/.test(url) ? (settings.google_script_url = url, { ok: true, user: 'tony@example.com' }) : { ok: false, error: 'that doesn\'t look like a web app URL (it should end in /exec)' }),
+    google_connect: async (url) => (!url && settings.google_script_url ? { ok: true, user: 'tony@example.com' } : /\/exec$/.test(url) ? (settings.google_script_url = url, { ok: true, user: 'tony@example.com' }) : { ok: false, error: 'that doesn\'t look like a web app URL (it should end in /exec)' }),
     google_disconnect: async () => { settings.google_script_url = ''; },
     preview_voice: async () => reply('Good day, sir. This is how I will sound from now on.', true),
     open_url: async (url) => { window.open(url, '_blank'); return true; },

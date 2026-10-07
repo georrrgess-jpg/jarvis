@@ -175,7 +175,7 @@ class Assistant:
         self._ollama: OllamaStatus | None = None
         self._mic: dict = {"available": False, "reason": "Starting up", "device": None}
         self._voice_ok: bool | None = None
-        self._last_voice_notice = 0.0
+        self._last_voice_notice = float("-inf")  # monotonic() starts near 0 right after boot
         self._pull_cancel: threading.Event | None = None
         self._pull_thread: threading.Thread | None = None
         self.wake: wakeword.WakeListener | None = None

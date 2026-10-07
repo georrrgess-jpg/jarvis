@@ -478,9 +478,10 @@ def run_selftest(report_path: str | None) -> int:
 
     def gui_backend():
         """Load the native GUI layer exactly like webview.start() does (pythonnet/WinForms/WebView2 on Windows)."""
-        from webview import guilib
+        import importlib
 
-        lib = guilib.initialize()
+        # not "from webview import guilib": the package defines a module-level guilib = None that shadows it
+        lib = importlib.import_module("webview.guilib").initialize()
         info = {"renderer": getattr(lib, "renderer", None)}
         if sys.platform == "win32":
             info["webview2"] = webview2_version()

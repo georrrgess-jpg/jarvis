@@ -79,6 +79,23 @@ jobs:
           $report = Get-Content $crashFile -Raw -ErrorAction SilentlyContinue
           Write-Host $report
           if ($report -notmatch 'diagnostic \.NET crash test') { Write-Error 'The .NET crash handler did not report the crash'; exit 1 }
+      - name: Make sure Windows OCR has a language (installs the en-US OCR pack if missing)
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+          $langs = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+          Write-Host "OCR languages: $(($langs | ForEach-Object { $_.LanguageTag }) -join ', ')"
+          if (-not $langs -or $langs.Count -eq 0) {
+            Get-WindowsCapability -Online | Where-Object Name -like 'Language.OCR*' | Select-Object Name, State | Format-Table
+            Add-WindowsCapability -Online -Name 'Language.OCR~~~en-US~0.0.1.0'
+          }
+      - name: Vision functional check (real desktop - capture, OCR, find, click, type)
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_vision_check.py vision-check.json vision-check.png
       - name: Upload smoke-test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -87,6 +104,8 @@ jobs:
           path: |
             smoke.json
             smoke.png
+            vision-check.json
+            vision-check.png
             ${{ runner.temp }}/jarvis-home/jarvis.log
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4

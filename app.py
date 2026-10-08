@@ -438,6 +438,24 @@ class JarvisAPI:
             return True  # a Google link: opened in the chosen browser, as the linked account
         return webbrowser.open(url)
 
+    # -- vision ------------------------------------------------------------
+    def vision_status(self) -> dict:
+        return self._assistant.vision_status()
+
+    def vision_install(self, name: str = "") -> dict:
+        from core.vision import DEFAULT_VISION_MODEL
+
+        return self._assistant.pull_model(str(name or DEFAULT_VISION_MODEL), role="vision")
+
+    def vision_confirm(self, act_id: str, yes: bool) -> dict:
+        return self._assistant.confirm_act(str(act_id), bool(yes))
+
+    def vision_look(self, question: str = "") -> bool:
+        return self._assistant.look_now(str(question or ""))
+
+    def vision_stop_watch(self) -> None:
+        self._assistant.stop_watching()
+
     def google_view(self, kind: str, ref: str) -> dict:
         return self._assistant.view_google(str(kind or "doc"), str(ref or ""))
 

@@ -169,13 +169,16 @@ class AudioEngine:
     # decoding -------------------------------------------------------------
     def decode(self, data: bytes) -> "pygame.mixer.Sound":
         """Decode MP3/WAV/OGG bytes into a mixer Sound."""
-        if not self.available:
-            raise RuntimeError("audio engine not initialised")
         with self._lock:
+            if not self.available:
+                raise RuntimeError("audio engine not initialised")
             return pygame.mixer.Sound(file=io.BytesIO(data))
 
     def mono_samples(self, sound: "pygame.mixer.Sound") -> np.ndarray:
-        arr = pygame.sndarray.array(sound).astype(np.float32) / 32768.0
+        with self._lock:
+            if not self.available:
+                raise RuntimeError("audio engine not initialised")
+            arr = pygame.sndarray.array(sound).astype(np.float32) / 32768.0
         return arr.mean(axis=1) if arr.ndim == 2 else arr
 
     def make_sound(self, mono: np.ndarray) -> "pygame.mixer.Sound":
@@ -188,28 +191,35 @@ class AudioEngine:
             return pygame.sndarray.make_sound(np.ascontiguousarray(pcm))
 
     # playback -------------------------------------------------------------
+    # Every mixer call holds the lock and re-checks ``available``: a background thread (an announcement,
+    # a timer) must never touch the mixer while or after it is shut down, which would crash pygame.
     def play_voice(self, sound: "pygame.mixer.Sound") -> None:
-        if self._voice is not None:
-            self._voice.play(sound)
+        with self._lock:
+            if self.available and self._voice is not None:
+                self._voice.play(sound)
 
     def voice_busy(self) -> bool:
-        return bool(self._voice is not None and self._voice.get_busy())
+        with self._lock:
+            return bool(self.available and self._voice is not None and self._voice.get_busy())
 
     def stop_voice(self, fade_ms: int = 140) -> None:
-        if self._voice is not None and self._voice.get_busy():
-            self._voice.fadeout(fade_ms) if fade_ms else self._voice.stop()
+        with self._lock:
+            if self.available and self._voice is not None and self._voice.get_busy():
+                self._voice.fadeout(fade_ms) if fade_ms else self._voice.stop()
 
     def play_sfx(self, sound: "pygame.mixer.Sound", volume: float = 0.5) -> None:
-        if not self.available:
-            return
-        # Sound.play() only picks unreserved channels, so effects never cut off the voice.
-        sound.set_volume(max(0.0, min(1.0, volume)))
-        sound.play()
+        with self._lock:
+            if not self.available:
+                return
+            # Sound.play() only picks unreserved channels, so effects never cut off the voice.
+            sound.set_volume(max(0.0, min(1.0, volume)))
+            sound.play()
 
     def shutdown(self) -> None:
-        if self.available and pygame is not None:
-            try:
-                pygame.mixer.quit()
-            except Exception:
-                pass
-        self.available = False
+        with self._lock:
+            was, self.available = self.available, False
+            if was and pygame is not None:
+                try:
+                    pygame.mixer.quit()
+                except Exception:
+                    pass

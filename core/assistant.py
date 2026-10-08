@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import logging
 import random
+import sys
 import queue
 import re
 import threading
@@ -35,6 +36,10 @@ from .system import SystemMonitor
 from .tools import Toolbox, ToolError, describe_call
 from . import osctl, wakeword
 from .quick import Quick, describe_duration, parse_quick, pick
+from .ocr import default_ocr
+from .screen import ForegroundTracker, ScreenError, default_desktop, is_private
+from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine, VisionUnavailable, Watcher, WatchRequest,
+                     data_url, is_risky, parse_act, parse_look, parse_watch, wants_vision_install)
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
@@ -77,6 +82,12 @@ _OPEN_COMMAND = re.compile(
     r"\s+(?:up\s+)?(?:the\s+|my\s+)?(?P<target>.+?)(?:\s+(?:please|for me|now))?[\s.!?]*$",
     re.IGNORECASE,
 )
+
+
+def _you(text: str) -> str:
+    """'my download finishes' -> 'your download finishes' (for speaking back to the user)."""
+    swaps = {"my": "your", "mine": "yours", "i": "you", "i'm": "you're", "me": "you", "myself": "yourself", "i've": "you've"}
+    return re.sub(r"\b(my|mine|i|i'm|me|myself|i've)\b", lambda m: swaps[m.group(1).lower()], text, flags=re.I)
 
 
 def _quick_small_talk():
@@ -248,6 +259,8 @@ class Assistant:
         audio: AudioEngine | None = None,
         monitor: SystemMonitor | None = None,
         tools: Toolbox | None = None,
+        desktop=None,
+        ocr=None,
     ) -> None:
         self.config = config
         self._emit_raw = emit
@@ -258,6 +271,12 @@ class Assistant:
         self.stt = stt or SpeechInput(config)
         self.monitor = monitor or SystemMonitor()
         self.tools = tools or Toolbox(config)
+        self.desktop = desktop or default_desktop()
+        self.vision = VisionEngine(config, self.llm, self.desktop, ocr or default_ocr())
+        self.tracker = ForegroundTracker(self.desktop)
+        self.watcher: Watcher | None = None
+        self._pending_act: dict | None = None  # an action waiting for "yes" (uncertain or risky clicks)
+        self._act_ids = itertools.count(1)
         self.state = StateMachine(self._on_state)
 
         self._turn: Turn | None = None
@@ -359,6 +378,7 @@ class Assistant:
             ("ollama", self.check_ollama),
             ("file index", self._warm_file_index),
             ("wake word", self._sync_wake_word),
+            ("vision", self._start_vision),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -406,6 +426,12 @@ class Assistant:
 
     def shutdown(self) -> None:
         self._prewarm_stop.set()
+        self.tracker.stop()
+        if self.watcher is not None:
+            self.watcher.stop()
+        stop_ocr = getattr(self.vision.ocr, "stop", None)
+        if stop_ocr:
+            stop_ocr()
         for entry in list(self._timers.values()):
             entry["timer"].cancel()
         if self.wake is not None:
@@ -629,6 +655,258 @@ class Assistant:
             replies.append(reply)
         suffix = f", {self.title}."
         return " ".join(r[: -len(suffix)] + "." if i < len(replies) - 1 and r.endswith(suffix) else r for i, r in enumerate(replies))
+
+    # ================================================================== vision: look, watch, act
+    def _start_vision(self) -> None:
+        self.tracker.start()
+        warm = getattr(self.vision.ocr, "available", None)
+        if warm:
+            self._spawn(warm, name="ocr-warmup")  # loads Windows OCR in the background so the first look is quick
+
+    def vision_status(self) -> dict:
+        watching = self.watcher is not None and self.watcher.running
+        return {**self.vision.status(), "watching": watching, "watch_label": self.watcher.label if watching else "",
+                "allow_control": bool(self.config.get("allow_control", True)),
+                "pulling": bool(self._pull_thread is not None and self._pull_thread.is_alive())}
+
+    def _vision_request(self, turn: Turn, text: str, lang: Detection | None):
+        """Returns what to say (a list or a token stream) when ``text`` is about the screen, else None."""
+        if wants_vision_install(text):
+            return [self._install_vision()]
+        watch = parse_watch(text)
+        if watch is not None:
+            return [self._watch(turn, watch)]
+        act = parse_act(text)
+        if act is not None:
+            return self._act(turn, act)
+        look = parse_look(text)
+        if look is not None:
+            return self._look(turn, look, lang)
+        return None
+
+    def _install_vision(self) -> str:
+        if self.vision.model:
+            return f"My eyes are already online, {self.title}: I'm using {self.vision.model}."
+        if not self.llm.online:
+            return f"Ollama isn't running, {self.title}, so I can't download the vision model yet."
+        name = self.config.get("vision_model") or DEFAULT_VISION_MODEL
+        result = self.pull_model(name, role="vision")
+        if not result.get("ok"):
+            return f"I couldn't start the download, {self.title}: {result.get('error')}"
+        self.emit("vision_status", **self.vision_status())
+        return (f"Downloading my vision model, {name}, {self.title}. It's about 6 gigabytes, a one-time download. "
+                "I'll tell you when my eyes are ready.")
+
+    def _target_window(self):
+        window = self.tracker.current()
+        if window is None and sys.platform == "win32":
+            raise ScreenError("I'm not sure which window you mean. Click on it once, then ask me again.")
+        return window
+
+    def _look(self, turn: Turn, req: LookRequest, lang: Detection | None):
+        window = None if req.full_screen else self._target_window()
+        label = window.label if window else "your screen"
+        self._emit_turn(turn, "tool_activity", tool="vision", label=f"Looking at {label}")
+        try:
+            obs = self.vision.observe(window)
+        except ScreenError as exc:
+            yield f"I'm afraid {exc}"
+            return
+        self._emit_turn(turn, "vision_look", image=data_url(obs.shot.image), title=label, model=self.vision.model or "",
+                        ocr=bool(obs.lines))
+        answer: list[str] = []
+        try:
+            for piece in self.vision.describe(obs, req.question, turn.cancel, lang.name if lang else None, self.title):
+                answer.append(piece)
+                yield piece
+        except VisionUnavailable as exc:
+            yield f"{exc}"
+            return
+        if not self.vision.model:
+            self._emit_turn(turn, "system_message", level="info",
+                            text="I only read the text on screen this time. Say \"install vision\" to give me real sight (one-time 6 GB download).")
+        if answer:
+            self.llm.remember(req.question, f"[Looking at {label}] " + "".join(answer).strip())
+
+    def _watch(self, turn: Turn, req: WatchRequest) -> str:
+        title = self.title
+        current = self.watcher if self.watcher is not None and self.watcher.running else None
+        if req.action == "stop":
+            if current is None:
+                return f"I wasn't watching anything, {title}."
+            current.stop()
+            self.watcher = None
+            self.emit("vision_status", **self.vision_status())
+            return f"I've stopped watching your screen, {title}."
+        if req.action == "status":
+            if current is None:
+                return f"I'm not watching your screen at the moment, {title}."
+            return f"Yes, {title}. I'm watching for {current.label}."
+        if not (self.vision.model or self.vision.ocr_ready):
+            return (f"I need eyes for that, {title}: say \"install vision\" and I'll download a vision model, "
+                    "or make sure Windows OCR is available.")
+        try:
+            window = self._target_window() if req.condition else None
+        except ScreenError as exc:
+            return f"I'm afraid {exc}"
+        if window is not None and is_private(window, self.config.get("vision_exclusions") or ""):
+            return f"{window.label} is on your privacy list, {title}, so I won't watch it."
+        if current is not None:
+            current.stop()
+        self.watcher = Watcher(self.vision, self.tracker.current, notify=self._watch_notify, on_end=self._watch_ended,
+                               condition=req.condition, window=window,
+                               interval=float(self.config.get("watch_interval", 2.0)))
+        self.watcher.start()
+        self.emit("vision_status", **self.vision_status())
+        if req.condition:
+            where = f" on {window.label}" if window else ""
+            return f"Very well, {title}. I'll keep an eye{where} and tell you when {_you(req.condition)}."
+        return (f"Watching your screen, {title}. I'll speak up if anything important happens. "
+                "Say \"stop watching\" when you're done.")
+
+    def _watch_notify(self, what: str) -> None:
+        watcher = self.watcher
+        if watcher is not None and watcher.condition:
+            message = f"Heads up, {self.title}. You asked me to tell you when {_you(watcher.condition)}, and it has."
+        else:
+            message = f"Heads up, {self.title}: {what}"
+        self.emit("system_message", level="ok", text=message)
+        self._announce(message)
+
+    def _watch_ended(self, reason: str) -> None:
+        watcher = self.watcher
+        if watcher is None or watcher.running:
+            return  # an older watcher, replaced by the current one
+        self.watcher = None
+        if reason == "timeout":
+            self._announce(f"I've stopped watching for {_you(watcher.label)}, {self.title}; it's been a while.")
+        elif reason == "closed":
+            self._announce(f"The window I was watching has closed, {self.title}, so I've stopped watching.")
+        elif reason.startswith("error"):
+            self.emit("notice", level="error", text=f"Screen watch stopped: {reason}")
+        self.emit("vision_status", **self.vision_status())
+
+    def _announce(self, message: str) -> None:
+        """Say something unprompted, but never over the top of a conversation in progress."""
+        def run() -> None:
+            if self._prewarm_stop.is_set():
+                return  # shutting down
+            self.sfx.play("notify")
+            deadline = time.monotonic() + 90
+            while self.state.state != State.IDLE and time.monotonic() < deadline:
+                time.sleep(0.4)
+            if not self._prewarm_stop.is_set():
+                self.speak(message, delay=0.3)
+
+        self._spawn(run, name="announce")
+
+    def _act(self, turn: Turn, act: ActRequest):
+        title = self.title
+        if not self.config.get("allow_control", True):
+            yield f"Screen control is switched off in Settings, {title}."
+            return
+        try:
+            window = self._target_window()
+        except ScreenError as exc:
+            yield f"I'm afraid {exc}"
+            return
+        if is_private(window, self.config.get("vision_exclusions") or ""):
+            yield f"{window.label} is on your privacy list, {title}, so I won't touch it."
+            return
+        if act.action == "type" and re.search(r"pass(?:word|code)|pin\b|card number|cvv|security code", act.target or "", re.I):
+            yield f"I'd rather not type into password or payment fields, {title}. Those are yours."
+            return
+        target = None
+        obs = None
+        if act.target:
+            self._emit_turn(turn, "tool_activity", tool="vision", label=f"Looking for {act.target}")
+            try:
+                obs = self.vision.observe(window)
+                target = self.vision.locate(obs, act.target)
+            except (ScreenError, VisionUnavailable) as exc:
+                yield f"I'm afraid {exc}"
+                return
+            if target is None:
+                hint = "" if self.vision.model else " Say \"install vision\" and I'll be able to find things that aren't text."
+                yield f"I can't see \"{act.target}\" on {window.label if window else 'the screen'}, {title}.{hint}"
+                return
+        always = self.config.get("act_confirm", "auto") == "always"
+        needs_ok = always or is_risky(act) or (target is not None and not target.sure)
+        if needs_ok:
+            act_id = f"act{next(self._act_ids)}"
+            picture = None
+            try:
+                if obs is None:
+                    obs = self.vision.observe(window, read_text=False)
+                picture = data_url(self.vision.mark_target(obs, target) if target else obs.shot.image)
+            except Exception:
+                log.debug("no confirmation picture", exc_info=True)
+            self._pending_act = {"id": act_id, "act": act, "window": window, "target": target, "at": time.time()}
+            what = act.label or act.action
+            self._emit_turn(turn, "act_confirm", id=act_id, label=what, image=picture,
+                            where=window.label if window else "", reason="risky" if is_risky(act) else "unsure")
+            if target is not None:
+                yield f"Is this the right one, {title}? Say yes and I'll {what}."
+            else:
+                yield f"Shall I {what} on {window.label if window else 'the screen'}, {title}?"
+            return
+        yield self._run_act(act, window, target)
+
+    def _run_act(self, act: ActRequest, window, target=None, act_id: str | None = None) -> str:
+        title = self.title
+        try:
+            if act.action in ("click", "double", "right"):
+                button = "right" if act.action == "right" else "left"
+                self.desktop.click(target.x, target.y, button=button, double=act.action == "double", window=window)
+                done = f"Done, {title}."
+            elif act.action == "type":
+                if target is not None:
+                    self.desktop.click(target.x, target.y, window=window)
+                    time.sleep(0.15)
+                self.desktop.type_text(act.text, window=window)
+                done = f"Typed it, {title}."
+            elif act.action == "keys":
+                self.desktop.press(act.keys or [], window=window)
+                done = f"Done, {title}."
+            elif act.action == "scroll":
+                self.desktop.scroll(act.amount, window=window)
+                done = f"Scrolled {'up' if act.amount > 0 else 'down'}, {title}."
+            elif act.action == "close":
+                self.desktop.close(window)
+                done = f"Closing {window.label if window else 'it'}, {title}."
+            else:
+                return f"I don't know how to do that yet, {title}."
+        except ScreenError as exc:
+            if act_id:
+                self.emit("act_status", id=act_id, status="failed")
+            return f"I couldn't do that, {title}: {exc}"
+        if act_id:
+            self.emit("act_status", id=act_id, status="done")
+        self.emit("act_done", label=act.label, x=getattr(target, "x", None), y=getattr(target, "y", None))
+        return done
+
+    def confirm_act(self, act_id: str, yes: bool) -> dict:
+        """The CLICK / CANCEL buttons on the confirmation card."""
+        pending = self._pending_act
+        if pending is None or pending["id"] != act_id:
+            return {"ok": False, "error": "That action has expired."}
+        self._pending_act = None
+        if not yes:
+            self.emit("act_status", id=act_id, status="cancelled")
+            return {"ok": True}
+        message = self._run_act(pending["act"], pending["window"], pending.get("target"), act_id)
+        self.emit("notice", level="info", text=message)
+        return {"ok": True, "message": message}
+
+    def look_now(self, question: str = "") -> bool:
+        """The eye button in the HUD."""
+        return self.submit_text(question or "What's on my screen?", source="text")
+
+    def stop_watching(self) -> None:
+        if self.watcher is not None:
+            self.watcher.stop()
+            self.watcher = None
+        self.emit("vision_status", **self.vision_status())
 
     # ================================================================== instant skills (no model)
     def _quick(self, turn: Turn, text: str) -> str | None:
@@ -874,6 +1152,16 @@ class Assistant:
             return
         self.sfx.play("process")
 
+        pending, self._pending_act = self._pending_act, None
+        if pending is not None and time.time() - pending["at"] < 120:
+            if is_confirmation(text):
+                self._deliver(turn, [self._run_act(pending["act"], pending["window"], pending.get("target"), pending["id"])])
+                return
+            if is_cancellation(text):
+                self.emit("act_status", id=pending["id"], status="cancelled")
+                self._deliver(turn, [f"Very well, {self.title}. I'll leave it."])
+                return
+
         awaiting, self._awaiting = self._awaiting, None
         if awaiting is not None and awaiting.id in self._drafts:
             if is_confirmation(text):
@@ -895,6 +1183,16 @@ class Assistant:
         clock = self._clock_answer(text)
         if clock:
             self._deliver(turn, [clock])
+            return
+        lang_code = lang.code if lang else None
+        try:
+            seeing = self._vision_request(turn, text, lang)
+        except Exception:
+            log.exception("Vision request failed")
+            seeing = [f"I'm afraid something went wrong with my vision, {self.title}. The details are in the log."]
+        if seeing is not None:
+            self._deliver(turn, seeing, language=lang_code, working=True,
+                          listen_after=lambda: self._pending_act is not None)
             return
         try:
             quick = self._quick(turn, text)  # small talk, sums, volume, timers...: no language model needed
@@ -943,7 +1241,7 @@ class Assistant:
             language=lang.name if lang else None), language=lang.code if lang else None)
 
     def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None, language: str | None = None,
-                 working: bool = False, listen_after: bool = False) -> None:
+                 working: bool = False, listen_after=False) -> None:
         mid = f"a{next(self._ids)}"
         speaker = None
         if self.config.get("voice_enabled", True) and self.audio.available:
@@ -981,6 +1279,8 @@ class Assistant:
             speaker.close()
             speaker.wait()
         if self._finish_turn(turn) and not turn.cancel.is_set():
+            if callable(listen_after):
+                listen_after = listen_after()  # decided after the reply ("shall I click it?" -> listen for yes)
             if turn.kind == "listen" and not error and (self.config.get("auto_listen") or listen_after):
                 self.start_listening()
 
@@ -1321,6 +1621,9 @@ class Assistant:
     def check_ollama(self, emit_event: bool = True) -> dict:
         status = self.llm.check()
         self._ollama = status
+        self.vision.refresh(status.models)
+        if emit_event:
+            self.emit("vision_status", **self.vision_status())
         if emit_event:
             self.emit("ollama_status", **status.to_dict())
             self.emit("core_stats", **self.core_stats())
@@ -1340,7 +1643,7 @@ class Assistant:
         self._spawn(wait_online, name="ollama-start")
         return {"started": True}
 
-    def pull_model(self, name: str) -> dict:
+    def pull_model(self, name: str, role: str = "chat") -> dict:
         name = (name or "").strip()
         if not _MODEL_NAME.match(name):
             return {"ok": False, "error": "Invalid model name."}
@@ -1358,19 +1661,22 @@ class Assistant:
                     return
                 last[0], last[1] = now, status
                 pct = round(completed / total * 100, 1) if total else None
-                self.emit("pull_progress", model=name, status=status, completed=completed, total=total, percent=pct)
+                self.emit("pull_progress", model=name, status=status, completed=completed, total=total, percent=pct, role=role)
 
             try:
                 self.llm.pull(name, progress, cancel)
                 if cancel.is_set():
-                    self.emit("pull_done", model=name, ok=False, error="Download cancelled.")
+                    self.emit("pull_done", model=name, ok=False, error="Download cancelled.", role=role)
                     return
-                self.config.update({"model": name})
-                self.emit("pull_done", model=name, ok=True, error=None)
+                self.config.update({"vision_model" if role == "vision" else "model": name})
+                self.emit("pull_done", model=name, ok=True, error=None, role=role)
                 self.check_ollama()
-                self.llm.warmup()
+                if role == "vision":
+                    self._announce(f"My eyes are online, {self.title}. Ask me what's on your screen any time.")
+                else:
+                    self.llm.warmup()
             except LLMError as exc:
-                self.emit("pull_done", model=name, ok=False, error=str(exc))
+                self.emit("pull_done", model=name, ok=False, error=str(exc), role=role)
 
         self._pull_thread = threading.Thread(target=run, name="ollama-pull", daemon=True)
         self._pull_thread.start()

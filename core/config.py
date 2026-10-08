@@ -62,6 +62,12 @@ DEFAULTS: dict[str, Any] = {
     # Personality / window
     "user_title": "sir",
     "theme": "arc",  # arc | mark3 | stealth | violet
+    # Vision: seeing the screen (local vision model via Ollama + Windows OCR) and acting on it
+    "vision_model": "",  # empty = the best installed vision model (qwen2.5vl preferred)
+    "allow_control": True,  # let JARVIS click, type and press keys when asked
+    "act_confirm": "auto",  # auto: confirm only unsure or risky actions | always: confirm every action
+    "watch_interval": 2.0,  # seconds between looks while watching the screen
+    "vision_exclusions": "password, 1password, bitwarden, lastpass, keepass, dashlane, bank, banking, paypal",
     "frameless": True,
 }
 
@@ -69,6 +75,7 @@ _CHOICES: dict[str, tuple[str, ...]] = {
     "stt_engine": ("auto", "google", "whisper", "vosk"),
     "link_browser": ("default", "chrome", "edge", "firefox", "brave"),
     "theme": ("arc", "mark3", "stealth", "violet"),
+    "act_confirm": ("auto", "always"),
 }
 
 _RANGES: dict[str, tuple[float, float]] = {
@@ -81,10 +88,11 @@ _RANGES: dict[str, tuple[float, float]] = {
     "listen_timeout": (2, 30),
     "max_phrase_seconds": (5, 120),
     "patience": (0.0, 8.0),
+    "watch_interval": (1.0, 10.0),
     "wake_sensitivity": (0.0, 1.0),
 }
 
-_MAX_TEXT = {"custom_instructions": 2000, "user_title": 40}
+_MAX_TEXT = {"vision_exclusions": 1000, "custom_instructions": 2000, "user_title": 40}
 
 
 def app_data_dir() -> Path:

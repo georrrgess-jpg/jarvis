@@ -29,6 +29,8 @@ class MockOllama:
         self.reply = reply or DEFAULT_REPLY
         self.token_delay = token_delay
         self.requests: list[tuple[str, dict]] = []
+        self.responder = None  # optional callable(request body) -> reply text, for scripted conversations
+        self.vision_models: set[str] = set()  # models that report the "vision" capability
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -89,11 +91,16 @@ class MockOllama:
                     return self._json(404, {"error": f"model '{model}' not found"})
                 if self.path == "/api/generate":
                     return self._json(200, {"model": model, "response": "", "done": True})
+                if self.path == "/api/show":
+                    name = body.get("model") or body.get("name") or ""
+                    caps = ["completion", "vision"] if name in owner.vision_models else ["completion", "tools"]
+                    return self._json(200, {"modelfile": "", "parameters": "", "template": "", "details": {}, "capabilities": caps})
                 if self.path == "/api/chat":
                     if body.get("tools") and not owner.tools_supported:
                         return self._json(400, {"error": f"registry.ollama.ai/library/{model} does not support tools"})
                     if not body.get("stream", True):
-                        return self._json(200, {"model": model, "message": {"role": "assistant", "content": owner.reply},
+                        text = owner.responder(body) if owner.responder else owner.reply
+                        return self._json(200, {"model": model, "message": {"role": "assistant", "content": text},
                                                 "done": True})
                     return self._stream(owner._chat_chunks(model, body))
                 if self.path == "/api/pull":
@@ -112,8 +119,8 @@ class MockOllama:
         messages = body.get("messages") or [{}]
         last = messages[-1]
         tool_names = {t["function"]["name"] for t in body.get("tools") or []}
-        text = self.reply
-        if last.get("role") == "user":
+        text = self.responder(body) if self.responder else self.reply
+        if last.get("role") == "user" and not self.responder:
             ask = last.get("content", "").lower()
             call = None
             if "search" in ask and "web_search" in tool_names:

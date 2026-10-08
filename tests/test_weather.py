@@ -195,7 +195,7 @@ class Towns(Service):
         if host == "nominatim.openstreetmap.org":
             self.osm.append(request.url.params["q"])
             if request.url.params["q"] in ("90210", "Little Snoring"):
-                return httpx.Response(200, json=[{"lat": "34.09", "lon": "-118.41", "display_name": "Beverly Hills, CA",
+                return httpx.Response(200, json=[{"lat": "34.09", "lon": "-118.41", "display_name": "Beverly Hills, CA", "category": "place",
                                                   "address": {"city": "Beverly Hills" if request.url.params["q"] == "90210" else None,
                                                               "village": "Little Snoring", "country": "United States"}}])
             return httpx.Response(200, json=[])
@@ -276,3 +276,28 @@ def test_openstreetmap_steps_in_when_the_main_place_search_is_down(config):
     assert weather.geocode("90210").name == "Beverly Hills"
     with pytest.raises(WeatherError, match="internet"):  # both down: say so, not "no such place"
         weather.geocode("Atlantis")
+
+
+
+def test_openstreetmap_ignores_businesses_and_wrong_states(config):
+    rows = {
+        "Paris Texas": [
+            {"lat": "47.49", "lon": "19.06", "name": "Paris Texas", "category": "amenity", "display_name": "Paris Texas, Budapest",
+             "address": {"amenity": "Paris Texas", "city": "Budapest", "country": "Hungary"}},
+            {"lat": "48.85", "lon": "2.35", "name": "Paris", "category": "boundary", "address": {"city": "Paris", "country": "France"}},
+            {"lat": "33.66", "lon": "-95.56", "name": "Paris", "category": "place",
+             "address": {"town": "Paris", "county": "Lamar County", "state": "Texas", "country": "United States"}},
+        ],
+        "Budapest Bar": [{"lat": "47.49", "lon": "19.06", "name": "Budapest Bar", "category": "amenity", "address": {"city": "Paris"}}],
+    }
+
+    def handler(request):
+        if request.url.host == "geocoding-api.open-meteo.com":
+            raise httpx.ConnectTimeout("down", request=request)
+        return httpx.Response(200, json=rows.get(request.url.params["q"], []))
+
+    weather = Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    texas = weather.geocode("Paris Texas")
+    assert (texas.name, texas.latitude, texas.country) == ("Paris", 33.66, "United States")
+    with pytest.raises(WeatherError):
+        weather.geocode("Budapest Bar")

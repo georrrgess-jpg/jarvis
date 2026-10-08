@@ -178,17 +178,13 @@ class Weather:
     def _nominatim(self, name: str) -> Place | None:
         """OpenStreetMap's free geocoder: villages, neighbourhoods and postcodes the first one doesn't know."""
         try:
-            rows = self._get(NOMINATIM_URL, {"q": name, "format": "jsonv2", "limit": 1, "addressdetails": 1})
+            rows = self._get(NOMINATIM_URL, {"q": name, "format": "jsonv2", "limit": 10, "addressdetails": 1, "accept-language": "en"})
         except WeatherError as exc:  # a fallback that can't be reached must not hide the real answer ("no such place")
             log.info("OpenStreetMap lookup for %r failed: %s", name, exc)
             return None
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list):
             return None
-        row = rows[0]
-        address = row.get("address") or {}
-        label = (address.get("city") or address.get("town") or address.get("village") or address.get("hamlet")
-                 or address.get("suburb") or str(row.get("display_name") or name).split(",")[0])
-        return Place(str(label), float(row["lat"]), float(row["lon"]), str(address.get("country") or ""))
+        return _pick_osm([r for r in rows if isinstance(r, dict)], name)
 
     def ip_location(self) -> Place:
         with self._lock:
@@ -392,3 +388,41 @@ def _pick(results: list[dict], city: str, hint: str) -> Place | None:
     exact = [r for r in results if str(r.get("name", "")).lower() == city.lower()]
     best = max(exact or results, key=lambda r: int(r.get("population") or 0))
     return Place(str(best.get("name") or city), float(best["latitude"]), float(best["longitude"]), str(best.get("country") or ""))
+
+
+
+def _osm_label(row: dict, fallback: str) -> str:
+    address = row.get("address") or {}
+    return str(address.get("city") or address.get("town") or address.get("village") or address.get("hamlet")
+               or address.get("municipality") or address.get("suburb") or row.get("name")
+               or str(row.get("display_name") or fallback).split(",")[0])
+
+
+def _pick_osm(rows: list[dict], name: str) -> Place | None:
+    """The first OpenStreetMap result that is really a place called that (not a shop or bar named "Paris Texas"),
+    in the state or country the user said."""
+    places = [r for r in rows if r.get("category", r.get("class")) in ("place", "boundary")]
+    if re.fullmatch(r"[\w -]*\d[\w -]*", name.strip()):  # a postcode
+        chosen = places[0] if places else None
+    else:
+        chosen = None
+        for city, hint in _candidates(name):
+            for r in places:
+                address = r.get("address") or {}
+                names = {str(v).lower() for k, v in address.items() if k in ("city", "town", "village", "hamlet", "municipality", "suburb")}
+                names.add(str(r.get("name") or "").lower())
+                if city.lower() not in names:
+                    continue
+                if hint:
+                    region = " ".join(str(address.get(k) or "") for k in ("state", "county", "state_district", "region", "country", "country_code")).lower()
+                    words = [_expand(w) for w in hint.lower().split()]
+                    if hint.lower() not in region and not all(w in region for w in words):
+                        continue
+                chosen = r
+                break
+            if chosen is not None:
+                break
+    if chosen is None:
+        return None
+    address = chosen.get("address") or {}
+    return Place(_osm_label(chosen, name), float(chosen["lat"]), float(chosen["lon"]), str(address.get("country") or ""))

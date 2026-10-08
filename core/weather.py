@@ -156,15 +156,21 @@ class Weather:
         key = name.lower().strip()
         if key in self._geo_cache:
             return self._geo_cache[key]
-        found = None
+        found, unreachable = None, None
         for city, hint in _candidates(name):
-            data = self._get(GEOCODE_URL, {"name": city, "count": 50 if hint else 10, "language": "en", "format": "json"})
+            try:
+                data = self._get(GEOCODE_URL, {"name": city, "count": 50 if hint else 10, "language": "en", "format": "json"})
+            except WeatherError as exc:  # the main place search is down: OpenStreetMap below can still find it
+                unreachable = exc
+                break
             found = _pick(data.get("results") or [], city, hint)
             if found:
                 break
         if found is None:
             found = self._nominatim(name)
         if found is None:
+            if unreachable is not None:
+                raise unreachable
             raise WeatherError(f"I couldn't find a place called {name}.")
         self._geo_cache[key] = found
         return found
@@ -232,6 +238,7 @@ class Weather:
             try:
                 return self._fetch(url, params)
             except httpx.TransportError:  # a dropped or slow connection is usually gone a moment later: try once more
+                time.sleep(0.5)
                 return self._fetch(url, params)
         except httpx.HTTPStatusError as exc:  # reachable, but it said no (rate limit, bad request...)
             raise WeatherError(f"the weather service had a problem (HTTP {exc.response.status_code}).") from exc

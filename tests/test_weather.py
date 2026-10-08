@@ -262,3 +262,17 @@ def test_a_dropped_connection_is_retried_once(config):
 
     weather = Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(flaky)))
     assert "London" in weather.answer(WeatherRequest("temperature", "London"))
+
+
+def test_openstreetmap_steps_in_when_the_main_place_search_is_down(config):
+    class Down(Towns):
+        def handler(self, request):
+            if request.url.host == "geocoding-api.open-meteo.com":
+                raise httpx.ConnectTimeout("down", request=request)
+            return super().handler(request)
+
+    service = Down()
+    weather = Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(service.handler)))
+    assert weather.geocode("90210").name == "Beverly Hills"
+    with pytest.raises(WeatherError, match="internet"):  # both down: say so, not "no such place"
+        weather.geocode("Atlantis")

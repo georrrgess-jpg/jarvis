@@ -229,16 +229,22 @@ class Weather:
 
     def _get(self, url: str, params: dict | None) -> dict:
         try:
-            with self._client_factory() as client:
-                r = client.get(url, params=params)
-                r.raise_for_status()
-                return r.json()
+            try:
+                return self._fetch(url, params)
+            except httpx.TransportError:  # a dropped or slow connection is usually gone a moment later: try once more
+                return self._fetch(url, params)
         except httpx.HTTPStatusError as exc:  # reachable, but it said no (rate limit, bad request...)
             raise WeatherError(f"the weather service had a problem (HTTP {exc.response.status_code}).") from exc
         except httpx.HTTPError as exc:
             raise WeatherError("I couldn't reach the weather service. Check your internet connection.", offline=True) from exc
         except ValueError as exc:
             raise WeatherError("the weather service sent back something I didn't understand.") from exc
+
+    def _fetch(self, url: str, params: dict | None) -> dict:
+        with self._client_factory() as client:
+            r = client.get(url, params=params)
+            r.raise_for_status()
+            return r.json()
 
     # -- saying it -------------------------------------------------------------
     def answer(self, req: WeatherRequest, title: str = "sir") -> str:

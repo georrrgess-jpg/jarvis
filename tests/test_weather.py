@@ -249,3 +249,16 @@ def test_unreachable_fallback_does_not_mask_the_answer(config):
     assert weather.geocode("Ashford Kent").latitude == 51.15
     with pytest.raises(WeatherError, match="couldn't find a place called Atlantis"):
         weather.geocode("Atlantis")
+
+
+def test_a_dropped_connection_is_retried_once(config):
+    service, drops = Service(), [1]
+
+    def flaky(request):
+        if drops:
+            drops.pop()
+            raise httpx.ConnectTimeout("slow", request=request)
+        return service.handler(request)
+
+    weather = Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(flaky)))
+    assert "London" in weather.answer(WeatherRequest("temperature", "London"))

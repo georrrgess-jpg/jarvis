@@ -231,11 +231,12 @@ class Weather:
 
     def _get(self, url: str, params: dict | None) -> dict:
         try:
-            try:
-                return self._fetch(url, params)
-            except httpx.TransportError:  # a dropped or slow connection is usually gone a moment later: try once more
-                time.sleep(0.5)
-                return self._fetch(url, params)
+            for pause in (0.5, 2.0):
+                try:
+                    return self._fetch(url, params)
+                except httpx.TransportError:  # a dropped or slow connection is usually gone a moment later: try again
+                    time.sleep(pause)
+            return self._fetch(url, params)
         except httpx.HTTPStatusError as exc:  # reachable, but it said no (rate limit, bad request...)
             raise WeatherError(f"the weather service had a problem (HTTP {exc.response.status_code}).") from exc
         except httpx.HTTPError as exc:

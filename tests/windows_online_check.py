@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,7 +25,7 @@ def main() -> int:
 
     from core.config import Config
     from core.stt import Capture, SpeechInput, STTError
-    from core.weather import Weather, WeatherRequest, parse_weather
+    from core.weather import Weather, WeatherError, WeatherRequest, parse_weather
 
     report: dict = {"checks": {}}
     failures: list[str] = []
@@ -37,26 +38,44 @@ def main() -> int:
 
     config = Config(Path(tempfile.mkdtemp()) / "config.json")
     weather = Weather(config)
-    try:
-        london = weather.answer(parse_weather("what's the temperature in London"), "sir")
-        check("temperature in London", re.search(r"-?\d+ degrees? in London", london) is not None, london)
-        tomorrow = weather.answer(parse_weather("is it going to rain in Tokyo tomorrow"), "sir")
-        check("rain in Tokyo tomorrow", "Tokyo" in tomorrow and "tomorrow" in tomorrow, tomorrow)
-        here = weather.answer(WeatherRequest("now"), "sir")
-        check("weather where this computer is (IP location)", re.search(r"-?\d+ degrees?", here) is not None, here)
-        for spoken, town in (("Bothell Washington", "Bothell"), ("Paris Texas", "Paris"), ("Ashford Kent", "Ashford"),
-                             ("Little Snoring", "Little Snoring"), ("Tralee", "Tralee"), ("90210", "Beverly Hills")):
-            place = weather.geocode(spoken)
-            check(f"found the town: {spoken}", town.lower() in place.name.lower(),
-                  {"name": place.name, "lat": round(place.latitude, 2), "lon": round(place.longitude, 2), "country": place.country})
-        texas = weather.geocode("Paris Texas")
-        check("Paris Texas is in the USA, not France", texas.longitude < -90, texas.longitude)
-        town = weather.answer(parse_weather("what's the weather in Bothell Washington"), "sir")
-        check("weather for a small town", "Bothell" in town and re.search(r"-?\d+ degrees?", town) is not None, town)
-        weekend = weather.answer(parse_weather("what's the forecast for this weekend in Paris"), "sir")
-        check("weekend forecast", "Saturday" in weekend and "Sunday" in weekend, weekend)
-    except Exception as exc:  # noqa: BLE001
-        check("weather service", False, f"{exc.__class__.__name__}: {exc}")
+
+    def patient(fn):
+        """Shared CI machines sometimes can't reach the free services for a few seconds: wait and ask again
+        (only for "couldn't reach it" - a wrong answer still fails)."""
+        for wait in (10, 20):
+            try:
+                return fn()
+            except WeatherError as exc:
+                if not exc.offline:
+                    raise
+                print(f"  (service unreachable, retrying in {wait}s: {exc})", flush=True)
+                time.sleep(wait)
+        return fn()
+
+    def run(name, fn, ok, detail=lambda r: r):
+        try:
+            result = patient(fn)
+            check(name, ok(result), detail(result))
+            return result
+        except Exception as exc:  # noqa: BLE001
+            check(name, False, f"{exc.__class__.__name__}: {exc}")
+            return None
+
+    run("temperature in London", lambda: weather.answer(parse_weather("what's the temperature in London"), "sir"),
+        lambda r: re.search(r"-?\d+ degrees? in London", r) is not None)
+    run("rain in Tokyo tomorrow", lambda: weather.answer(parse_weather("is it going to rain in Tokyo tomorrow"), "sir"),
+        lambda r: "Tokyo" in r and "tomorrow" in r)
+    run("weather where this computer is (IP location)", lambda: weather.answer(WeatherRequest("now"), "sir"),
+        lambda r: re.search(r"-?\d+ degrees?", r) is not None)
+    for spoken, town in (("Bothell Washington", "Bothell"), ("Paris Texas", "Paris"), ("Ashford Kent", "Ashford"),
+                         ("Little Snoring", "Little Snoring"), ("Tralee", "Tralee"), ("90210", "Beverly Hills")):
+        run(f"found the town: {spoken}", lambda spoken=spoken: weather.geocode(spoken), lambda p, town=town: town.lower() in p.name.lower(),
+            lambda p: {"name": p.name, "lat": round(p.latitude, 2), "lon": round(p.longitude, 2), "country": p.country})
+    run("Paris Texas is in the USA, not France", lambda: weather.geocode("Paris Texas"), lambda p: p.longitude < -90, lambda p: p.longitude)
+    run("weather for a small town", lambda: weather.answer(parse_weather("what's the weather in Bothell Washington"), "sir"),
+        lambda r: "Bothell" in r and re.search(r"-?\d+ degrees?", r) is not None)
+    run("weekend forecast", lambda: weather.answer(parse_weather("what's the forecast for this weekend in Paris"), "sir"),
+        lambda r: "Saturday" in r and "Sunday" in r)
 
     config.update({"stt_engine": "google", "auto_language": False})
     stt = SpeechInput(config)

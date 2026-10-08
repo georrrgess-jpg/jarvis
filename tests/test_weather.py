@@ -234,3 +234,18 @@ def test_spoken_town_and_state_end_to_end(towns):
     weather, service = towns
     reply = weather.answer(parse_weather("what's the weather in Bothell Washington tomorrow"), "sir")
     assert reply.startswith("Tomorrow in Bothell:")
+
+
+
+def test_unreachable_fallback_does_not_mask_the_answer(config):
+    class Blocked(Towns):
+        def handler(self, request):
+            if request.url.host == "nominatim.openstreetmap.org":
+                raise httpx.ConnectTimeout("blocked", request=request)
+            return super().handler(request)
+
+    service = Blocked()
+    weather = Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(service.handler)))
+    assert weather.geocode("Ashford Kent").latitude == 51.15
+    with pytest.raises(WeatherError, match="couldn't find a place called Atlantis"):
+        weather.geocode("Atlantis")

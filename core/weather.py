@@ -158,7 +158,7 @@ class Weather:
             return self._geo_cache[key]
         found = None
         for city, hint in _candidates(name):
-            data = self._get(GEOCODE_URL, {"name": city, "count": 10, "language": "en", "format": "json"})
+            data = self._get(GEOCODE_URL, {"name": city, "count": 50 if hint else 10, "language": "en", "format": "json"})
             found = _pick(data.get("results") or [], city, hint)
             if found:
                 break
@@ -173,9 +173,8 @@ class Weather:
         """OpenStreetMap's free geocoder: villages, neighbourhoods and postcodes the first one doesn't know."""
         try:
             rows = self._get(NOMINATIM_URL, {"q": name, "format": "jsonv2", "limit": 1, "addressdetails": 1})
-        except WeatherError as exc:
-            if exc.offline:
-                raise
+        except WeatherError as exc:  # a fallback that can't be reached must not hide the real answer ("no such place")
+            log.info("OpenStreetMap lookup for %r failed: %s", name, exc)
             return None
         if not isinstance(rows, list) or not rows:
             return None

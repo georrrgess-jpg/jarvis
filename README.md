@@ -32,7 +32,20 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
   - **Watch**: "tell me when my download finishes", "let me know if an error appears", "watch my screen" (speaks up about errors, finished tasks, new messages). An amber WATCHING strip with a STOP button shows whenever it's watching; "stop watching" ends it.
   - **Act**: "click Sign in", "press the blue Send button", "type cats into the search box", "press enter", "scroll down", "go back", "refresh", "close this tab". Exact on-screen text is clicked at once; anything uncertain, and anything risky (send, delete, buy, pay, close…), shows you a picture of exactly where it will click and waits for "yes". It never touches windows on your privacy list (password managers, banking…) and never types into password or payment fields. Switch it off in Settings ▸ Vision.
   - Screenshots go only to your local Ollama and are never saved. The capture → OCR → find → click → type pipeline is tested on a real Windows desktop in CI on every build.
-- **HUD colour schemes**: Arc reactor cyan, Mark III red & gold, Stealth green or Violet (Settings ▸ Interface).
+- **Four personalities, one memory of you**: pick who you talk to from the face button in the title bar (<kbd>Ctrl</kbd>+<kbd>P</kbd>), Settings ▸ Personality, or just say "switch to Harper" / "let me talk to Jarvis".
+  - **J.A.R.V.I.S.**: the impeccable butler. Calm, precise, dry British wit, calls you "sir" (or whatever you choose).
+  - **Harper**: an exceptionally kind, friendly and informative companion. Warm and conversational, explains things clearly with examples, asks about your day, cheers your wins, is gentle when things are hard, and brings up what she remembers about you. Calls you by your name.
+  - **F.R.I.D.A.Y.**: quick, upbeat and a little cheeky, with an Irish voice. Calls you "boss".
+  - **Sage**: a patient mentor who explains step by step and checks you've understood.
+  Each has its own character, voice (with matching voices in other languages), small talk and HUD colours (Harper brings a warm Rose theme); all share the same skills and memory. Press **HEAR** in the picker to listen before switching. The wake word stays "Hey Jarvis" for everyone.
+- **Long-term memory that stays on your PC**: JARVIS remembers who you are across restarts.
+  - **Facts, preferences, routines and projects**: "remember that my sister is called Ana", "I'm allergic to peanuts", "I go to yoga every Tuesday at 6 pm", "I'm building a website for my mum's bakery". It also picks these up from normal conversation by itself (a small background step with your local model that only runs when what you said sounds personal, and never stores passwords, codes or card numbers). A **REMEMBERED** note with **UNDO** appears in the log each time.
+  - **Uses it naturally**: relevant memories go into every answer ("recommend some music" → it knows you love jazz), today's routines are mentioned when it starts up, and finished projects are ticked off ("I finished the bakery website").
+  - **Ask about it**: "what do you know about me?", "do you remember my dog's name?", "what am I working on?", "what's my routine today?", "what did we talk about last time?", "call me Tony", "what's my name?".
+  - **Conversations carry on**: chats are summarised into short diary entries, and if you restart within 3 hours JARVIS picks up exactly where you left off.
+  - **Memory Core** (brain button, <kbd>Ctrl</kbd>+<kbd>M</kbd>): browse by kind, search, edit, pin (always keep in mind), mark projects done, delete with undo, add your own, export to JSON, or erase everything. "Forget that I like tea" and "forget everything" (asks first) work by voice too.
+  - Recall blends keyword ranking with meaning-based search when the free `nomic-embed-text` model is installed (one click in the Memory Core). Everything lives in `memory.db` in `%APPDATA%\JARVIS`; switch any part off in Settings ▸ Memory.
+- **HUD colour schemes**: Arc reactor cyan, Mark III red & gold, Stealth green, Violet or Rose (Settings ▸ Interface).
 - **Speaks your language**: talk or type in Spanish, French, German, Italian, Portuguese, Japanese, Chinese, Arabic and 20+ more; JARVIS detects it, answers in it and switches to a native voice. Speech recognition listens for your main language and the others you speak at the same time (Settings ▸ Voice input).
 - All Google features work through a tiny script that runs in *your own* Google account (free, no API key): Settings ▸ Google ▸ Set up walks you through the 3-minute, one-time link. The script is `integrations/jarvis_google_bridge.gs`. If you linked an older version, JARVIS tells you and Settings ▸ Google ▸ **Update script** walks you through the one-minute update (your link stays the same).
 - **"Hey Jarvis" wake word**: offline and free. Say "Hey Jarvis" and your request in one breath ("Hey Jarvis, what time is it?") or pause after the wake word; JARVIS stops listening by itself when you finish speaking. Say "Hey Jarvis, stop" while it is talking to silence it. This pipeline is tested on recorded speech: wake word → end-of-speech detection → reply → "stop".
@@ -86,7 +99,9 @@ app.py              entry point, pywebview window, JS⇄Python bridge, --selftes
 core/
   assistant.py      orchestrator: turns, interruption, speech pipeline
   state.py          IDLE / LISTENING / THINKING / SPEAKING state machine
-  llm.py            Ollama client: detection, streaming chat, memory, model pull, start server
+  llm.py            Ollama client: detection, streaming chat, history, JSON tasks, embeddings, model pull
+  personas.py       the personalities: character prompts, voices, colours, small talk, "switch to Harper"
+  memory.py         long-term memory: SQLite store, hybrid recall, spoken commands, learning, episodes, resume
   tts.py            edge-tts on a background asyncio loop, sentence splitter, speech text cleanup
   stt.py            microphone capture with VAD + Google / Whisper / Vosk recognisers
   audio.py          pygame.mixer playback + FFT band analysis for the visualisers
@@ -124,7 +139,7 @@ build.py            automated PyInstaller build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                  # 100+ tests; no microphone, speakers or network needed
+python -m pytest -q                  # 550+ tests; no microphone, speakers or network needed
 python -m tests.mock_ollama          # fake Ollama on :11434 for UI work without a model
 ```
 
@@ -132,7 +147,7 @@ Preview the HUD in a normal browser against a simulated backend: `python -m http
 
 ## Privacy
 
-Conversation text goes only to your local Ollama. Spoken replies are synthesised by Microsoft's Edge voice service, and the default recogniser sends your speech to Google; install faster-whisper or Vosk to keep speech recognition entirely on your machine.
+Conversation text goes only to your local Ollama. Long-term memories and conversation summaries are stored only on your computer (`memory.db`) and can be viewed, edited, exported or erased in the Memory Core. Spoken replies are synthesised by Microsoft's Edge voice service, and the default recogniser sends your speech to Google; install faster-whisper or Vosk to keep speech recognition entirely on your machine.
 
 ## Credits
 

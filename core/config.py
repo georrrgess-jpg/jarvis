@@ -61,7 +61,14 @@ DEFAULTS: dict[str, Any] = {
     "wake_sensitivity": 0.5,  # 0 = strict, 1 = very sensitive
     # Personality / window
     "user_title": "sir",
-    "theme": "arc",  # arc | mark3 | stealth | violet
+    "persona": "jarvis",  # jarvis | harper | friday | sage (see core/personas.py)
+    "persona_theme": True,  # switching personality also switches the HUD colours
+    "theme": "arc",  # arc | mark3 | stealth | violet | rose
+    # Long-term memory (memory.db next to the settings file; never leaves this computer)
+    "memory_enabled": True,  # remember facts, preferences, routines and projects across sessions
+    "memory_auto_learn": True,  # pick things up from conversation by itself (otherwise only "remember that ...")
+    "memory_resume": True,  # carry on the last conversation if it ended less than 3 hours ago
+    "routine_reminders": True,  # mention today's routines in the greeting
     # Vision: seeing the screen (local vision model via Ollama + Windows OCR) and acting on it
     "vision_model": "",  # empty = the best installed vision model (qwen2.5vl preferred)
     "allow_control": True,  # let JARVIS click, type and press keys when asked
@@ -74,7 +81,8 @@ DEFAULTS: dict[str, Any] = {
 _CHOICES: dict[str, tuple[str, ...]] = {
     "stt_engine": ("auto", "google", "whisper", "vosk"),
     "link_browser": ("default", "chrome", "edge", "firefox", "brave"),
-    "theme": ("arc", "mark3", "stealth", "violet"),
+    "theme": ("arc", "mark3", "stealth", "violet", "rose"),
+    "persona": ("jarvis", "harper", "friday", "sage"),
     "act_confirm": ("auto", "always"),
 }
 

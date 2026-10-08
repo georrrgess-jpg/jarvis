@@ -43,6 +43,8 @@ from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
+from .memory import Memory, MemoryCommand, MemoryEngine, first_person_echo, parse_memory_command, spoken, today_routines
+from .personas import PERSONAS, Persona, address_for, asks_who, get_persona, parse_switch
 from .tts import CODE_MARK, EdgeTTS, SentenceSplitter, TTSError, clean_for_speech
 
 log = logging.getLogger("jarvis.assistant")
@@ -88,6 +90,25 @@ def _you(text: str) -> str:
     """'my download finishes' -> 'your download finishes' (for speaking back to the user)."""
     swaps = {"my": "your", "mine": "yours", "i": "you", "i'm": "you're", "me": "you", "myself": "yourself", "i've": "you've"}
     return re.sub(r"\b(my|mine|i|i'm|me|myself|i've)\b", lambda m: swaps[m.group(1).lower()], text, flags=re.I)
+
+
+def _tidy_memory(text: str) -> str:
+    """Text typed into the Memory Core: 'I love jazz' -> 'You love jazz.'; anything else tidied up as it is."""
+    from .memory import second_person
+
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not t:
+        raise ValueError("A memory needs some text.")
+    return second_person(t) if re.search(r"\b(i|i'm|my|me|mine|myself)\b", t, re.I) else t[0].upper() + t[1:] + ("" if t[-1] in ".!?" else ".")
+
+
+def _about_you(summary: str) -> str:
+    """Episode summaries say "the user"; spoken back, that's "you"."""
+    s = re.sub(r"\bthe user's\b", "your", summary, flags=re.I)
+    s = re.sub(r"\bthe user\b", "you", s, flags=re.I)
+    s = re.sub(r"\byou was\b", "you were", s)
+    s = re.sub(r"\byou (asks|wants|needs|says|likes|has|is)\b", lambda m: "you " + {"asks": "ask", "wants": "want", "needs": "need", "says": "say", "likes": "like", "has": "have", "is": "are"}[m.group(1)], s)
+    return s[0].lower() + s[1:] if s[:1].isupper() and not s.startswith("I ") else s
 
 
 def _quick_small_talk():
@@ -159,11 +180,11 @@ class Speaker:
         self._sentences.put(sentence)
 
     def _voice_for_language(self, code: str) -> str | None:
-        """None means the user's chosen voice; otherwise a voice that speaks ``code``."""
+        """None means the user's chosen voice; otherwise a voice that speaks ``code`` (matching the personality)."""
         chosen = self._a.config.get("voice") or ""
         if code == base_language(chosen or "en"):
             return None
-        return voice_for(code, chosen)
+        return voice_for(code, chosen, self._a.persona.gender)
 
     def _pick_voice(self, text: str) -> str | None:
         if not self._auto:
@@ -298,11 +319,20 @@ class Assistant:
         self._open_hints = 0  # how often we've explained the "sign in / show it here" fallback
         self._drafts: dict[str, Draft] = {}  # emails shown on screen, by id
         self._awaiting: Draft | None = None  # the draft JARVIS just asked "shall I send it?" about
+        self._pending_forget = 0.0  # when JARVIS asked "forget everything?"
+        self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
+        self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
+        self.llm.persona_provider = lambda: (self.persona, self.title)
 
     # ================================================================== plumbing
     @property
+    def persona(self) -> Persona:
+        return get_persona(self.config.get("persona"))
+
+    @property
     def title(self) -> str:
-        return self.config.get("user_title") or "sir"
+        """How the active personality addresses the user ("sir", their name, "boss")."""
+        return address_for(self.persona, self.config)
 
     def emit(self, kind: str, **payload: Any) -> None:
         try:
@@ -379,6 +409,7 @@ class Assistant:
             ("file index", self._warm_file_index),
             ("wake word", self._sync_wake_word),
             ("vision", self._start_vision),
+            ("memory", self._start_memory),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -406,6 +437,10 @@ class Assistant:
             "core": self.core_stats(),
             "wake": self.wake_status(),
             "vision": self.vision_status(),
+            "persona": self.persona_info(),
+            "personas": self.persona_list(),
+            "memory": self.memory.stats(),
+            "restored": self._restored,
         }
 
     def boot_complete(self) -> None:
@@ -414,7 +449,10 @@ class Assistant:
         hour = datetime.now().hour
         part = "morning" if 5 <= hour < 12 else "afternoon" if 12 <= hour < 18 else "evening"
         if status and status.online and status.model:
-            text = f"Good {part}, {self.title}. All systems are online. How may I help?"
+            text = random.choice(self.persona.greeting).format(part=part, title=self.title)
+            if self._restored:
+                text = re.split(r"(?<=[.!?])\s+", text)[0] + " " + self._resume_line()
+            text += self._routine_line()
             self._spawn(self.llm.warmup, name="warmup")
             if self.config.get("voice_enabled", True):
                 self._spawn(self._prewarm_voice, name="voice-prewarm")
@@ -427,6 +465,7 @@ class Assistant:
 
     def shutdown(self) -> None:
         self._prewarm_stop.set()
+        self.memory.stop()
         self.tracker.stop()
         if self.watcher is not None:
             self.watcher.stop()
@@ -717,7 +756,8 @@ class Assistant:
                         ocr=bool(obs.lines))
         answer: list[str] = []
         try:
-            for piece in self.vision.describe(obs, req.question, turn.cancel, lang.name if lang else None, self.title):
+            for piece in self.vision.describe(obs, req.question, turn.cancel, lang.name if lang else None, self.title,
+                                                 name=self.persona.name if self.persona.id != "jarvis" else "J.A.R.V.I.S."):
                 answer.append(piece)
                 yield piece
         except VisionUnavailable as exc:
@@ -919,12 +959,14 @@ class Assistant:
         return handler(turn, q, title) if handler else None
 
     def _quick_greeting(self, turn: Turn, q: Quick, title: str) -> str:
+        if "greeting" in self.persona.lines:
+            return self.persona.line("greeting", (), title)
         hour = datetime.now().hour
         part = "morning" if 5 <= hour < 12 else "afternoon" if 12 <= hour < 18 else "evening"
         return pick([f"Good {part}, {{title}}. How may I help?", "At your service, {title}.", "Hello, {title}. What can I do for you?"], title)
 
     def _quick_talk(self, turn: Turn, q: Quick, title: str) -> str:
-        return pick(q.args["replies"], title)
+        return self.persona.line(q.args.get("category") or "", q.args["replies"], title)
 
     def _quick_math(self, turn: Turn, q: Quick, title: str) -> str:
         answer = q.args["answer"]
@@ -1073,8 +1115,11 @@ class Assistant:
                    f"Desktop cleared, {title}.", f"Heads, {title}.", f"Tails, {title}.", f"Timer set for 5 minutes, {title}.",
                    f"Timer set for 10 minutes, {title}.", f"You have no timers running, {title}.", f"Shall I send it?",
                    f"I couldn't find that, {title}.", f"Opening Spotify, {title}.", f"Opening Chrome, {title}.", f"Opening Notepad, {title}."]
-        for _pattern, replies in _quick_small_talk():
-            phrases += [r.format(title=title) for r in replies if len(r) < 160]
+        persona = self.persona
+        for category, _pattern, replies in _quick_small_talk():
+            options = persona.lines.get(category) or replies
+            phrases += [r.format(title=title) for r in options if len(r) < 160]
+        phrases += [r.format(title=title) for r in persona.lines.get("greeting", ()) if len(r) < 160]
         return phrases
 
     def _prewarm_voice(self) -> None:
@@ -1144,6 +1189,7 @@ class Assistant:
         return None
 
     def _converse(self, turn: Turn, text: str, source: str) -> None:
+        turn.text = text
         lang = self._user_language(text)
         home = base_language(self.config.get("stt_language") or "en-US")
         foreign = lang if lang and lang.code != home else None
@@ -1171,6 +1217,39 @@ class Assistant:
             if is_cancellation(text):
                 self.discard_email(awaiting.id)
                 self._deliver(turn, [f"Very well, {self.title}. I've discarded that email."])
+                return
+
+        asked_forget, self._pending_forget = self._pending_forget, 0.0
+        if asked_forget and time.time() - asked_forget < 120:
+            turn.learn = False
+            if is_confirmation(text):
+                self.memory.clear()
+                self.emit("memory_cleared")
+                self._deliver(turn, [f"Done, {self.title}. I've forgotten everything I knew about you. We're starting fresh."])
+                return
+            if is_cancellation(text):
+                self._deliver(turn, [f"Phew. Your memories are safe, {self.title}."])
+                return
+
+        switch = parse_switch(text)
+        if switch:
+            turn.learn = False
+            self._deliver(turn, [self._switch_persona(switch)], voice=self.config.get("voice") or None)
+            return
+        if asks_who(text):
+            turn.learn = False
+            self._deliver(turn, [self._who_line(text)])
+            return
+        command = parse_memory_command(text)
+        if command:
+            turn.learn = False
+            try:
+                answer = self._memory_command(command)
+            except Exception:
+                log.exception("Memory command failed")
+                answer = f"I'm afraid my memory hiccuped there, {self.title}. The details are in the log."
+            if answer:
+                self._deliver(turn, [answer], listen_after=lambda: bool(self._pending_forget))
                 return
 
         try:
@@ -1239,7 +1318,7 @@ class Assistant:
         self._deliver(turn, self.llm.stream_reply(
             text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args),
             offer_tools=bool(_TOOL_CUES.search(text)), prefetch=prefetch,
-            language=lang.name if lang else None), language=lang.code if lang else None)
+            language=lang.name if lang else None, memory=self._memory_context(text)), language=lang.code if lang else None)
 
     def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None, language: str | None = None,
                  working: bool = False, listen_after=False) -> None:
@@ -1250,10 +1329,12 @@ class Assistant:
         splitter = SentenceSplitter()
         error: str | None = None
         self._emit_turn(turn, "assistant_start", id=mid)
+        reply: list[str] = []
         try:
             for token in tokens:
                 if turn.cancel.is_set():
                     break
+                reply.append(token)
                 self._emit_turn(turn, "assistant_token", id=mid, text=token)
                 if speaker:
                     for sentence in splitter.feed(token):
@@ -1271,6 +1352,12 @@ class Assistant:
             error = "Something went wrong while generating the reply. See the log for details."
 
         self.emit("assistant_end", id=mid, interrupted=turn.cancel.is_set(), error=error, stats=self.core_stats())
+        said = getattr(turn, "text", None)
+        if said and not error:
+            try:
+                self.memory.log_exchange(said, "".join(reply).strip(), self.persona.id, learn=getattr(turn, "learn", True))
+            except Exception:
+                log.exception("Couldn't log the exchange to memory")
         if error and self._is_current(turn):
             self.sfx.play("error")
             self.emit("system_message", level="error", text=error)
@@ -1623,6 +1710,8 @@ class Assistant:
         status = self.llm.check()
         self._ollama = status
         self.vision.refresh(status.models)
+        if self.memory.embed_model not in (status.models or []):
+            self.memory.pick_embed_model(status.models)
         if emit_event:
             self.emit("vision_status", **self.vision_status())
         if emit_event:
@@ -1669,10 +1758,14 @@ class Assistant:
                 if cancel.is_set():
                     self.emit("pull_done", model=name, ok=False, error="Download cancelled.", role=role)
                     return
-                self.config.update({"vision_model" if role == "vision" else "model": name})
+                if role != "embed":
+                    self.config.update({"vision_model" if role == "vision" else "model": name})
                 self.emit("pull_done", model=name, ok=True, error=None, role=role)
                 self.check_ollama()
-                if role == "vision":
+                if role == "embed":
+                    self.memory.poke()  # index the existing memories for meaning-based recall
+                    self.emit("memory_changed", stats=self.memory.stats())
+                elif role == "vision":
                     self._announce(f"My eyes are online, {self.title}. Ask me what's on your screen any time.")
                 else:
                     self.llm.warmup()
@@ -1699,6 +1792,10 @@ class Assistant:
 
     # ================================================================== settings
     def update_settings(self, changes: dict) -> dict:
+        changes = dict(changes or {})
+        persona = changes.pop("persona", None)
+        if persona and persona != self.config.get("persona"):
+            self.set_persona(persona, announce=False)
         applied = self.config.update(changes)
         if {"model", "ollama_host"} & applied.keys():
             self._spawn(self.check_ollama, name="recheck")
@@ -1708,6 +1805,252 @@ class Assistant:
             self._spawn(self._sync_wake_word, name="wake-sync")
         self.emit("settings", **self.config.as_dict())
         return self.config.as_dict()
+
+    # ================================================================== personalities
+    def persona_info(self, persona: Persona | None = None) -> dict:
+        p = persona or self.persona
+        return {**p.to_dict(), "address": address_for(p, self.config), "active": p.id == self.persona.id}
+
+    def persona_list(self) -> list[dict]:
+        return [self.persona_info(p) for p in PERSONAS.values()]
+
+    def set_persona(self, pid: str, announce: bool = True) -> dict:
+        """Become another personality: its voice, colours and character. Memory is shared."""
+        new = PERSONAS.get((pid or "").lower())
+        if new is None:
+            raise ValueError(f"Unknown personality: {pid}")
+        changes = {"persona": new.id, "voice": new.voice, "speech_rate": new.rate, "speech_pitch": new.pitch}
+        if self.config.get("persona_theme", True):
+            changes["theme"] = new.theme
+        self.config.update(changes)
+        info = self.persona_info()
+        self.emit("persona", **info)
+        self.emit("settings", **self.config.as_dict())
+        if announce:
+            self.speak(new.intro.format(title=self.title))
+        return info
+
+    def preview_persona(self, pid: str) -> None:
+        p = PERSONAS.get((pid or "").lower())
+        if p:
+            self.speak(p.sample.format(title=address_for(p, self.config)), voice=p.voice)
+
+    def _switch_persona(self, pid: str) -> str:
+        if pid == self.persona.id:
+            return self.persona.line("already", ["I'm right here, {title}."], self.title)
+        self.set_persona(pid, announce=False)
+        return self.persona.intro.format(title=self.title)
+
+    def _who_line(self, text: str) -> str:
+        if re.search(r"personalities|list", text, re.I):
+            others = "; ".join(f"{p.name}, {p.tagline[0].lower() + p.tagline[1:]}" for p in PERSONAS.values())
+            return (f"I can be {others}. You're talking to {self.persona.name} right now. "
+                    f"Just say, for example, \"switch to Harper\".")
+        return self.persona.line("who", [f"I'm {self.persona.name}, {{title}}."], self.title)
+
+    # ================================================================== long-term memory
+    def _start_memory(self) -> None:
+        self.memory.start(idle=lambda: self._turn is None)
+        if self.memory.store is None:
+            return
+        self.memory.pick_embed_model(self.llm.installed)
+        turns = self.memory.restore_recent()
+        if turns:
+            self.llm.load_history(turns)
+            self._restored = [{"role": t["role"], "text": t["text"], "ts": t["ts"]} for t in turns]
+        self.memory.poke()
+
+    def _memory_context(self, text: str) -> str:
+        try:
+            return self.memory.context(text)
+        except Exception:
+            log.exception("Memory recall failed")
+            return ""
+
+    def _resume_line(self) -> str:
+        return self.persona.line("resume", ["Welcome back. I've kept our last conversation, so we can pick up where we left off."], self.title)
+
+    def _routine_line(self) -> str:
+        if not (self.config.get("routine_reminders", True) and self.memory.enabled):
+            return ""
+        try:
+            today = today_routines(self.memory.store.all("routine"))[:2]
+        except Exception:
+            return ""
+        if not today:
+            return ""
+        return " A quick reminder for today: " + " and ".join(spoken(m.text) for m in today) + "."
+
+    def _remembered_line(self, memory: Memory, status: str) -> str:
+        what = first_person_echo(memory.text)
+        if status == "duplicate":
+            return f"I already know that, {self.title}: {what}."
+        if status == "updated":
+            return f"Got it, {self.title}. I've updated my memory: {what}."
+        return self.persona.line("remembered", ["Very good, {title}. I'll remember that {what}.", "Noted, {title}. I'll remember that {what}."],
+                                 self.title, what=what)
+
+    def _memory_command(self, cmd: MemoryCommand) -> str | None:
+        title = self.title
+        if cmd.action == "call_me":
+            name = re.sub(r"\s+", " ", cmd.text).strip(" .'")
+            if cmd.kind == "title" and name.lower() in {"sir", "ma'am", "maam", "madam", "boss", "captain", "chief", "doctor", "doc",
+                                                         "professor", "master", "miss", "mister", "commander"}:
+                self.config.update({"user_title": name.lower()})
+                self.emit("settings", **self.config.as_dict())
+                return f"Very well, {self.title}."
+            name = " ".join(w[:1].upper() + w[1:] for w in name.split())[:40]
+            changes = {"user_name": name}
+            if cmd.kind == "title":
+                changes["user_title"] = name
+            self.config.update(changes)
+            self.emit("settings", **self.config.as_dict())
+            if cmd.kind == "title":
+                return f"{name} it is. I'll call you that from now on."
+            return f"Lovely to meet you, {name}. I'll remember that."
+        if cmd.action == "my_name":
+            name = self.config.get("user_name")
+            if name:
+                return f"You're {name}, of course."
+            return f"You haven't told me your name yet, {title}. Just say \"call me\" followed by your name."
+        if not self.memory.enabled:
+            if cmd.action in ("recall_about", "project_done"):
+                return None
+            return f"My long-term memory is switched off, {title}. You can turn it on in Settings, under Memory."
+        store = self.memory.store
+        if cmd.action == "remember":
+            memory, status = self.memory.remember(cmd.text, source="said")
+            if status == "secret":
+                return (f"I'd rather not keep passwords, codes or card numbers in my memory, {title}. "
+                        "A password manager is a much safer home for those.")
+            if memory is None:
+                return f"I didn't catch what to remember, {title}."
+            self.emit("memory_learned", memory=memory.to_dict(), status=status)
+            return self._remembered_line(memory, status)
+        if cmd.action == "forget":
+            gone = self.memory.forget_matching(cmd.text)
+            if gone is None:
+                return f"I don't have anything about {spoken(cmd.text)} in my memory, {title}."
+            self.emit("memory_forgotten", memory=gone.to_dict())
+            return f"Done, {title}. I've forgotten that {first_person_echo(gone.text)}."
+        if cmd.action == "forget_all":
+            total = store.count()["total"]
+            if not total and not store.episodes(limit=1):
+                return f"There's nothing in my memory to forget, {title}."
+            self._pending_forget = time.time()
+            things = (f"all {total} things I remember about you" if total > 1 else "the one thing I remember about you" if total
+                      else "everything I remember")
+            return f"Are you sure, {title}? That erases {things}, and our past conversations. Say yes to confirm."
+        if cmd.action == "recall":
+            self.emit("memory_open")
+            return self._recall_summary()
+        if cmd.action == "recall_about":
+            hits = self.memory.search(cmd.text, limit=3, min_score=0.3, min_cover=0.6)
+            if not hits:
+                return None  # let the language model answer (it still sees the memory block)
+            return "Yes: " + "; and ".join(spoken(m.text) for m in hits) + "."
+        if cmd.action == "projects":
+            active = [m for m in store.all("project") if m.meta.get("status") != "done"]
+            done = [m for m in store.all("project") if m.meta.get("status") == "done"]
+            if not active:
+                extra = f" You've finished {len(done)} so far." if done else ""
+                return f"You haven't told me about any ongoing projects, {title}. Tell me what you're working on and I'll keep track.{extra}"
+            return (f"Here's what you're working on, {title}: " + "; ".join(spoken(m.text) for m in active[:5]) + "."
+                    + (f" And you've finished {len(done)}." if done else ""))
+        if cmd.action == "routines":
+            routines = store.all("routine")
+            if not routines:
+                return f"I don't know any of your routines yet, {title}. Tell me about them, like \"I go to the gym on Mondays at 6\"."
+            today = today_routines(routines)
+            if today:
+                return f"Today, {title}: " + "; ".join(spoken(m.text) for m in today) + "."
+            return f"Nothing special today, {title}. Your routines: " + "; ".join(spoken(m.text) for m in routines[:5]) + "."
+        if cmd.action == "episodes":
+            episodes = store.episodes(limit=2)
+            if episodes:
+                said = " Before that, ".join(_about_you(e.summary) for e in episodes)
+                return f"Last time, {said}"
+            if self._restored:
+                last = next((t["text"] for t in reversed(self._restored) if t["role"] == "user"), "")
+                if last:
+                    return f"We were just talking. The last thing you asked me was: \"{last[:160]}\""
+            return f"I don't have any earlier conversations on record yet, {title}."
+        if cmd.action == "project_done":
+            done = self.memory.finish_project(cmd.text)
+            if done is None:
+                return None
+            self.emit("memory_learned", memory=done.to_dict(), status="updated")
+            return self.persona.line("project_done", ["Congratulations, {title}. I've marked {what} as done."], title,
+                                     what=spoken(cmd.text))
+        return None
+
+    def _recall_summary(self) -> str:
+        title = self.title
+        overview = self.memory.overview()
+        name = self.config.get("user_name")
+        bits = []
+        if name:
+            bits.append(f"your name is {name}")
+        bits += [spoken(m.text) for m in overview["fact"][:2]]
+        bits += [spoken(m.text) for m in overview["preference"][:2]]
+        bits += [spoken(m.text) for m in [p for p in overview["project"] if p.meta.get("status") != "done"][:1]]
+        bits += [spoken(m.text) for m in overview["routine"][:1]]
+        total = sum(len(v) for v in overview.values())
+        if not bits:
+            return (f"I don't know much about you yet, {title}. Tell me about yourself, or say \"remember that\" followed by "
+                    "anything you'd like me to keep.")
+        listed = ", ".join(bits[:-1]) + (f", and {bits[-1]}" if len(bits) > 1 else bits[-1])
+        more = f" That's {total} things in all; they're on screen in the Memory Core." if total > len(bits) else " It's all on screen in the Memory Core."
+        return f"Here's what I know, {title}: {listed}.{more}"
+
+    # API for the Memory Core window
+    def memory_overview(self) -> dict:
+        return {"memories": [m.to_dict() for kind in self.memory.overview().values() for m in kind],
+                "episodes": [e.to_dict() for e in self.memory.store.episodes(limit=30)] if self.memory.store else [],
+                "stats": self.memory.stats()}
+
+    def memory_add(self, kind: str, text: str) -> dict:
+        if self.memory.store is None:
+            raise ValueError("Memory is unavailable.")
+        memory, status = self.memory.store.add(kind, _tidy_memory(text), source="manual")
+        self.memory.poke()
+        self.emit("memory_changed", stats=self.memory.stats())
+        return {"memory": memory.to_dict(), "status": status}
+
+    def memory_update(self, mid: int, fields: dict) -> dict:
+        if self.memory.store is None:
+            raise ValueError("Memory is unavailable.")
+        allowed = {k: v for k, v in (fields or {}).items() if k in ("text", "kind", "pinned", "meta")}
+        if "text" in allowed:
+            allowed["text"] = _tidy_memory(allowed["text"])
+        memory = self.memory.store.update(int(mid), **allowed)
+        if memory is None:
+            raise ValueError("That memory no longer exists.")
+        self.memory.poke()
+        self.emit("memory_changed", stats=self.memory.stats())
+        return memory.to_dict()
+
+    def memory_delete(self, mid: int) -> dict | None:
+        gone = self.memory.store.delete(int(mid)) if self.memory.store else None
+        self.emit("memory_changed", stats=self.memory.stats())
+        return gone.to_dict() if gone else None
+
+    def memory_restore(self, data: dict) -> dict:
+        memory = self.memory.store.restore(data or {})
+        self.memory.poke()
+        self.emit("memory_changed", stats=self.memory.stats())
+        return memory.to_dict()
+
+    def memory_delete_episode(self, eid: int) -> None:
+        if self.memory.store:
+            self.memory.store.delete_episode(int(eid))
+            self.emit("memory_changed", stats=self.memory.stats())
+
+    def memory_clear(self) -> None:
+        self.memory.clear()
+        self.llm.clear_history()
+        self._restored = []
+        self.emit("memory_cleared")
 
     def list_voices(self) -> list[dict]:
         return self.tts.list_voices()

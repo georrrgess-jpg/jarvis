@@ -21,7 +21,38 @@ window.createJarvisMock = function createJarvisMock() {
     link_browser: 'default', theme: params.get('theme') || 'arc', vision_model: '', allow_control: true, act_confirm: 'auto', watch_interval: 2,
     vision_exclusions: 'password, 1password, bitwarden, lastpass, keepass, dashlane, bank, banking, paypal', allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 1.0, patience: 3,
     listen_timeout: 10, max_phrase_seconds: 45, auto_listen: false, user_title: 'sir', frameless: true,
+    persona: params.get('persona') || 'jarvis', persona_theme: true, memory_enabled: true, memory_auto_learn: true, memory_resume: true, routine_reminders: true,
   };
+  const PERSONAS = [
+    { id: 'jarvis', name: 'Jarvis', display: 'J.A.R.V.I.S.', tagline: 'The impeccable butler', description: 'Calm, precise and quietly witty. Short, polished answers with a dry British sense of humour.', voice: 'en-GB-RyanNeural', gender: 'male', theme: 'arc', address: 'sir' },
+    { id: 'harper', name: 'Harper', display: 'HARPER', tagline: 'Your kind, curious companion', description: 'Exceptionally kind, friendly and informative. Loves a real conversation, explains things clearly with examples, remembers what matters to you and cheers you on.', voice: 'en-US-AvaNeural', gender: 'female', theme: 'rose', address: 'Tony' },
+    { id: 'friday', name: 'Friday', display: 'F.R.I.D.A.Y.', tagline: 'Quick, upbeat and a little cheeky', description: 'Fast and casual with an Irish lilt. Gets straight to the point, keeps things light and calls you boss.', voice: 'en-IE-EmilyNeural', gender: 'female', theme: 'mark3', address: 'boss' },
+    { id: 'sage', name: 'Sage', display: 'SAGE', tagline: 'The patient mentor', description: 'A calm, encouraging tutor who explains step by step, checks you have understood, and loves a good analogy.', voice: 'en-US-AndrewNeural', gender: 'male', theme: 'stealth', address: 'Tony' },
+  ];
+  const personaInfo = () => ({ ...PERSONAS.find((p) => p.id === settings.persona), active: true });
+  const now = Date.now() / 1000;
+  let memId = 10;
+  const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const mem = (id, kind, text, extra = {}) => ({ id, kind, text, key: '', meta: {}, source: 'said', pinned: false, uses: 0, created: now - id * 86400, updated: now - id * 3600, last_used: 0, when: '', ...extra });
+  let memories = params.has('nomemory') ? [] : [
+    mem(1, 'fact', 'You have a golden retriever called Max.', { source: 'learned', uses: 3 }),
+    mem(2, 'fact', 'Your sister is called Ana and lives in Madrid.', { pinned: true }),
+    mem(3, 'preference', 'You love jazz, especially Miles Davis.', { uses: 2 }),
+    mem(4, 'preference', 'You like short, to-the-point answers in the morning.', { source: 'manual' }),
+    mem(5, 'routine', 'You go to yoga every Tuesday and Thursday at 6 PM.', { meta: { days: [1, 3], time: '18:00' }, when: 'Tue, Thu · 6 PM' }),
+    mem(6, 'project', "You're building a website for your mum's bakery.", { meta: { status: 'active' }, source: 'learned' }),
+    mem(7, 'project', 'You were learning to play the guitar.', { meta: { status: 'done' } }),
+  ];
+  let episodes = params.has('nomemory') ? [] : [
+    { id: 1, session: 's1', summary: 'The user asked for a bio of Lionel Messi, which was written to Google Docs, then emailed it to Sarah.', started: now - 90000, ended: now - 86000, turns: 6 },
+    { id: 2, session: 's0', summary: 'The user talked about planning a trip to Lisbon in May and asked for restaurant ideas.', started: now - 400000, ended: now - 396000, turns: 9 },
+  ];
+  const memStats = () => {
+    const c = { fact: 0, preference: 0, routine: 0, project: 0 };
+    memories.forEach((m) => { c[m.kind]++; });
+    return { ...c, total: memories.length, turns: 40, episodes: episodes.length, enabled: settings.memory_enabled, auto_learn: settings.memory_auto_learn, embed_model: params.has('semantic') ? 'nomic-embed-text:latest' : '', path: '%APPDATA%\\JARVIS\\memory.db', error: null };
+  };
+  const memChanged = () => emit({ type: 'memory_changed', stats: memStats() });
   if (params.has('gold')) settings.google_script_url = 'https://script.google.com/macros/s/preview/exec';
   const mockVision = { model: 'qwen2.5vl:7b', models: ['qwen2.5vl:7b'], ocr: true, ocr_engine: 'Windows OCR', watching: false, watch_label: '',
     allow_control: true, pulling: false, suggested: [] };
@@ -97,6 +128,9 @@ window.createJarvisMock = function createJarvisMock() {
       core: { online, model: models[0] || null, host: settings.ollama_host, first_token_ms: null, tokens_per_sec: null, memory_turns: 0 },
       window: { frameless: true },
       wake: { enabled: true, active: true, phrase: 'Hey Jarvis', reason: null }, vision: mockVision,
+      persona: personaInfo(), personas: PERSONAS.map((p) => ({ ...p, active: p.id === settings.persona })), memory: memStats(),
+      restored: params.has('restored') ? [{ role: 'user', text: 'Any ideas for the bakery website homepage?', ts: now - 3000 },
+        { role: 'assistant', text: 'Lead with a big photo of the bread, the opening hours and a "call to order" button. Want me to sketch a layout?', ts: now - 2990 }] : [],
     }),
     boot_complete: async () => reply(online && models.length
       ? 'Good evening, sir. All systems are online. How may I help?'
@@ -104,6 +138,33 @@ window.createJarvisMock = function createJarvisMock() {
     play_sfx: async () => {},
     send_text: async (text) => {
       cancelAll();
+      const sw = text.match(/(?:switch to|talk to|bring back)\s+(jarvis|harper|friday|sage)/i);
+      if (sw) {
+        emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text' });
+        settings.persona = sw[1].toLowerCase();
+        settings.theme = PERSONAS.find((p) => p.id === settings.persona).theme;
+        settings.voice = PERSONAS.find((p) => p.id === settings.persona).voice;
+        emit([{ type: 'persona', ...personaInfo() }, { type: 'settings', ...settings }]);
+        reply({ harper: "Hi Tony, Harper here! It's so nice to talk with you. What's on your mind?", jarvis: 'At your service, sir. J.A.R.V.I.S. is back online.',
+          friday: 'F.R.I.D.A.Y. here, boss. What are we working on?', sage: 'Hello, Tony. Sage here. What would you like to understand today?' }[settings.persona], true);
+        return true;
+      }
+      const rem = text.match(/^(?:please )?remember (?:that )?(.+)$/i);
+      if (rem) {
+        emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text' });
+        const said = rem[1].replace(/\bI'm\b/gi, "you're").replace(/\bI\b/g, 'you').replace(/\bmy\b/gi, 'your').replace(/[.!]$/, '');
+        const m = mem(++memId, /like|love|hate|prefer/i.test(said) ? 'preference' : 'fact', said[0].toUpperCase() + said.slice(1) + '.');
+        memories.unshift(m);
+        emit({ type: 'memory_learned', memory: m, status: 'added' }); memChanged();
+        reply(settings.persona === 'harper' ? `Got it! I'll remember that ${said}.` : `Very good, sir. I'll remember that ${said}.`, true);
+        return true;
+      }
+      if (/what do you (know|remember) about me/i.test(text)) {
+        emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text' });
+        emit({ type: 'memory_open' });
+        reply("Here's what I know, sir: you have a golden retriever called Max, your sister is called Ana, you love jazz, and you're building a website for your mum's bakery. It's all on screen in the Memory Core.", true);
+        return true;
+      }
       const spanish = /[¿¡ñ]|\b(qué|hola|escribe|biografía)\b/i.test(text);
       emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text', ...(spanish ? { lang: 'es', lang_name: 'Spanish' } : {}) });
       if (/\b(bio|biography|essay|presentation|slides)\b/i.test(text)) {
@@ -190,6 +251,30 @@ window.createJarvisMock = function createJarvisMock() {
     stop_listening: async () => {},
     interrupt: async () => { cancelAll(); emit({ type: 'speech_stop' }); const was = state !== 'IDLE'; setState('IDLE'); return was; },
     clear_memory: async () => { memory = 0; },
+    persona_list: async () => PERSONAS.map((p) => ({ ...p, active: p.id === settings.persona })),
+    persona_set: async (id) => {
+      settings.persona = id;
+      if (settings.persona_theme) settings.theme = PERSONAS.find((p) => p.id === id).theme;
+      settings.voice = PERSONAS.find((p) => p.id === id).voice;
+      setTimeout(() => emit({ type: 'settings', ...settings }), 0);
+      return { ok: true, persona: personaInfo() };
+    },
+    persona_preview: async () => {},
+    memory_list: async () => ({ memories: memories.slice(), episodes: episodes.slice(), stats: memStats() }),
+    memory_add: async (kind, text) => { const m = mem(++memId, kind, text.replace(/\bI\b/g, 'You'), { source: 'manual' }); memories.unshift(m); memChanged(); return { ok: true, memory: m, status: 'added' }; },
+    memory_update: async (id, fields) => {
+      const m = memories.find((x) => x.id === id);
+      if (!m) return { ok: false, error: 'That memory no longer exists.' };
+      if (fields.meta) fields = { ...fields, meta: { ...m.meta, ...fields.meta } };
+      Object.assign(m, fields, { updated: Date.now() / 1000 });
+      return { ok: true, memory: m };
+    },
+    memory_delete: async (id) => { const m = memories.find((x) => x.id === id); memories = memories.filter((x) => x.id !== id); memChanged(); return { ok: true, memory: m || null }; },
+    memory_restore: async (m) => { memories.unshift({ ...m, id: ++memId }); memChanged(); return { ok: true, memory: m }; },
+    memory_delete_episode: async (id) => { episodes = episodes.filter((e) => e.id !== id); memChanged(); },
+    memory_clear: async () => { memories = []; episodes = []; memChanged(); },
+    memory_export: async () => ({ ok: true, path: 'C:\\Users\\Tony\\Documents\\JARVIS memory 2026-10-08 1412.json' }),
+    memory_install_embeddings: async () => ({ ok: true }),
     get_system_stats: async () => {
       const t = Date.now() / 1000;
       const cpu = 18 + 14 * Math.sin(t / 7) + Math.random() * 8;

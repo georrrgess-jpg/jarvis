@@ -18,7 +18,7 @@
 
   <!-- ======================================================= title bar -->
   <header id="titlebar">
-    <div class="brand pywebview-drag-region">
+    <div class="brand pywebview-drag-region" id="brand" title="Choose a personality">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="17" class="bm-ring"/>
         <circle cx="20" cy="20" r="12" class="bm-ring2"/>
@@ -26,8 +26,8 @@
         <circle cx="20" cy="20" r="4" class="bm-core"/>
       </svg>
       <div class="brand-text">
-        <h1>J.A.R.V.I.S.</h1>
-        <span>Just A Rather Very Intelligent System</span>
+        <h1 id="brand-name">J.A.R.V.I.S.</h1>
+        <span id="brand-tag">Just A Rather Very Intelligent System</span>
       </div>
     </div>
 
@@ -56,6 +56,13 @@
     </div>
 
     <div class="win-buttons">
+      <button class="wb" id="btn-persona" title="Personality (Ctrl+P)" aria-label="Choose a personality">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.2c.9 1.3 2 1.9 3.4 1.9s2.5-.6 3.4-1.9"/><path d="M9.2 9.6h.01M14.8 9.6h.01" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </button>
+      <button class="wb" id="btn-memory" title="Memory Core (Ctrl+M)" aria-label="Open the Memory Core">
+        <svg viewBox="0 0 24 24"><path d="M9.5 4.5a3 3 0 0 0-3 3v.3a3 3 0 0 0-1.7 5.2 3 3 0 0 0 2.2 4.6 2.9 2.9 0 0 0 5 1.4V5.6a2.6 2.6 0 0 0-2.5-1.1Z"/><path d="M14.5 4.5a3 3 0 0 1 3 3v.3a3 3 0 0 1 1.7 5.2 3 3 0 0 1-2.2 4.6 2.9 2.9 0 0 1-5 1.4"/><path d="M12 9.5h2.2M12 14h2.6M9.6 11.6H12"/></svg>
+        <i class="wb-badge hidden" id="memory-badge"></i>
+      </button>
       <button class="wb" id="btn-settings" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.4 4.6-.03-1.2 1.9-1.5-1.9-3.3-2.3.8c-.6-.5-1.3-.9-2-1.2L15.6 3h-3.8l-.4 2.4c-.7.3-1.4.7-2 1.2l-2.3-.8-1.9 3.3 1.9 1.5a6.6 6.6 0 0 0 0 2.4l-1.9 1.5 1.9 3.3 2.3-.8c.6.5 1.3.9 2 1.2l.4 2.4h3.8l.4-2.4c.7-.3 1.4-.7 2-1.2l2.3.8 1.9-3.3-1.9-1.5Z"/></svg>
       </button>
@@ -282,6 +289,60 @@
     </div>
   </div>
 
+  <!-- ======================================================= personality picker -->
+  <div id="personas" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="ps-title">
+    <div class="modal-card cyan persona-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker">PERSONALITY MATRIX</div><h2 id="ps-title">Who would you like to talk to?</h2></div>
+        <button class="wb" id="ps-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <p class="mc-lead ps-lead">Every personality has the same skills and shares one memory of you; each has its own character, voice and colours.</p>
+      <div class="ps-grid" id="ps-grid"></div>
+      <label class="toggle ps-toggle"><input type="checkbox" id="ps-theme"><i></i><span>Switch the HUD colours with the personality</span></label>
+      <div class="mc-foot">Tip: just say “switch to Harper” or “let me talk to Jarvis”. The wake word stays “Hey Jarvis” for everyone.</div>
+    </div>
+  </div>
+
+  <!-- ======================================================= memory core -->
+  <div id="memory" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="mm-title">
+    <div class="modal-card cyan memory-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker" id="mm-kicker">LONG-TERM MEMORY · STORED ONLY ON THIS PC</div><h2 id="mm-title">Memory Core</h2></div>
+        <button class="wb" id="mm-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div class="mm-stats" id="mm-stats"></div>
+      <div class="mm-off hidden" id="mm-off">Long-term memory is switched off, so nothing new is being remembered. <button class="btn sm" id="mm-enable"><span>TURN ON</span></button></div>
+      <div class="mm-tabs" role="tablist" id="mm-tabs">
+        <button data-tab="all" class="on">ALL</button><button data-tab="fact">ABOUT YOU</button><button data-tab="preference">PREFERENCES</button>
+        <button data-tab="routine">ROUTINES</button><button data-tab="project">PROJECTS</button><button data-tab="episodes">CONVERSATIONS</button>
+      </div>
+      <div class="mm-tools">
+        <input id="mm-search" class="url-input" type="search" placeholder="Search memories…" spellcheck="false">
+      </div>
+      <form class="mm-add" id="mm-add">
+        <select id="mm-add-kind" aria-label="Kind of memory">
+          <option value="fact">About you</option><option value="preference">Preference</option><option value="routine">Routine</option><option value="project">Project</option>
+        </select>
+        <input id="mm-add-text" class="url-input" type="text" maxlength="400" placeholder="Teach me something, e.g. “I'm allergic to peanuts”" spellcheck="true">
+        <button class="btn sm primary" type="submit"><span>REMEMBER</span></button>
+      </form>
+      <div class="mm-list" id="mm-list"></div>
+      <div class="mm-smart hidden" id="mm-smart">
+        <span><b>Smarter recall:</b> download a small free model (nomic-embed-text, about 270&nbsp;MB) so I can find memories by meaning, not just words.</span>
+        <button class="btn sm" id="mm-smart-get"><span>DOWNLOAD</span></button>
+      </div>
+      <div class="mc-actions">
+        <button class="btn ghost" id="mm-export">EXPORT</button>
+        <button class="btn ghost danger" id="mm-forget">FORGET EVERYTHING</button>
+        <span class="mm-spacer"></span>
+        <button class="btn primary" id="mm-done"><span>DONE</span></button>
+      </div>
+      <div class="mc-foot">Say “remember that…”, “forget that…”, “what do you know about me?” or “what am I working on?”.</div>
+    </div>
+  </div>
+
   <!-- ======================================================= document reader -->
   <div id="reader" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="rd-title">
     <div class="modal-card cyan reader-card">
@@ -315,7 +376,7 @@
         <label class="field"><span>Ollama host</span><input id="set-host" data-key="ollama_host" type="text" spellcheck="false"></label>
         <label class="field"><span>Creativity <output id="out-temp"></output></span><input id="set-temp" data-key="temperature" type="range" min="0" max="1.5" step="0.05"></label>
         <label class="field"><span>Custom instructions</span><textarea id="set-custom" data-key="custom_instructions" rows="3" placeholder="e.g. Keep answers under two sentences. I live in London."></textarea></label>
-        <button class="btn ghost sm" id="set-clear-memory">PURGE CONVERSATION MEMORY</button>
+        <button class="btn ghost sm" id="set-clear-memory">CLEAR THIS CONVERSATION</button>
       </fieldset>
       <fieldset>
         <legend>Abilities</legend>
@@ -392,17 +453,37 @@
         <label class="toggle"><input type="checkbox" data-key="auto_listen"><i></i><span>Conversation mode (listen again after replying)</span></label>
       </fieldset>
       <fieldset>
+        <legend>Personality</legend>
+        <label class="field"><span>Talk to</span>
+          <select data-key="persona" id="set-persona">
+            <option value="jarvis">J.A.R.V.I.S.: the impeccable butler</option><option value="harper">Harper: your kind, curious companion</option>
+            <option value="friday">F.R.I.D.A.Y.: quick, upbeat and a little cheeky</option><option value="sage">Sage: the patient mentor</option>
+          </select>
+        </label>
+        <label class="toggle"><input type="checkbox" data-key="persona_theme"><i></i><span>Switch the HUD colours with the personality</span></label>
+        <button class="btn sm" id="set-open-personas"><span>MEET THE PERSONALITIES</span></button>
+      </fieldset>
+      <fieldset>
+        <legend>Memory</legend>
+        <label class="toggle"><input type="checkbox" data-key="memory_enabled"><i></i><span>Long-term memory (stored only on this PC)</span></label>
+        <label class="toggle"><input type="checkbox" data-key="memory_auto_learn"><i></i><span>Learn about me from our conversations</span></label>
+        <label class="toggle"><input type="checkbox" data-key="memory_resume"><i></i><span>Carry on our last conversation after a restart</span></label>
+        <label class="toggle"><input type="checkbox" data-key="routine_reminders"><i></i><span>Mention today's routines when I start up</span></label>
+        <button class="btn sm" id="set-open-memory"><span>OPEN MEMORY CORE</span></button>
+      </fieldset>
+      <fieldset>
         <legend>Interface</legend>
         <label class="field"><span>HUD colour scheme</span>
           <select data-key="theme">
             <option value="arc">Arc reactor (cyan)</option><option value="mark3">Mark III (red &amp; gold)</option>
             <option value="stealth">Stealth (green)</option><option value="violet">Violet</option>
+            <option value="rose">Rose (warm pink)</option>
           </select>
         </label>
         <label class="toggle"><input type="checkbox" data-key="sfx_enabled"><i></i><span>Interface sounds</span></label>
         <label class="field"><span>Sound volume <output id="out-sfx"></output></span><input id="set-sfx" data-key="sfx_volume" type="range" min="0" max="1" step="0.05"></label>
-        <label class="field"><span>Address me as</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>
-        <label class="field"><span>Your name (for email sign-offs)</span><input data-key="user_name" type="text" maxlength="60" placeholder="e.g. Tony Stark"></label>
+        <label class="field"><span>J.A.R.V.I.S. calls me</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>
+        <label class="field"><span>Your name (Harper and Sage use it)</span><input data-key="user_name" type="text" maxlength="60" placeholder="e.g. Tony Stark"></label>
         <label class="toggle"><input type="checkbox" data-key="frameless"><i></i><span>Borderless HUD window (applies on restart)</span></label>
       </fieldset>
       <p class="drawer-foot" id="about">J.A.R.V.I.S. · runs locally · no API keys</p>

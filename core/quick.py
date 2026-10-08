@@ -14,8 +14,8 @@ import random
 import re
 from dataclasses import dataclass, field
 
-_LEAD = (r"^(?:(?:hey |ok |okay |hi )?jarvis[, ]+)?(?:please |can you |could you |would you |will you |go ahead and )*")
-_END = r"(?:\s+(?:please|now|for me|jarvis|sir|ma'am))*[\s.!?]*$"
+_LEAD = (r"^(?:(?:hey |ok |okay |hi )?(?:jarvis|harper|friday|sage)[, ]+)?(?:please |can you |could you |would you |will you |go ahead and )*")
+_END = r"(?:[,\s]+(?:please|now|for me|jarvis|harper|friday|sage|sir|ma'am|friend|boss))*[\s.!?]*$"
 
 
 @dataclass
@@ -34,26 +34,26 @@ JOKES = [
     "I'd tell you a construction joke, {title}, but I'm still working on it.",
     "Why was the computer cold? It left its Windows open.",
 ]
-_SMALL_TALK: list[tuple[re.Pattern, list[str]]] = [
-    (re.compile(_LEAD + r"(?:thanks|thank you|thank you (?:very|so) much|thanks a (?:lot|bunch)|thanks so much|cheers|much appreciated|ta|thank you jarvis)" + _END, re.I),
+_SMALL_TALK: list[tuple[str, re.Pattern, list[str]]] = [  # (situation, pattern, default replies)
+    ("thanks", re.compile(_LEAD + r"(?:thanks|thank you|thank you (?:very|so) much|thanks a (?:lot|bunch)|thanks so much|cheers|much appreciated|ta|thank you (?:jarvis|harper|friday|sage))" + _END, re.I),
      ["You're most welcome, {title}.", "Always a pleasure, {title}.", "Of course, {title}.", "Happy to help, {title}."]),
-    (re.compile(_LEAD + r"(?:you(?:'re| are) (?:the best|awesome|great|amazing|brilliant|wonderful|a legend)|good job|well done|nice one|great job)" + _END, re.I),
+    ("praise", re.compile(_LEAD + r"(?:you(?:'re| are) (?:the best|awesome|great|amazing|brilliant|wonderful|a legend)|good job|well done|nice one|great job)" + _END, re.I),
      ["Why, thank you, {title}. I do try.", "Most kind, {title}. I shall endeavour to keep it up.", "Thank you, {title}. The credit is shared with my circuits."]),
-    (re.compile(_LEAD + r"(?:how are you(?: doing)?(?: today| tonight| this morning| this evening)?(?: feeling)?|how(?:'s| is) it going|how do you do|are you (?:ok|okay|alright|well))" + _END, re.I),
+    ("how_are_you", re.compile(_LEAD + r"(?:how are you(?: doing)?(?: today| tonight| this morning| this evening)?(?: feeling)?|how(?:'s| is) it going|how do you do|are you (?:ok|okay|alright|well))" + _END, re.I),
      ["All systems nominal, {title}. And yourself?", "Running smoothly, {title}. How may I help?", "In excellent working order, {title}. What can I do for you?"]),
-    (re.compile(_LEAD + r"(?:who are you|what are you|what(?:'s| is) your name|what should i call you|introduce yourself)" + _END, re.I),
+    ("who", re.compile(_LEAD + r"(?:who are you|what are you|what(?:'s| is) your name|what should i call you|introduce yourself)" + _END, re.I),
      ["I'm J.A.R.V.I.S., {title}: Just A Rather Very Intelligent System. I live on your computer and I'm entirely at your service."]),
-    (re.compile(_LEAD + r"(?:what can you do|what can i ask you|help me|what do you do|what are your (?:features|abilities|capabilities)|how do you work)" + _END, re.I),
+    ("abilities", re.compile(_LEAD + r"(?:what can you do|what can i ask you|help me|what do you do|what are your (?:features|abilities|capabilities)|how do you work)" + _END, re.I),
      ["I can open your apps, games and files, search the web, write documents and presentations in Google Docs and Slides, "
       "send emails, set timers, do sums, control the volume and chat in your language. Just ask, {title}."]),
-    (re.compile(_LEAD + r"(?:good ?night|goodbye|bye(?: bye)?|see you(?: later| tomorrow| soon)?|talk to you later|i'?m (?:off|going to bed|leaving)|that'?s all for (?:today|now))" + _END, re.I),
+    ("goodbye", re.compile(_LEAD + r"(?:good ?night|goodbye|bye(?: bye)?|see you(?: later| tomorrow| soon)?|talk to you later|i'?m (?:off|going to bed|leaving)|that'?s all for (?:today|now))" + _END, re.I),
      ["Good night, {title}. I'll be here if you need me.", "Goodbye, {title}. Do call if you need anything.", "Until next time, {title}."]),
-    (re.compile(_LEAD + r"(?:tell me a joke|say something funny|make me laugh|got any jokes|do you know any jokes|joke)" + _END, re.I), JOKES),
-    (re.compile(_LEAD + r"(?:i'?m (?:bored|tired|stressed|sad))" + _END, re.I),
+    ("joke", re.compile(_LEAD + r"(?:tell me a joke|say something funny|make me laugh|got any jokes|do you know any jokes|joke)" + _END, re.I), JOKES),
+    ("feeling_down", re.compile(_LEAD + r"(?:i'?m (?:bored|tired|stressed|sad))" + _END, re.I),
      ["I'm sorry to hear that, {title}. Shall I put some music on, or tell you a joke?"]),
 ]
 _GREETING = re.compile(_LEAD + r"(?:hi|hello|hey|yo|howdy|hiya|hey there|hello there|good (?:morning|afternoon|evening)|morning|evening|"
-                       r"are you there|are you awake|jarvis|wake up|you there|hello jarvis|hey jarvis)" + _END, re.I)
+                       r"are you there|are you awake|jarvis|wake up|you there|(?:hello |hey |hi )?(?:jarvis|harper|friday|sage))" + _END, re.I)
 
 
 # ----------------------------------------------------------------------------- arithmetic
@@ -223,9 +223,9 @@ def parse_quick(text: str) -> Quick | None:
         return None
     if _GREETING.match(t):
         return Quick("greeting")
-    for pattern, replies in _SMALL_TALK:
+    for category, pattern, replies in _SMALL_TALK:
         if pattern.match(t):
-            return Quick("talk", {"replies": replies})
+            return Quick("talk", {"replies": replies, "category": category})
     for pattern, what in _STATUS:
         if pattern.match(t):
             return Quick("status", {"what": what})

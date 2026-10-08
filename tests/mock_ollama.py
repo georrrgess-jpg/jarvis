@@ -103,6 +103,12 @@ class MockOllama:
                         return self._json(200, {"model": model, "message": {"role": "assistant", "content": text},
                                                 "done": True})
                     return self._stream(owner._chat_chunks(model, body))
+                if self.path == "/api/embed":
+                    if model not in owner.models:
+                        return self._json(404, {"error": f"model '{model}' not found"})
+                    inputs = body.get("input")
+                    inputs = [inputs] if isinstance(inputs, str) else list(inputs or [])
+                    return self._json(200, {"model": model, "embeddings": [owner.embedding(t) for t in inputs]})
                 if self.path == "/api/pull":
                     return self._stream(owner._pull_chunks(model or body.get("name", "")))
                 return self._json(404, {"error": "not found"})
@@ -112,6 +118,24 @@ class MockOllama:
         self.port = self.server.server_address[1]
         self.url = f"http://127.0.0.1:{self.port}"
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @staticmethod
+    def embedding(text: str, dims: int = 64) -> list[float]:
+        """A toy embedding: hashed word counts, with a few synonyms folded together so 'semantic' recall is testable."""
+        import hashlib
+        import math
+
+        fold = {"puppy": "dog", "hound": "dog", "canine": "dog", "pup": "dog", "kitten": "cat", "automobile": "car",
+                "vehicle": "car", "tune": "music", "song": "music", "songs": "music", "melody": "music", "football": "soccer"}
+        skip = {"you", "your", "have", "has", "the", "and", "called", "about", "tell", "what", "with", "are", "for"}
+        vec = [0.0] * dims
+        for word in re.findall(r"[a-z]+", (text or "").lower()):
+            word = fold.get(word, word)
+            if len(word) < 3 or word in skip:
+                continue
+            vec[int(hashlib.md5(word.encode()).hexdigest(), 16) % dims] += 1.0
+        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+        return [v / norm for v in vec]
 
     def _chat_chunks(self, model: str, body: dict | None = None):
         """Stream a reply. With tools offered, "search"/"read" requests first get a tool call, like a real model."""

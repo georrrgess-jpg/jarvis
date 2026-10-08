@@ -30,6 +30,8 @@
       state: { IDLE: [72, 255, 150], LISTENING: [205, 255, 120], THINKING: [255, 200, 80], SPEAKING: [172, 255, 212] } },
     violet: { css: { cyan: '172 122 255', ice: '218 192 255', green: '122 232 255', amber: '255 150 214' },
       state: { IDLE: [172, 122, 255], LISTENING: [122, 232, 255], THINKING: [255, 150, 214], SPEAKING: [218, 192, 255] } },
+    rose: { css: { cyan: '255 128 170', ice: '255 206 222', green: '255 196 140', amber: '196 160 255' },
+      state: { IDLE: [255, 128, 170], LISTENING: [255, 196, 140], THINKING: [196, 160, 255], SPEAKING: [255, 206, 222] } },
   };
   let themeRGB = '42,212,255';
   function applyTheme(name) {
@@ -43,6 +45,7 @@
   }
 
   const S = {
+    persona: null, personas: [], memory: null,
     state: 'IDLE', listenPhase: null, settings: {}, ollama: null, mic: null, audio: null,
     core: null, voiceOk: true, voices: null, booted: false, system: null, activity: null, wake: null,
   };
@@ -454,6 +457,7 @@
     $('.t-text', el).textContent = text;
     $('#toasts').append(el);
     setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 400); }, ms);
+    return el;
   }
 
   // ========================================================================= chat log
@@ -545,6 +549,40 @@
       const el = this.make('user', 'YOU', `<span class="src">${ev.source === 'voice' ? 'VOICE' : 'TEXT'}</span>${lang}`);
       $('.msg-body', el).textContent = ev.text;
       this.count++; this.updateCount();
+      this.scroll(true);
+    },
+    memoryNote(ev, forgotten = false) {
+      const m = ev.memory || {};
+      const el = document.createElement('div');
+      el.className = `msg system mem-note${forgotten ? ' forgot' : ''}`;
+      const label = forgotten ? 'FORGOTTEN' : ev.status === 'updated' ? 'MEMORY UPDATED' : ev.status === 'duplicate' ? 'ALREADY KNEW' : 'REMEMBERED';
+      el.innerHTML = `<div class="msg-body"><b class="mem-tag">${label}</b><span class="mem-text"></span>`
+        + (ev.status === 'duplicate' ? '' : '<button class="mem-act" data-act="undo">UNDO</button>')
+        + (forgotten ? '' : '<button class="mem-act" data-act="edit">EDIT</button>') + '</div>';
+      $('.mem-text', el).textContent = m.text || '';
+      const undo = $('[data-act=undo]', el);
+      if (undo) undo.onclick = async () => {
+        const r = forgotten ? await call('memory_restore', m) : await call('memory_delete', m.id);
+        if (r && r.ok) { el.classList.add('undone'); $$('.mem-act', el).forEach((b) => b.remove()); $('.mem-tag', el).textContent = forgotten ? 'RESTORED' : 'UNDONE'; }
+      };
+      const edit = $('[data-act=edit]', el);
+      if (edit) edit.onclick = () => MemoryCore.open(m.id);
+      $('#log-empty')?.remove();
+      const stick = this.pinned();
+      this.log.append(el);
+      this.scroll(stick);
+    },
+    restored(turns) {
+      if (!turns || !turns.length) return;
+      $('#log-empty')?.remove();
+      const name = esc((S.persona && S.persona.display) || 'J.A.R.V.I.S.');
+      turns.forEach((t) => {
+        const el = t.role === 'user' ? this.make('user restored', 'YOU', '<span class="src">EARLIER</span>') : this.make('jarvis restored', name);
+        $('time', el).textContent = fmtTime(new Date(t.ts * 1000));
+        if (t.role === 'user') $('.msg-body', el).textContent = t.text;
+        else $('.msg-body', el).innerHTML = renderMarkdown(t.text);
+      });
+      this.system('Picked up where we left off. Press Ctrl+L to clear the screen, or Settings ▸ Clear this conversation to start fresh.');
       this.scroll(true);
     },
     system(text, level = 'info') {
@@ -673,7 +711,7 @@
       if (ev.status === 'sent') call('play_sfx', 'notify');
     },
     start(id) {
-      const el = this.make('jarvis pending', 'J.A.R.V.I.S.');
+      const el = this.make('jarvis pending', esc((S.persona && S.persona.display) || 'J.A.R.V.I.S.'));
       $('.msg-body', el).innerHTML = '<span>ANALYZING</span><span class="scanbar"></span>';
       this.typers.set(id, new Typer(el));
       this.count++; this.updateCount();
@@ -1024,7 +1062,7 @@
       $('#settings-close').onclick = () => this.close();
       $('#set-model-refresh').onclick = async () => { const st = await call('check_ollama'); if (st) Ollama.update(st); toast('Model list refreshed.', 'info'); };
       $('#set-voice-preview').onclick = () => call('preview_voice', $('#set-voice').value);
-      $('#set-clear-memory').onclick = async () => { await call('clear_memory'); toast('Conversation memory purged.', 'ok'); Chat.system('Conversation memory purged.'); };
+      $('#set-clear-memory').onclick = async () => { await call('clear_memory'); toast('Conversation cleared. Long-term memories are kept.', 'ok'); Chat.system('Conversation cleared (long-term memory is untouched).'); };
     },
     output(input) {
       const map = { 'set-temp': ['#out-temp', (v) => (+v).toFixed(2)], 'set-rate': ['#out-rate', (v) => `${v > 0 ? '+' : ''}${v}%`],
@@ -1269,6 +1307,259 @@
     },
   };
 
+  // ========================================================================= personalities
+  const Personas = {
+    el: null,
+    apply(p) {
+      if (!p) return;
+      S.persona = p;
+      if (Array.isArray(S.personas)) S.personas = S.personas.map((x) => ({ ...x, active: x.id === p.id }));
+      $('#brand-name').textContent = p.display;
+      $('#brand-tag').textContent = p.id === 'jarvis' ? 'Just A Rather Very Intelligent System' : p.tagline;
+      document.body.dataset.persona = p.id;
+      document.title = p.display;
+      if (this.el && !this.el.classList.contains('hidden')) this.render();
+    },
+    swatch(theme) {
+      const t = THEMES[theme] || THEMES.arc;
+      return `rgb(${t.state.IDLE.join(',')})`;
+    },
+    render() {
+      const grid = $('#ps-grid');
+      grid.innerHTML = '';
+      (S.personas || []).forEach((p) => {
+        const active = S.persona && S.persona.id === p.id;
+        const card = document.createElement('div');
+        card.className = `ps-item${active ? ' active' : ''}`;
+        card.style.setProperty('--ps', this.swatch(p.theme));
+        card.innerHTML = `<div class="ps-face"><i></i><i></i><i></i></div>
+          <div class="ps-name"></div><div class="ps-tag"></div><p class="ps-desc"></p>
+          <div class="ps-meta"><span class="ps-voice"></span><span class="ps-addr"></span></div>
+          <div class="ps-actions"><button class="btn sm ghost" data-act="hear">HEAR</button>
+          <button class="btn sm ${active ? '' : 'primary'}" data-act="pick"${active ? ' disabled' : ''}><span>${active ? 'ACTIVE' : 'SWITCH'}</span></button></div>`;
+        $('.ps-name', card).textContent = p.display;
+        $('.ps-tag', card).textContent = p.tagline;
+        $('.ps-desc', card).textContent = p.description;
+        $('.ps-voice', card).textContent = `Voice · ${voiceShort(p.voice)}`;
+        $('.ps-addr', card).textContent = `Calls you “${p.address}”`;
+        $('[data-act=hear]', card).onclick = () => call('persona_preview', p.id);
+        $('[data-act=pick]', card).onclick = async () => {
+          const r = await call('persona_set', p.id);
+          if (r && r.ok) { this.apply(r.persona); call('play_sfx', 'activate'); setTimeout(() => this.close(), 450); }
+          else toast((r && r.error) || 'Could not switch.', 'error');
+        };
+        grid.append(card);
+      });
+      $('#ps-theme').checked = S.settings.persona_theme !== false;
+    },
+    async open() {
+      const list = await call('persona_list');
+      if (Array.isArray(list)) S.personas = list;
+      this.render();
+      this.el.classList.remove('hidden');
+      call('play_sfx', 'click');
+    },
+    close() { this.el.classList.add('hidden'); },
+    init() {
+      this.el = $('#personas');
+      $('#ps-close').onclick = () => this.close();
+      this.el.addEventListener('click', (e) => { if (e.target === this.el) this.close(); });
+      $('#ps-theme').onchange = (e) => Settings.save({ persona_theme: e.target.checked }, 'persona_theme');
+      $('#btn-persona').onclick = () => this.open();
+      $('#brand').onclick = () => S.booted && this.open();
+      $('#set-open-personas').onclick = () => { Settings.close(); this.open(); };
+    },
+  };
+
+  // ========================================================================= long-term memory
+  const KIND_LABEL = { fact: 'About you', preference: 'Preference', routine: 'Routine', project: 'Project' };
+  const SOURCE_LABEL = { said: 'you told me', learned: 'picked up', manual: 'added' };
+  const MemoryCore = {
+    el: null, data: { memories: [], episodes: [], stats: {} }, tab: 'all', query: '', focusId: null, forgetArmed: 0,
+    stats(st) {
+      if (!st) return;
+      S.memory = st;
+      const n = st.total || 0;
+      const badge = $('#memory-badge');
+      badge.textContent = n > 99 ? '99+' : String(n);
+      badge.classList.toggle('hidden', !n);
+      $('#btn-memory').title = `Memory Core: ${n} memor${n === 1 ? 'y' : 'ies'} (Ctrl+M)`;
+      this.data.stats = st;
+      if (this.el && !this.el.classList.contains('hidden')) this.renderStats();
+    },
+    renderStats() {
+      const st = this.data.stats || S.memory || {};
+      const cells = [['ABOUT YOU', st.fact], ['PREFERENCES', st.preference], ['ROUTINES', st.routine], ['PROJECTS', st.project], ['CONVERSATIONS', st.episodes]];
+      $('#mm-stats').innerHTML = cells.map(([k, v]) => `<div><b>${v || 0}</b><span>${k}</span></div>`).join('')
+        + `<div class="mm-recall" title="${st.embed_model ? `Finding memories by meaning with ${esc(st.embed_model)}` : 'Finding memories by their words'}"><b>${st.embed_model ? 'SEMANTIC' : 'KEYWORD'}</b><span>RECALL</span></div>`;
+      $('#mm-off').classList.toggle('hidden', st.enabled !== false);
+      $('#mm-smart').classList.toggle('hidden', !!st.embed_model || !(S.ollama && S.ollama.online) || !(st.total >= 1));
+    },
+    async refresh() {
+      const d = await call('memory_list');
+      if (d) { this.data = d; this.stats(d.stats); }
+      this.render();
+    },
+    matches(text) {
+      const q = this.query.trim().toLowerCase();
+      const t = String(text).toLowerCase();
+      return !q || q.split(/\s+/).every((w) => t.includes(w));
+    },
+    render() {
+      this.renderStats();
+      $$('#mm-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === this.tab));
+      $('#mm-add').classList.toggle('hidden', this.tab === 'episodes');
+      if (this.tab !== 'all' && this.tab !== 'episodes') $('#mm-add-kind').value = this.tab;
+      const list = $('#mm-list');
+      list.innerHTML = '';
+      if (this.tab === 'episodes') {
+        const eps = (this.data.episodes || []).filter((e) => this.matches(e.summary));
+        if (!eps.length) { list.innerHTML = `<div class="mm-empty">${this.query ? 'No conversations match.' : 'Short summaries of our conversations appear here once a chat winds down.'}</div>`; return; }
+        eps.forEach((e) => {
+          const row = document.createElement('div');
+          row.className = 'mm-item episode';
+          const when = new Date(e.ended * 1000);
+          row.innerHTML = `<div class="mm-main"><div class="mm-text"></div><div class="mm-badges"><span class="k">${when.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} · ${fmtTime(when).slice(0, 5)}</span><span>${e.turns} message${e.turns === 1 ? '' : 's'} from you</span></div></div>
+            <div class="mm-acts"><button class="mm-btn del" title="Delete this summary">×</button></div>`;
+          $('.mm-text', row).textContent = e.summary;
+          $('.del', row).onclick = async () => { await call('memory_delete_episode', e.id); this.refresh(); };
+          list.append(row);
+        });
+        return;
+      }
+      const items = (this.data.memories || []).filter((m) => (this.tab === 'all' || m.kind === this.tab) && this.matches(`${m.text} ${m.key}`));
+      if (!items.length) {
+        const hints = { all: 'Nothing here yet. Tell me about yourself, say “remember that…”, or add something above.', fact: 'Facts about you: your family, pets, job, where you live…',
+          preference: 'What you like and dislike, and how you like things done.', routine: 'Things you do regularly, like “I go to the gym on Mondays at 6 pm”.',
+          project: 'What you are working on. I keep track until you tell me it is finished.' };
+        list.innerHTML = `<div class="mm-empty">${this.query ? 'No memories match your search.' : hints[this.tab]}</div>`;
+        return;
+      }
+      items.forEach((m) => list.append(this.row(m)));
+      if (this.focusId != null) {
+        const row = list.querySelector(`[data-id="${this.focusId}"]`);
+        if (row) { row.scrollIntoView({ block: 'center' }); this.edit(row, this.data.memories.find((x) => x.id === this.focusId)); }
+        this.focusId = null;
+      }
+    },
+    row(m) {
+      const done = m.kind === 'project' && m.meta && m.meta.status === 'done';
+      const row = document.createElement('div');
+      row.className = `mm-item kind-${m.kind}${m.pinned ? ' pinned' : ''}${done ? ' done' : ''}`;
+      row.dataset.id = m.id;
+      const badges = [`<span class="k">${KIND_LABEL[m.kind] || m.kind}</span>`];
+      if (m.when) badges.push(`<span>${esc(m.when)}</span>`);
+      if (m.kind === 'project') badges.push(`<span>${done ? 'finished' : 'in progress'}</span>`);
+      badges.push(`<span>${SOURCE_LABEL[m.source] || esc(m.source)}</span>`);
+      if (m.uses) badges.push(`<span>recalled ${m.uses}×</span>`);
+      row.innerHTML = `<div class="mm-main"><div class="mm-text"></div><div class="mm-badges">${badges.join('')}</div></div>
+        <div class="mm-acts">
+          <button class="mm-btn pin" title="${m.pinned ? 'Unpin' : 'Pin: always keep this in mind'}">${m.pinned ? '★' : '☆'}</button>
+          ${m.kind === 'project' ? `<button class="mm-btn done-btn" title="${done ? 'Mark as in progress' : 'Mark as finished'}">✓</button>` : ''}
+          <button class="mm-btn edit" title="Edit">✎</button>
+          <button class="mm-btn del" title="Forget this">×</button>
+        </div>`;
+      $('.mm-text', row).textContent = m.text;
+      $('.pin', row).onclick = () => this.update(m.id, { pinned: !m.pinned });
+      const doneBtn = $('.done-btn', row);
+      if (doneBtn) doneBtn.onclick = () => this.update(m.id, { meta: { status: done ? 'active' : 'done' } });
+      $('.edit', row).onclick = () => this.edit(row, m);
+      $('.mm-text', row).ondblclick = () => this.edit(row, m);
+      $('.del', row).onclick = async () => {
+        const r = await call('memory_delete', m.id);
+        if (r && r.ok && r.memory) {
+          this.refresh();
+          const t = toast(`Forgot: ${m.text}`, 'info', 6500);
+          const b = document.createElement('button');
+          b.className = 'toast-act'; b.textContent = 'UNDO';
+          b.onclick = async () => { await call('memory_restore', r.memory); t.remove(); this.refresh(); };
+          t.append(b);
+        }
+      };
+      return row;
+    },
+    edit(row, m) {
+      if (!row || !m || row.classList.contains('editing')) return;
+      row.classList.add('editing');
+      const input = document.createElement('textarea');
+      input.className = 'mm-edit'; input.value = m.text; input.maxLength = 400; input.rows = 2;
+      const kind = document.createElement('select');
+      kind.className = 'mm-edit-kind';
+      kind.innerHTML = Object.entries(KIND_LABEL).map(([k, v]) => `<option value="${k}"${k === m.kind ? ' selected' : ''}>${v}</option>`).join('');
+      $('.mm-text', row).replaceWith(input);
+      $('.mm-badges', row).replaceWith(kind);
+      input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+      const finish = async (save) => {
+        if (!row.classList.contains('editing')) return;
+        row.classList.remove('editing');
+        const text = input.value.trim();
+        if (save && text && (text !== m.text || kind.value !== m.kind)) await this.update(m.id, { text, kind: kind.value });
+        else this.render();
+      };
+      input.onkeydown = (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); finish(true); }
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+      };
+      row.addEventListener('focusout', (e) => { if (!row.contains(e.relatedTarget)) finish(true); });
+    },
+    async update(id, fields) {
+      const r = await call('memory_update', id, fields);
+      if (r && !r.ok) toast(r.error || 'Could not update that memory.', 'error');
+      this.refresh();
+    },
+    async open(focusId = null) {
+      this.focusId = focusId;
+      if (focusId != null) { this.tab = 'all'; this.query = ''; $('#mm-search').value = ''; }
+      this.el.classList.remove('hidden');
+      call('play_sfx', 'click');
+      await this.refresh();
+    },
+    close() { this.el.classList.add('hidden'); this.disarm(); },
+    disarm() { clearTimeout(this.forgetArmed); this.forgetArmed = 0; $('#mm-forget').textContent = 'FORGET EVERYTHING'; $('#mm-forget').classList.remove('armed'); },
+    init() {
+      this.el = $('#memory');
+      $('#mm-close').onclick = $('#mm-done').onclick = () => this.close();
+      this.el.addEventListener('click', (e) => { if (e.target === this.el) this.close(); });
+      $('#btn-memory').onclick = () => this.open();
+      $('#set-open-memory').onclick = () => { Settings.close(); this.open(); };
+      $$('#mm-tabs button').forEach((b) => (b.onclick = () => { this.tab = b.dataset.tab; this.render(); }));
+      $('#mm-search').oninput = (e) => { this.query = e.target.value; this.render(); };
+      $('#mm-add').onsubmit = async (e) => {
+        e.preventDefault();
+        const text = $('#mm-add-text').value.trim();
+        if (!text) return;
+        const r = await call('memory_add', $('#mm-add-kind').value, text);
+        if (r && r.ok) {
+          $('#mm-add-text').value = '';
+          toast(r.status === 'duplicate' ? 'I already knew that.' : r.status === 'updated' ? 'Memory updated.' : 'Remembered.', 'ok', 2200);
+          this.refresh();
+        } else toast((r && r.error) || 'Could not save that.', 'error');
+      };
+      $('#mm-export').onclick = async () => {
+        const r = await call('memory_export');
+        if (r && r.ok) toast(`Saved to ${r.path}`, 'ok', 7000); else toast((r && r.error) || 'Export failed.', 'error');
+      };
+      $('#mm-forget').onclick = async () => {
+        const b = $('#mm-forget');
+        if (!this.forgetArmed) {
+          this.forgetArmed = setTimeout(() => this.disarm(), 5000);
+          b.textContent = 'CLICK AGAIN TO ERASE ALL'; b.classList.add('armed');
+          return;
+        }
+        this.disarm();
+        await call('memory_clear');
+        toast('Every memory has been erased.', 'ok');
+        this.refresh();
+      };
+      $('#mm-enable').onclick = async () => { await Settings.save({ memory_enabled: true }, 'memory_enabled'); this.refresh(); };
+      $('#mm-smart-get').onclick = async () => {
+        const r = await call('memory_install_embeddings');
+        if (r && r.ok) { toast('Downloading nomic-embed-text in the background…', 'info'); $('#mm-smart').classList.add('hidden'); }
+        else toast((r && r.error) || 'Could not start the download.', 'error');
+      };
+    },
+  };
+
   // ========================================================================= google docs setup
   const Google = {
     async refresh() {
@@ -1366,11 +1657,17 @@
       case 'notice': toast(ev.text, ev.level); break;
       case 'ollama_status': Ollama.update(ev); break;
       case 'core_stats': { const { type, ...c } = ev; S.core = c; Hud.updateCore(); break; }
-      case 'pull_progress': if (ev.role === 'vision') Vision.progress(ev); else Ollama.progress(ev); break;
-      case 'pull_done': if (ev.role === 'vision') Vision.done(ev); else Ollama.pullDone(ev); break;
+      case 'pull_progress': if (ev.role === 'vision') Vision.progress(ev); else if (ev.role !== 'embed') Ollama.progress(ev); break;
+      case 'pull_done': if (ev.role === 'vision') Vision.done(ev); else if (ev.role === 'embed') { toast(ev.ok ? 'Smarter recall is ready: I can now find memories by meaning.' : `Download failed: ${ev.error}`, ev.ok ? 'ok' : 'error'); } else Ollama.pullDone(ev); break;
       case 'voice_status': S.voiceOk = ev.ok; Hud.updateAudio(); break;
       case 'mic_status': { const { type, ...m } = ev; S.mic = { ...S.mic, ...m }; Hud.updateAudio(); break; }
-      case 'settings': { const { type, ...s } = ev; S.settings = s; Hud.applySettings(); break; }
+      case 'settings': { const { type, ...s } = ev; S.settings = s; Hud.applySettings(); if ($('#settings').classList.contains('open')) Settings.fill(); break; }
+      case 'persona': { const { type, ...p } = ev; Personas.apply(p); break; }
+      case 'memory_learned': Chat.memoryNote(ev); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
+      case 'memory_forgotten': Chat.memoryNote(ev, true); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
+      case 'memory_changed': MemoryCore.stats(ev.stats); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
+      case 'memory_open': MemoryCore.open(); break;
+      case 'memory_cleared': MemoryCore.refresh(); break;
       default: break;
     }
   }
@@ -1521,10 +1818,12 @@
     const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
     window.addEventListener('keydown', (e) => {
       if (!S.booted) return;
-      const modalOpen = !$('#reader').classList.contains('hidden') || !$('#google').classList.contains('hidden');
+      const modalOpen = ['#reader', '#google', '#memory', '#personas'].some((id) => !$(id).classList.contains('hidden'));
       if (e.code === 'Space' && !typing() && !modalOpen) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
-        if (!$('#reader').classList.contains('hidden')) Reader.close();
+        if (!$('#memory').classList.contains('hidden')) MemoryCore.close();
+        else if (!$('#personas').classList.contains('hidden')) Personas.close();
+        else if (!$('#reader').classList.contains('hidden')) Reader.close();
         else if (!$('#google').classList.contains('hidden')) Google.close();
         else if ($('#settings').classList.contains('open')) Settings.close();
         else if (document.activeElement === $('#cmd') && $('#cmd').value) $('#cmd').value = '';
@@ -1535,6 +1834,8 @@
       if (e.key === 'F11') { e.preventDefault(); call('window_toggle_fullscreen'); return; }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); Chat.empty(); }
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); Settings.toggle(); }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); MemoryCore.el.classList.contains('hidden') ? MemoryCore.open() : MemoryCore.close(); }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); Personas.el.classList.contains('hidden') ? Personas.open() : Personas.close(); }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); call('vision_look', ''); }
     });
     window.addEventListener('keyup', (e) => { if (e.code === 'Space') Ptt.up(); });
@@ -1545,6 +1846,8 @@
     Chat.init();
     Settings.init();
     Reader.init();
+    Personas.init();
+    MemoryCore.init();
     bindControls();
     Hud.clock();
     setInterval(() => Hud.clock(), 1000);
@@ -1581,6 +1884,9 @@
     $('#about').textContent = `J.A.R.V.I.S. ${p.version} · ${p.system.os} · runs locally · no API keys`;
     Hud.applySettings(); Hud.updateCore(); Hud.setState(p.state || 'IDLE');
     if (p.vision) Vision.update(p.vision);
+    if (p.personas) S.personas = p.personas;
+    if (p.persona) Personas.apply(p.persona);
+    if (p.memory) MemoryCore.stats(p.memory);
     Telemetry.start();
 
     call('play_sfx', 'boot');
@@ -1591,6 +1897,7 @@
     reactor.powerTarget = 1;
     S.booted = true;
     setTimeout(() => $('#boot').remove(), 1200);
+    Chat.restored(p.restored);
     call('boot_complete');
     setTimeout(() => Chat.suggest(), 5200);
     setTimeout(() => { if (S.ollama) Ollama.update(S.ollama); }, 1500);

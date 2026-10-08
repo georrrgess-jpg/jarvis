@@ -213,7 +213,7 @@ class VisionEngine:
                 client.close()
 
     def describe(self, obs: Observation, question: str, cancel: threading.Event | None = None,
-                 language: str | None = None, title: str = "sir") -> Iterator[str]:
+                 language: str | None = None, title: str = "sir", name: str = "J.A.R.V.I.S.") -> Iterator[str]:
         """Stream an answer about what's on screen."""
         cancel = cancel or threading.Event()
         where = f" of the window \"{obs.window.title}\"" + (f" ({obs.window.app})" if obs.window.app else "") if obs.window else ""
@@ -221,7 +221,7 @@ class VisionEngine:
         text = obs.text
         model = self.model
         if model:
-            system = (f"You are J.A.R.V.I.S., the user's AI assistant, and you can see their screen: the attached image is a "
+            system = (f"You are {name}, the user's AI assistant, and you can see their screen: the attached image is a "
                       f"screenshot{where}. Text read from the screen by OCR is included when available; trust it for exact "
                       "words and numbers. Answer what the user asks about what is on screen. Your reply is spoken aloud, so "
                       "be brief (one to three sentences) unless they ask for detail, a summary, a translation or steps. "
@@ -229,7 +229,7 @@ class VisionEngine:
                       f"{lang}")
             images = [encode_image(obs.shot.image)]
         elif text.strip():
-            system = (f"You are J.A.R.V.I.S. You can't see images, but here is the text read from the user's screen{where} "
+            system = (f"You are {name}. You can't see images, but here is the text read from the user's screen{where} "
                       "by OCR. Answer what the user asks about it. Your reply is spoken aloud, so be brief (one to three "
                       f"sentences) unless they ask for detail. If the text isn't enough to answer, say so.{lang}")
             model = self._llm.model

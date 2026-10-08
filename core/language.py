@@ -177,10 +177,25 @@ def locale_for(code: str) -> str:
     return LANGUAGES.get(code, (None, "en-US"))[1]
 
 
-def voice_for(code: str, preferred: str = "") -> str | None:
-    """A voice for ``code``: the user's chosen voice if it already speaks it (or is multilingual)."""
+# Female Edge neural voices, so a female personality keeps a female voice in other languages.
+FEMALE_VOICES = {
+    "en": "en-US-AvaNeural", "es": "es-ES-ElviraNeural", "fr": "fr-FR-DeniseNeural", "de": "de-DE-KatjaNeural",
+    "it": "it-IT-ElsaNeural", "pt": "pt-BR-FranciscaNeural", "nl": "nl-NL-ColetteNeural", "sv": "sv-SE-SofieNeural",
+    "da": "da-DK-ChristelNeural", "nb": "nb-NO-PernilleNeural", "fi": "fi-FI-NooraNeural", "pl": "pl-PL-ZofiaNeural",
+    "cs": "cs-CZ-VlastaNeural", "ro": "ro-RO-AlinaNeural", "hu": "hu-HU-NoemiNeural", "tr": "tr-TR-EmelNeural",
+    "id": "id-ID-GadisNeural", "vi": "vi-VN-HoaiMyNeural", "ru": "ru-RU-SvetlanaNeural", "uk": "uk-UA-PolinaNeural",
+    "el": "el-GR-AthinaNeural", "ar": "ar-SA-ZariyahNeural", "he": "he-IL-HilaNeural", "hi": "hi-IN-SwaraNeural",
+    "bn": "bn-IN-TanishaaNeural", "ta": "ta-IN-PallaviNeural", "th": "th-TH-PremwadeeNeural", "zh": "zh-CN-XiaoxiaoNeural",
+    "ja": "ja-JP-NanamiNeural", "ko": "ko-KR-SunHiNeural",
+}
+
+
+def voice_for(code: str, preferred: str = "", gender: str = "male") -> str | None:
+    """A voice for ``code``: the user's chosen voice if it already speaks it (or is multilingual), else one of ``gender``."""
     if preferred and (base_language(preferred) == code or "Multilingual" in preferred):
         return preferred
+    if gender == "female" and code in FEMALE_VOICES:
+        return FEMALE_VOICES[code]
     entry = LANGUAGES.get(code)
     return entry[2] if entry else None
 

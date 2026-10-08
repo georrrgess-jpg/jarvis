@@ -438,6 +438,63 @@ class JarvisAPI:
             return True  # a Google link: opened in the chosen browser, as the linked account
         return webbrowser.open(url)
 
+    # -- personalities -----------------------------------------------------
+    def persona_list(self) -> list:
+        return self._assistant.persona_list()
+
+    def persona_set(self, pid: str) -> dict:
+        try:
+            return {"ok": True, "persona": self._assistant.set_persona(str(pid or ""))}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def persona_preview(self, pid: str) -> None:
+        self._assistant.preview_persona(str(pid or ""))
+
+    # -- long-term memory --------------------------------------------------
+    def memory_list(self) -> dict:
+        return self._assistant.memory_overview()
+
+    def memory_add(self, kind: str, text: str) -> dict:
+        try:
+            return {"ok": True, **self._assistant.memory_add(str(kind or "fact"), str(text or ""))}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def memory_update(self, mid: int, fields: dict) -> dict:
+        try:
+            return {"ok": True, "memory": self._assistant.memory_update(int(mid), dict(fields or {}))}
+        except (ValueError, TypeError) as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def memory_delete(self, mid: int) -> dict:
+        return {"ok": True, "memory": self._assistant.memory_delete(int(mid))}
+
+    def memory_restore(self, data: dict) -> dict:
+        return {"ok": True, "memory": self._assistant.memory_restore(dict(data or {}))}
+
+    def memory_delete_episode(self, eid: int) -> None:
+        self._assistant.memory_delete_episode(int(eid))
+
+    def memory_clear(self) -> None:
+        self._assistant.memory_clear()
+
+    def memory_export(self) -> dict:
+        """Save everything JARVIS remembers as a JSON file in Documents (or the home folder)."""
+        data = self._assistant.memory.export()
+        folder = Path.home() / "Documents"
+        if not folder.is_dir():
+            folder = Path.home()
+        target = folder / f"JARVIS memory {time.strftime('%Y-%m-%d %H%M')}.json"
+        try:
+            target.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "path": str(target)}
+
+    def memory_install_embeddings(self) -> dict:
+        return self._assistant.pull_model("nomic-embed-text", role="embed")
+
     # -- vision ------------------------------------------------------------
     def vision_status(self) -> dict:
         return self._assistant.vision_status()
@@ -668,6 +725,23 @@ def run_selftest(report_path: str | None) -> int:
             detail["jpeg_bytes"] = len(encode_image(shot.image))
         return detail
 
+    def memory_and_personalities():
+        """Long-term memory (SQLite) and the personalities are bundled and work."""
+        import tempfile as _tf
+
+        from core.memory import MemoryStore, parse_memory_command, second_person
+        from core.personas import PERSONAS, parse_switch
+
+        with _tf.TemporaryDirectory() as tmp:
+            store = MemoryStore(Path(tmp) / "memory.db")
+            store.add("preference", second_person("I love jazz"))
+            found = store.all()
+            store.close()
+        if not (found and found[0].text == "You love jazz." and parse_switch("switch to Harper") == "harper"
+                and parse_memory_command("remember that my dog is called Max").action == "remember"):
+            raise RuntimeError("memory or personality parsing misbehaved")
+        return {"personalities": list(PERSONAS), "sqlite": __import__("sqlite3").sqlite_version}
+
     def ollama_probe():
         from core.llm import LLMEngine
 
@@ -684,11 +758,12 @@ def run_selftest(report_path: str | None) -> int:
     check("wake_word", wake_word)
     check("assistant_skills", assistant_skills)
     check("vision", vision)
+    check("memory", memory_and_personalities)
     check("ollama_probe", ollama_probe)  # informational: offline is not a failure
     if sys.platform == "win32":  # elsewhere a display server may be absent during the build
         check("gui_backend", gui_backend)
 
-    required = ["web_assets", "imports", "audio_pipeline", "text_pipeline", "config", "telemetry", "wake_word"]
+    required = ["web_assets", "imports", "audio_pipeline", "text_pipeline", "config", "telemetry", "wake_word", "memory"]
     if sys.platform == "win32":
         required.append("gui_backend")
     results["ok"] = all(results["checks"][k]["ok"] for k in required)

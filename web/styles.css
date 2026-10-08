@@ -701,3 +701,48 @@ body.booting #col-center { transform: scale(.94); }
 @keyframes timer-soon { 50% { box-shadow: 0 0 14px rgb(var(--red) / .45); } }
 .sg-chip.accent { border-color: rgb(var(--amber) / .55); background: rgb(var(--amber) / .1); color: rgb(var(--amber)); }
 .sg-chip.accent:hover { background: rgb(var(--amber) / .2); border-color: rgb(var(--amber)); color: var(--text-hi); }
+
+/* ------------------------------------------------------------ vision */
+.chip.clickable { cursor: pointer; }
+.chip.clickable:hover { border-color: var(--line-strong); }
+.chip.watching .dot { animation: blink 0.9s steps(2) infinite; }
+#look-btn {
+  flex: none; width: 42px; height: 42px; border: 1px solid var(--line); background: rgb(2 12 22 / .7);
+  display: grid; place-items: center; color: var(--text-dim); transition: all .25s; cursor: pointer;
+}
+#look-btn svg, #watch-strip svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+#look-btn.ready { color: rgb(var(--cyan)); border-color: rgb(var(--cyan) / .4); }
+#look-btn:hover { color: var(--text-hi); border-color: rgb(var(--cyan) / .8); box-shadow: 0 0 14px rgb(var(--cyan) / .3); }
+#watch-strip { flex: none; align-self: center; display: inline-flex; align-items: center; gap: 10px; margin: 0 0 8px; padding: 6px 8px 6px 12px;
+  border: 1px solid rgb(var(--amber) / .55); background: rgb(var(--amber) / .08); color: rgb(var(--amber)); animation: msg-in .4s var(--ease) both; }
+#watch-strip.hidden { display: none; }
+#watch-strip svg { width: 18px; height: 18px; animation: watch-eye 2.4s ease-in-out infinite; }
+@keyframes watch-eye { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+#watch-strip b { font: 700 10px/1 var(--font-display); letter-spacing: .24em; }
+#watch-strip span { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 13px/1 var(--font-ui); color: var(--text-hi); }
+#watch-strip button { padding: 4px 10px; border: 1px solid rgb(var(--amber) / .6); background: transparent; color: rgb(var(--amber));
+  font: 600 9px/1 var(--font-display); letter-spacing: .18em; cursor: pointer; }
+#watch-strip button:hover { background: rgb(var(--amber) / .18); color: var(--text-hi); }
+.seen-card { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px; }
+.seen-card img { width: 120px; height: 72px; object-fit: cover; object-position: top left; border: 1px solid var(--line); cursor: zoom-in; }
+.seen-title { margin-top: 5px; font: 600 14px/1.25 var(--font-ui); color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seen-model { margin-top: 3px; font: 400 11px var(--font-mono); color: var(--text-faint); }
+.act-card { display: flex; flex-direction: column; gap: 8px; border-color: rgb(var(--amber) / .45); background: linear-gradient(120deg, rgb(var(--amber) / .08), rgb(4 14 24 / .6)); }
+.act-card::before { border-color: rgb(var(--amber)); }
+.act-card img { width: 100%; max-height: 220px; object-fit: contain; background: #000; border: 1px solid var(--line); }
+.act-label { font: 600 14px/1.3 var(--font-ui); color: var(--text-hi); }
+.act-card.done { border-color: rgb(var(--green) / .5); } .act-card.done .mail-state { color: rgb(var(--green)); }
+.act-card:is(.done, .cancelled, .expired, .failed) img { max-height: 90px; opacity: .7; }
+.act-card:is(.done, .cancelled, .expired, .failed) .mail-actions { display: none; }
+.vision-pull { display: flex; flex-direction: column; gap: 5px; margin: -4px 0 12px; }
+.vision-pull.hidden { display: none; }
+.vision-pull i { display: block; height: 4px; background: rgb(var(--cyan) / .15); }
+.vision-pull b { display: block; height: 100%; width: 0; background: rgb(var(--cyan)); box-shadow: 0 0 10px rgb(var(--cyan)); transition: width .3s; }
+.vision-pull span { font: 400 11.5px var(--font-mono); color: var(--text-dim); }
+.rd-image { display: block; max-width: 100%; margin: 0 auto; border: 1px solid var(--line); }
+#vision-settings textarea { width: 100%; }
+@media (max-width: 1120px) { #look-btn { width: 38px; } .chip:nth-child(4) b { display: none; } }
+/* four status chips: give the title bar room before anything wraps */
+#clock-date, .chip b, .chip span { white-space: nowrap; }
+@media (max-width: 1560px) { .brand-text span { display: none; } }
+@media (max-width: 1400px) { #chip-voice { display: none; } }

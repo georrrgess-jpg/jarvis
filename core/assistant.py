@@ -405,6 +405,7 @@ class Assistant:
             "system": self.monitor.static_info(),
             "core": self.core_stats(),
             "wake": self.wake_status(),
+            "vision": self.vision_status(),
         }
 
     def boot_complete(self) -> None:

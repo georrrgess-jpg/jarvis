@@ -654,6 +654,20 @@ def run_selftest(report_path: str | None) -> int:
             raise RuntimeError("quick skills / patience / google-file parsing misbehaved")
         return {"script_version": script_version(), "language": lang}
 
+    def vision():
+        """The eyes are bundled: request understanding, image encoding and (on Windows) a real screen capture."""
+        from core.screen import default_desktop
+        from core.vision import encode_image, parse_act, parse_look
+
+        if not (parse_look("what's on my screen") and parse_act("click send")):
+            raise RuntimeError("vision request parsing misbehaved")
+        detail = {}
+        if sys.platform == "win32":
+            shot = default_desktop().capture(None)
+            detail["screen"] = list(shot.size)
+            detail["jpeg_bytes"] = len(encode_image(shot.image))
+        return detail
+
     def ollama_probe():
         from core.llm import LLMEngine
 
@@ -669,6 +683,7 @@ def run_selftest(report_path: str | None) -> int:
     check("telemetry", telemetry)
     check("wake_word", wake_word)
     check("assistant_skills", assistant_skills)
+    check("vision", vision)
     check("ollama_probe", ollama_probe)  # informational: offline is not a failure
     if sys.platform == "win32":  # elsewhere a display server may be absent during the build
         check("gui_backend", gui_backend)

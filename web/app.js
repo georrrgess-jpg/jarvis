@@ -643,7 +643,7 @@
     suggest() {
       if ($('.suggest-card')) return;
       const ideas = [
-        'Write a bio on Lionel Messi', 'Make a presentation about the solar system', 'Email Sarah saying I\'m running late',
+        'What\'s on my screen?', 'Write a bio on Lionel Messi', 'Make a presentation about the solar system', 'Email Sarah saying I\'m running late',
         'Open Spotify', 'Play GTA 5', 'What\'s the weather in London?', '¿Qué hora es en Tokio?',
       ];
       const el = this.card('suggest-card', '<div class="sg-kicker">TRY ASKING</div><div class="sg-list"></div>');
@@ -1031,6 +1031,7 @@
         'set-pitch': ['#out-pitch', (v) => `${v > 0 ? '+' : ''}${v} Hz`], 'set-pause': ['#out-pause', (v) => `${(+v).toFixed(1)} s`],
         'set-sfx': ['#out-sfx', (v) => `${Math.round(v * 100)}%`],
         'set-patience': ['#out-patience', (v) => (+v === 0 ? 'off' : `+${(+v).toFixed(1)} s`)],
+        'set-watch': ['#out-watch', (v) => `${(+v).toFixed(1)} s`],
         'set-wake': ['#out-wake', (v) => (v < 0.34 ? 'strict' : v < 0.67 ? 'balanced' : 'sensitive')] };
       const m = map[input.id];
       if (m) $(m[0]).textContent = m[1](input.value);
@@ -1086,9 +1087,93 @@
         o.disabled = !found[o.value];
       });
     },
-    open() { this.fill(); this.fillVoices(); this.browsers(); Google.refresh(); this.el.classList.add('open'); this.el.setAttribute('aria-hidden', 'false'); },
+    open() { this.fill(); this.fillVoices(); this.browsers(); Google.refresh(); call('vision_status').then((st) => st && Vision.update(st)); this.el.classList.add('open'); this.el.setAttribute('aria-hidden', 'false'); },
     close() { this.el.classList.remove('open'); this.el.setAttribute('aria-hidden', 'true'); },
     toggle() { this.el.classList.contains('open') ? this.close() : this.open(); },
+  };
+
+  // ========================================================================= vision
+  const Vision = {
+    st: null,
+    update(st) {
+      this.st = st;
+      const watching = !!st.watching;
+      const label = watching ? 'WATCHING' : st.pulling ? 'DOWNLOADING' : st.model ? st.model.split(':')[0].toUpperCase().slice(0, 14)
+        : st.ocr ? 'TEXT ONLY' : 'OFF';
+      Hud.chip('#chip-vision', watching ? 'warn' : st.model ? 'ok' : st.ocr ? 'warn' : '', label);
+      $('#chip-vision').classList.toggle('watching', watching);
+      $('#watch-strip').classList.toggle('hidden', !watching);
+      $('#watch-label').textContent = watching ? (st.watch_label || 'your screen') : '';
+      $('#look-btn').classList.toggle('ready', !!(st.model || st.ocr));
+      this.fillSettings();
+    },
+    fillSettings() {
+      const st = this.st;
+      if (!st || !$('#set-vision-model')) return;
+      const sel = $('#set-vision-model');
+      const models = st.models || [];
+      sel.innerHTML = '';
+      const auto = document.createElement('option');
+      auto.value = ''; auto.textContent = models.length ? `Automatic (${models[0]})` : 'None installed yet';
+      sel.append(auto);
+      models.forEach((m) => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.append(o); });
+      sel.value = models.includes(S.settings.vision_model) ? S.settings.vision_model : '';
+      const parts = [];
+      parts.push(st.model ? `Eyes online: ${st.model} (runs on your GPU through Ollama).` : 'No vision model yet: JARVIS can only read the text on screen.');
+      parts.push(st.ocr ? `Text reading: ${st.ocr_engine}.` : `Text reading unavailable${st.ocr_error ? ` (${st.ocr_error})` : ''}.`);
+      $('#vision-status').textContent = parts.join(' ');
+      $('#vision-status').classList.toggle('ok', !!st.model);
+      $('#vision-status').classList.toggle('warn', !st.model);
+      const dl = $('#vision-download');
+      dl.textContent = st.pulling ? 'DOWNLOADING…' : st.model ? 'ADD QWEN2.5-VL' : 'DOWNLOAD (6 GB)';
+      dl.disabled = !!st.pulling;
+      dl.classList.toggle('hidden', !!st.model && (st.models || []).some((m) => m.startsWith('qwen2.5vl')));
+    },
+    progress(ev) {
+      $('#vision-pull').classList.remove('hidden');
+      const pct = ev.percent != null ? ev.percent : 0;
+      $('#vision-pull-bar').style.width = `${pct}%`;
+      $('#vision-pull-text').textContent = `${ev.model}: ${ev.status || '…'}${ev.percent != null ? ` · ${Math.round(pct)}%` : ''}`;
+      Hud.chip('#chip-vision', 'warn', `DL ${Math.round(pct)}%`);
+    },
+    done(ev) {
+      $('#vision-pull-text').textContent = ev.ok ? `${ev.model} installed.` : (ev.error || 'Download failed.');
+      if (ev.ok) { toast('Vision model installed: JARVIS can see.', 'ok', 6000); Chat.system(`Vision model ${ev.model} installed.`, 'ok'); }
+      else toast(ev.error || 'Vision download failed.', 'error', 8000);
+      setTimeout(() => $('#vision-pull').classList.add('hidden'), 4000);
+      call('vision_status').then((st) => st && this.update(st));
+    },
+    seen(ev) {
+      const el = Chat.card('seen-card', `<img alt="What JARVIS saw"><div class="seen-meta"><div class="dc-kicker">SEEN${ev.ocr ? ' · TEXT READ' : ''}</div>
+        <div class="seen-title"></div><div class="seen-model"></div></div>`);
+      $('img', el).src = ev.image;
+      $('.seen-title', el).textContent = ev.title || 'your screen';
+      $('.seen-model', el).textContent = ev.model ? `through ${ev.model}` : 'text only (no vision model)';
+      $('img', el).onclick = () => Reader.open({ doc_kind: 'image', title: ev.title || 'What JARVIS saw', image: ev.image });
+    },
+    confirm(ev) {
+      const el = Chat.card('act-card', `<div class="mc-headline"><span class="mail-kicker">${ev.reason === 'risky' ? 'PLEASE CONFIRM' : 'IS THIS THE ONE?'}</span>
+        <span class="mail-state">WAITING FOR YOU</span></div>${ev.image ? '<img alt="Where JARVIS will act">' : ''}<div class="act-label"></div>
+        <div class="mail-actions"><button class="btn primary sm a-yes"><span>DO IT</span></button><button class="btn ghost sm a-no">CANCEL</button>
+        <span class="mail-note">Or just say “yes” / “no”.</span></div>`);
+      el.dataset.id = ev.id;
+      if (ev.image) $('img', el).src = ev.image;
+      $('.act-label', el).textContent = `${ev.label}${ev.where ? ` · ${ev.where}` : ''}`;
+      const go = async (yes) => {
+        $$('button', el).forEach((b) => { b.disabled = true; });
+        const r = await call('vision_confirm', ev.id, yes);
+        if (!r || !r.ok) { toast((r && r.error) || 'That action has expired.', 'warn'); this.status({ id: ev.id, status: 'expired' }); }
+      };
+      $('.a-yes', el).onclick = () => go(true);
+      $('.a-no', el).onclick = () => go(false);
+    },
+    status(ev) {
+      const el = $(`.act-card[data-id="${ev.id}"]`);
+      if (!el) return;
+      $('.mail-state', el).textContent = { done: 'DONE ✓', cancelled: 'CANCELLED', failed: 'FAILED', expired: 'EXPIRED' }[ev.status] || ev.status;
+      el.classList.add(ev.status);
+      $$('button', el).forEach((b) => { b.disabled = true; });
+    },
   };
 
   // ========================================================================= timers
@@ -1139,13 +1224,17 @@
     data: null,
     open(ev) {
       this.data = ev;
-      const names = { doc: 'GOOGLE DOC', slides: 'GOOGLE SLIDES', sheet: 'GOOGLE SHEET' };
+      const names = { doc: 'GOOGLE DOC', slides: 'GOOGLE SLIDES', sheet: 'GOOGLE SHEET', image: 'WHAT JARVIS SAW' };
       $('#rd-kicker').textContent = names[ev.doc_kind] || 'GOOGLE FILE';
       $('#rd-title').textContent = ev.title || 'Untitled';
       const body = $('#rd-body');
       body.textContent = '';
       body.scrollTop = 0;
-      if (ev.doc_kind === 'sheet') {
+      if (ev.doc_kind === 'image') {
+        const img = document.createElement('img');
+        img.src = ev.image; img.className = 'rd-image';
+        body.append(img);
+      } else if (ev.doc_kind === 'sheet') {
         const table = document.createElement('table');
         (ev.rows || []).forEach((row, i) => {
           const tr = document.createElement('tr');
@@ -1267,14 +1356,18 @@
       case 'document': Chat.document(ev); break;
       case 'document_view': Reader.open(ev); break;
       case 'timers': Timers.set(ev.timers); break;
+      case 'vision_status': { const { type, ...v } = ev; Vision.update(v); break; }
+      case 'vision_look': Vision.seen(ev); break;
+      case 'act_confirm': Vision.confirm(ev); break;
+      case 'act_status': Vision.status(ev); break;
       case 'file_list': Chat.files(ev); break;
       case 'email_draft': Chat.email(ev); break;
       case 'email_status': Chat.emailStatus(ev); break;
       case 'notice': toast(ev.text, ev.level); break;
       case 'ollama_status': Ollama.update(ev); break;
       case 'core_stats': { const { type, ...c } = ev; S.core = c; Hud.updateCore(); break; }
-      case 'pull_progress': Ollama.progress(ev); break;
-      case 'pull_done': Ollama.pullDone(ev); break;
+      case 'pull_progress': if (ev.role === 'vision') Vision.progress(ev); else Ollama.progress(ev); break;
+      case 'pull_done': if (ev.role === 'vision') Vision.done(ev); else Ollama.pullDone(ev); break;
       case 'voice_status': S.voiceOk = ev.ok; Hud.updateAudio(); break;
       case 'mic_status': { const { type, ...m } = ev; S.mic = { ...S.mic, ...m }; Hud.updateAudio(); break; }
       case 'settings': { const { type, ...s } = ev; S.settings = s; Hud.applySettings(); break; }
@@ -1383,6 +1476,14 @@
       call('send_text', text);
     });
     $('#stop-btn').onclick = () => call('interrupt');
+    $('#look-btn').onclick = () => { call('play_sfx', 'click'); call('vision_look', ''); };
+    $('#watch-stop').onclick = () => call('vision_stop_watch');
+    $('#chip-vision').onclick = () => { Settings.open(); setTimeout(() => $('#vision-settings').scrollIntoView({ behavior: 'smooth' }), 250); };
+    $('#vision-download').onclick = async () => {
+      const r = await call('vision_install', 'qwen2.5vl:7b');
+      if (r && r.ok) { $('#vision-pull').classList.remove('hidden'); $('#vision-pull-text').textContent = 'Starting download…'; }
+      else toast((r && r.error) || 'Could not start the download.', 'error');
+    };
     $('#btn-clear-log').onclick = () => Chat.empty();
     $('#btn-settings').onclick = () => { call('play_sfx', 'click'); Settings.toggle(); };
     $('#btn-min').onclick = () => call('window_minimize');
@@ -1432,8 +1533,9 @@
       }
       if (e.key === '/' && !typing()) { e.preventDefault(); $('#cmd').focus(); return; }
       if (e.key === 'F11') { e.preventDefault(); call('window_toggle_fullscreen'); return; }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l') { e.preventDefault(); Chat.empty(); }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); Chat.empty(); }
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); Settings.toggle(); }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); call('vision_look', ''); }
     });
     window.addEventListener('keyup', (e) => { if (e.code === 'Space') Ptt.up(); });
     window.addEventListener('blur', () => Ptt.up());
@@ -1478,6 +1580,7 @@
     $('#st-cpu-name').title = p.system.cpu_name;
     $('#about').textContent = `J.A.R.V.I.S. ${p.version} · ${p.system.os} · runs locally · no API keys`;
     Hud.applySettings(); Hud.updateCore(); Hud.setState(p.state || 'IDLE');
+    if (p.vision) Vision.update(p.vision);
     Telemetry.start();
 
     call('play_sfx', 'boot');

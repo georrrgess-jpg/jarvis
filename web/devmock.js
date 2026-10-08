@@ -18,10 +18,27 @@ window.createJarvisMock = function createJarvisMock() {
   const settings = {
     ollama_host: 'http://localhost:11434', model: 'llama3.2', temperature: 0.7, max_history_turns: 12, custom_instructions: '',
     voice: 'en-GB-RyanNeural', speech_rate: 0, speech_pitch: 0, voice_enabled: true, sfx_enabled: true, sfx_volume: 0.45,
-    link_browser: 'default', theme: params.get('theme') || 'arc', allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 1.0, patience: 3,
+    link_browser: 'default', theme: params.get('theme') || 'arc', vision_model: '', allow_control: true, act_confirm: 'auto', watch_interval: 2,
+    vision_exclusions: 'password, 1password, bitwarden, lastpass, keepass, dashlane, bank, banking, paypal', allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 1.0, patience: 3,
     listen_timeout: 10, max_phrase_seconds: 45, auto_listen: false, user_title: 'sir', frameless: true,
   };
   if (params.has('gold')) settings.google_script_url = 'https://script.google.com/macros/s/preview/exec';
+  const mockVision = { model: 'qwen2.5vl:7b', models: ['qwen2.5vl:7b'], ocr: true, ocr_engine: 'Windows OCR', watching: false, watch_label: '',
+    allow_control: true, pulling: false, suggested: [] };
+  const fakeShot = () => {
+    const c = document.createElement('canvas'); c.width = 640; c.height = 400;
+    const g = c.getContext('2d'); g.fillStyle = '#f4f6f8'; g.fillRect(0, 0, 640, 400); g.fillStyle = '#1a73e8'; g.fillRect(0, 0, 640, 46);
+    g.fillStyle = '#fff'; g.font = 'bold 20px sans-serif'; g.fillText('Inbox - Mail', 16, 30); g.fillStyle = '#222'; g.font = '16px sans-serif';
+    ['Sarah Connor: Lunch tomorrow?', 'GitHub: Build failed on main', 'Tony: Mark 85 schematics'].forEach((t, i) => g.fillText(t, 24, 90 + i * 40));
+    g.fillStyle = '#1a73e8'; g.fillRect(500, 340, 110, 38); g.fillStyle = '#fff'; g.fillText('Send', 535, 365);
+    return c.toDataURL('image/jpeg', 0.8);
+  };
+  window.__jarvisMockLook = () => {
+    setState('THINKING');
+    later(300, () => emit({ type: 'tool_activity', tool: 'vision', label: 'Looking at Inbox - Mail' }));
+    later(700, () => emit({ type: 'vision_look', image: fakeShot(), title: 'Inbox - Mail', model: 'qwen2.5vl:7b', ocr: true }));
+    later(900, () => reply("You're in your inbox, sir. There's a failed build notification from GitHub and a lunch invitation from Sarah.", true));
+  };
   const later = (ms, fn) => timers.push(setTimeout(fn, ms));
   const cancelAll = () => { timers.forEach(clearTimeout); timers = []; clearInterval(micTimer); };
   const setState = (s) => { const prev = state; state = s; emit({ type: 'state', state: s, prev }); };
@@ -79,7 +96,7 @@ window.createJarvisMock = function createJarvisMock() {
       system: { hostname: 'stark-tower', os: 'Windows 11', cpu_name: 'Preview CPU @ 4.20GHz', cores_physical: 8, cores_logical: 16, ram_total_gb: 32, python: '3.12' },
       core: { online, model: models[0] || null, host: settings.ollama_host, first_token_ms: null, tokens_per_sec: null, memory_turns: 0 },
       window: { frameless: true },
-      wake: { enabled: true, active: true, phrase: 'Hey Jarvis', reason: null },
+      wake: { enabled: true, active: true, phrase: 'Hey Jarvis', reason: null }, vision: mockVision,
     }),
     boot_complete: async () => reply(online && models.length
       ? 'Good evening, sir. All systems are online. How may I help?'
@@ -98,6 +115,19 @@ window.createJarvisMock = function createJarvisMock() {
         [120, 260, 410, 588].forEach((w, i) => later(1400 + i * 500, () => emit({ type: 'activity', label: `Writing · ${w} words` })));
         later(3600, () => emit({ type: 'document', doc_kind: slides ? 'slides' : 'doc', title: slides ? `${topic}: An Overview` : `${topic}: The Little Genius`, url: 'https://docs.google.com/document/d/preview/edit' }));
         later(3700, () => reply(`Done. I've written ${slides ? `an 8-slide presentation on ${topic}` : `a 612-word biography of ${topic}`} and opened it for you.`, true));
+        return true;
+      }
+      if (/what'?s on my screen|look at/i.test(text)) { window.__jarvisMockLook(); return true; }
+      if (/^click send/i.test(text)) {
+        setState('THINKING');
+        later(500, () => emit({ type: 'act_confirm', id: `act${++seq}`, label: 'click send', where: 'Inbox - Mail', reason: 'risky', image: fakeShot() }));
+        later(600, () => reply('Is this the right one, sir? Say yes and I\'ll click send.', true));
+        return true;
+      }
+      if (/tell me when|watch my screen/i.test(text)) {
+        mockVision.watching = true; mockVision.watch_label = text.replace(/^.*?when /i, '') || 'anything important';
+        emit({ type: 'vision_status', ...mockVision });
+        reply(`Very well, sir. I'll keep an eye on it.`);
         return true;
       }
       const timer = text.match(/timer for (\d+) (second|minute)/i);
@@ -193,6 +223,11 @@ window.createJarvisMock = function createJarvisMock() {
     google_script: async () => '// J.A.R.V.I.S. bridge script (preview)',
     google_connect: async (url) => (!url && settings.google_script_url ? { ok: true, user: 'tony@example.com' } : /\/exec$/.test(url) ? (settings.google_script_url = url, { ok: true, user: 'tony@example.com' }) : { ok: false, error: 'that doesn\'t look like a web app URL (it should end in /exec)' }),
     google_disconnect: async () => { settings.google_script_url = ''; },
+    vision_status: async () => mockVision,
+    vision_look: async () => { window.__jarvisMockLook(); return true; },
+    vision_install: async () => ({ ok: true }),
+    vision_confirm: async (id, yes) => { setTimeout(() => emit({ type: 'act_status', id, status: yes ? 'done' : 'cancelled' }), 300); return { ok: true }; },
+    vision_stop_watch: async () => { mockVision.watching = false; emit({ type: 'vision_status', ...mockVision }); },
     installed_browsers: async () => ({ chrome: 'Google Chrome', edge: 'Microsoft Edge' }),
     google_view: async (kind) => {
       emit({ type: 'document_view', doc_kind: kind, title: kind === 'sheet' ? 'Budget' : 'Lionel Messi: The Little Genius', url: 'https://docs.google.com/document/d/preview/edit',

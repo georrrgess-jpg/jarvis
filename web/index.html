@@ -43,6 +43,9 @@
       <div class="chip" id="chip-mic" title="Speech recognition">
         <i class="dot"></i><b>MIC</b><span id="chip-mic-val">—</span>
       </div>
+      <div class="chip clickable" id="chip-vision" title="Vision: what JARVIS can see (click for settings)">
+        <i class="dot"></i><b>EYES</b><span id="chip-vision-val">—</span>
+      </div>
     </div>
 
     <div class="tb-fill pywebview-drag-region"></div>
@@ -136,6 +139,10 @@
         </div>
       </div>
       <div id="timer-strip" aria-live="polite"></div>
+      <div id="watch-strip" class="hidden">
+        <svg viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></svg>
+        <b>WATCHING</b><span id="watch-label">your screen</span><button id="watch-stop" type="button">STOP</button>
+      </div>
       <canvas id="wave"></canvas>
 
       <div id="console">
@@ -149,6 +156,9 @@
           <input id="cmd" type="text" maxlength="4000" spellcheck="false" placeholder="Type a command, sir…">
           <button type="submit" id="send-btn"><span>TRANSMIT</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h13M12 6l6 6-6 6"/></svg></button>
         </form>
+        <button id="look-btn" title="Look at my screen [Ctrl+Shift+L]" aria-label="Look at my screen">
+          <svg viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></svg>
+        </button>
         <button id="stop-btn" title="Interrupt [Esc]" aria-label="Interrupt">
           <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
         </button>
@@ -323,6 +333,25 @@
         </label>
         <p class="field-note">Pick the browser you're signed in to Google with. Or say “show it here” and JARVIS displays your file itself.</p>
         <div class="row"><button class="btn ghost sm" id="g-setup">SET UP</button><button class="btn ghost sm hidden" id="g-update">UPDATE SCRIPT</button><button class="btn ghost sm hidden" id="g-disconnect">DISCONNECT</button></div>
+      </fieldset>
+      <fieldset id="vision-settings">
+        <legend>Vision: seeing your screen</legend>
+        <p class="field-note" id="vision-status">Checking…</p>
+        <label class="field"><span>Vision model</span>
+          <div class="row"><select id="set-vision-model" data-key="vision_model"></select>
+          <button class="btn ghost sm" id="vision-download">DOWNLOAD</button></div>
+        </label>
+        <div class="vision-pull hidden" id="vision-pull"><i><b id="vision-pull-bar"></b></i><span id="vision-pull-text">Starting…</span></div>
+        <label class="toggle"><input type="checkbox" data-key="allow_control"><i></i><span>Let JARVIS click, type and press keys when I ask</span></label>
+        <label class="field"><span>Ask before acting</span>
+          <select data-key="act_confirm">
+            <option value="auto">Only when unsure or risky (send, delete, buy…)</option>
+            <option value="always">Always show me first</option>
+          </select>
+        </label>
+        <label class="field"><span>Watch: look every <output id="out-watch"></output></span><input id="set-watch" data-key="watch_interval" type="range" min="1" max="10" step="0.5"></label>
+        <label class="field"><span>Never look at windows containing</span><textarea data-key="vision_exclusions" rows="2" spellcheck="false"></textarea></label>
+        <p class="field-note">Screenshots stay on this PC: they go only to your local Ollama and are never saved. Try “What's on my screen?”, “Click Sign in”, “Tell me when my download finishes”.</p>
       </fieldset>
       <fieldset>
         <legend>Voice output</legend>

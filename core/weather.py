@@ -62,12 +62,12 @@ _LEAD = r"^(?:please |can you |could you |would you |tell me |let me know |i wan
 _WHEN = (r"(?P<when>today|tonight|right now|now|at the moment|currently|outside|out there|tomorrow|tomorrow morning|tomorrow night|"
          r"this (?:morning|afternoon|evening|weekend)|on the weekend|at the weekend|over the weekend|(?:on |this |next )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))")
 _PLACE = r"(?:\s+(?:in|for|at|near|around)\s+(?P<place>[a-zà-ÿ][a-zà-ÿ .,'-]{1,50}?))?"
-_TAIL = r"(?:\s+" + _WHEN + r")?" + _PLACE + r"(?:\s+" + _WHEN.replace("?P<when>", "?P<when2>") + r")?(?:\s+(?:please|for me))?[\s?.!]*$"
+_TAIL = r"(?:\s+(?:here|around here|where i am))?(?:\s+" + _WHEN + r")?" + _PLACE + r"(?:\s+" + _WHEN.replace("?P<when>", "?P<when2>") + r")?(?:\s+(?:please|for me))?[\s?.!]*$"
 _PATTERNS = [
-    ("temperature", re.compile(_LEAD + r"(?:what(?:'s| is)|check|get|give me)\s+(?:the\s+)?(?:current\s+|outside\s+)?(?:temperature|temp)(?:\s+(?:like|outside|out there))?" + _TAIL, re.I)),
+    ("temperature", re.compile(_LEAD + r"(?:(?:what(?:'s| is)|check|get(?: me)?|give me|show me)\s+)?(?:the\s+)?(?:current\s+|outside\s+)?(?:temperature|temp)(?:\s+(?:like|outside|out there))?" + _TAIL, re.I)),
     ("temperature", re.compile(_LEAD + r"(?:how\s+(?:hot|cold|warm|chilly)\s+(?:is it|will it be|is it going to be|it is)|what(?:'s| is)\s+it\s+like\s+outside|"
                                r"how many degrees is it|what temperature is it)" + _TAIL, re.I)),
-    ("now", re.compile(_LEAD + r"(?:what(?:'s| is| will be)|how(?:'s| is)|check|get|give me)\s+(?:the\s+)?(?:weather|forecast|weather forecast)(?:\s+(?:like|looking like|going to be like|be like))?" + _TAIL, re.I)),
+    ("now", re.compile(_LEAD + r"(?:(?:what(?:'s| is| will be)|how(?:'s| is)|check|get(?: me)?|give me|show me)\s+)?(?:the\s+)?(?:weather|forecast|weather forecast)(?:\s+(?:like|looking like|looking|going to be like|going to be|be like))?" + _TAIL, re.I)),
     ("now", re.compile(_LEAD + r"(?:what(?:'s| is| will)\s+the\s+weather\s+(?:going to\s+)?(?:do|be)|weather(?:\s+report|\s+update|\s+forecast)?)" + _TAIL, re.I)),
     ("rain", re.compile(_LEAD + r"(?:is it|will it|is it going to|does it look like it(?:'s| is) going to|should i expect)\s+(?:rain|be rainy|pour|drizzle|shower|storm)(?:ing)?" + _TAIL, re.I)),
     ("rain", re.compile(_LEAD + r"(?:do i|will i|should i)\s+(?:need|take|bring)\s+(?:an?\s+)?(?:umbrella|raincoat|rain jacket)" + _TAIL, re.I)),
@@ -89,10 +89,15 @@ def parse_weather(text: str) -> WeatherRequest | None:
         place = (m.group("place") or "").strip(" .,")
         if place.lower() in _NOT_PLACES:
             place = ""
-        place = re.sub(r"\s+(?:right now|now|today|tomorrow|this weekend|please)$", "", place, flags=re.I)
         when = (m.group("when") or m.group("when2") or "").lower()
-        if place and re.fullmatch(_WHEN, place, re.I):  # "the forecast for this weekend": a time, not a place
-            when, place = place.lower(), ""
+        # a time mixed into the place: "for this weekend in Paris", "in Paris this weekend", "for tomorrow"
+        lead = re.match(r"^(" + _WHEN.replace("?P<when>", "?:") + r")(?:\s+(?:in|for|at|near|around)\s+(.+))?$", place, re.I)
+        if lead:
+            when, place = lead.group(1).lower(), (lead.group(2) or "").strip(" .,")
+        tail = re.search(r"\s+(" + _WHEN.replace("?P<when>", "?:") + r")$", place, re.I)
+        if tail:
+            when, place = when or tail.group(1).lower(), place[: tail.start()].strip(" .,")
+        place = re.sub(r"\s+please$", "", place, flags=re.I)
         return WeatherRequest(kind, place, _day(when))
     return None
 

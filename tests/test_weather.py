@@ -59,6 +59,9 @@ def weather(config, service):
     ("what's the weather in New York tomorrow", "now", "New York", 1), ("is it going to rain tomorrow", "rain", "", 1),
     ("do I need an umbrella", "rain", "", 0), ("do I need a jacket", "wear", "", 0), ("weather in London", "now", "London", 0),
     ("what's the forecast for this weekend", "now", "", -1), ("what's the temperature in Tokyo right now", "temperature", "Tokyo", 0),
+    ("what's the forecast for this weekend in Paris", "now", "Paris", -1), ("what's the weather in Paris this weekend", "now", "Paris", -1),
+    ("what's the weather for tomorrow in Rome", "now", "Rome", 1), ("weather for New York tomorrow", "now", "New York", 1),
+    ("is it going to rain in Tokyo tomorrow", "rain", "Tokyo", 1), ("what's the temperature in London", "temperature", "London", 0),
 ])
 def test_understands_weather_questions(text, kind, place, day):
     req = parse_weather(text)

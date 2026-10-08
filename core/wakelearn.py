@@ -603,11 +603,13 @@ def calibrate(net: TinyNet, val_pos: list[np.ndarray], val_neg_seqs: list[np.nda
     def recall_at(t: float) -> float:
         return sum(1 for s in pos_scores if _run(s >= t) >= PERSISTENCE) / max(1, len(pos_scores))
 
-    clean = []
-    for t in (0.99, 0.98, 0.97, *np.arange(0.95, 0.49, -0.05)):
+    clean, steps = [], (0.99, 0.98, 0.97, *np.arange(0.95, 0.49, -0.05))
+    for t in steps:
         if sum(streaming_hits(net, s, t) for s in val_neg_seqs):
             break
         clean.append((float(round(t, 2)), recall_at(t)))
+    if 2 < len(clean) < len(steps):  # it started waking for everyday speech just below: keep a notch of margin
+        clean = clean[:-1]
     if clean:
         top = max(r for _, r in clean)
         threshold = max(t for t, r in clean if r >= top - 0.03)

@@ -119,7 +119,7 @@ def main() -> int:
         shot = desk.capture(window)
         shot.image.save(evidence_path)
         small = shot.image.convert("L").resize((64, 36))
-        brightness = sum(small.getdata()) / (64 * 36)
+        brightness = sum(small.tobytes()) / (64 * 36)
         check("captured the window through the cover", shot.size[0] >= 700 and brightness > 150,
               {"size": shot.size, "mean_brightness": round(brightness, 1)})
 

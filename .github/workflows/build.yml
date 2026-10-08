@@ -80,7 +80,7 @@ jobs:
           Write-Host $report
           if ($report -notmatch 'diagnostic \.NET crash test') { Write-Error 'The .NET crash handler did not report the crash'; exit 1 }
       - name: Make sure Windows OCR has a language (installs the en-US OCR pack if missing)
-        shell: pwsh
+        shell: powershell  # Windows PowerShell 5.1: PowerShell 7 can't load WinRT types (JARVIS's helper uses 5.1 too)
         continue-on-error: true
         timeout-minutes: 10
         run: |

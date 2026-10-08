@@ -394,8 +394,11 @@ def _pick(results: list[dict], city: str, hint: str) -> Place | None:
 
 def _osm_label(row: dict, fallback: str) -> str:
     address = row.get("address") or {}
+    own = str(row.get("name") or "")
+    if own and not re.search(r"\d", own):  # the place's own name ("Little Snoring", not its district "North Norfolk")
+        return own
     return str(address.get("city") or address.get("town") or address.get("village") or address.get("hamlet")
-               or address.get("municipality") or address.get("suburb") or row.get("name")
+               or address.get("municipality") or address.get("suburb")
                or str(row.get("display_name") or fallback).split(",")[0])
 
 

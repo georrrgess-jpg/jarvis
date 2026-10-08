@@ -301,3 +301,17 @@ def test_openstreetmap_ignores_businesses_and_wrong_states(config):
     assert (texas.name, texas.latitude, texas.country) == ("Paris", 33.66, "United States")
     with pytest.raises(WeatherError):
         weather.geocode("Budapest Bar")
+
+
+
+def test_openstreetmap_names_the_village_not_its_district(config):
+    row = {"lat": "52.85", "lon": "0.91", "name": "Little Snoring", "category": "place",
+           "address": {"municipality": "North Norfolk", "county": "Norfolk", "country": "United Kingdom"}}
+
+    def handler(request):
+        if request.url.host == "geocoding-api.open-meteo.com":
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json=[row])
+
+    weather = Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    assert weather.geocode("Little Snoring").name == "Little Snoring"

@@ -12,7 +12,7 @@
  *   3. Authorize access when Google asks, then copy the Web app URL into JARVIS.
  */
 var JARVIS_TOKEN = '__JARVIS_TOKEN__';
-var BRIDGE_VERSION = 4;
+var BRIDGE_VERSION = 5;
 var MIME = {
   docs: 'application/vnd.google-apps.document',
   slides: 'application/vnd.google-apps.presentation',
@@ -64,6 +64,17 @@ var ACTIONS = {
     });
     out.sort(function (a, b) { return a.updated < b.updated ? 1 : -1; });
     return { files: out };
+  },
+
+  /** Rename a Doc, Slides presentation or Sheet ("rename the doc to Pizza recipe"). */
+  file_rename: function (req) {
+    var name = String(req.title || '').trim();
+    if (!name) throw new Error('what should the new name be?');
+    var mime = MIME[{ doc: 'docs', slides: 'slides', sheet: 'sheets' }[req.kind] || 'docs'];
+    var file = DriveApp.getFileById(resolveId_(req.file, mime));
+    var old = file.getName();
+    file.setName(name.slice(0, 200));
+    return { id: file.getId(), title: file.getName(), url: file.getUrl(), old_title: old };
   },
 
   // ---------------------------------------------------------------- Docs

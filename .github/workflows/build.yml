@@ -102,6 +102,12 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python tests/windows_tabs_check.py tabs-check.json
+      - name: Typing check (real app - JARVIS types a generated pizza recipe and exact words)
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_typing_check.py typing-check.json
       - name: Online services check (real weather from Open-Meteo, Google speech with no words)
         shell: pwsh
         timeout-minutes: 5
@@ -125,6 +131,7 @@ jobs:
             wake-check.json
             tabs-check.json
             online-check.json
+            typing-check.json
             vision-check.json
             vision-check.png
             ${{ runner.temp }}/jarvis-home/jarvis.log

@@ -104,6 +104,49 @@ def main() -> int:
             check("missing tab is reported", "couldn't find" in str(exc), str(exc))
         check("nothing closed by the failed search", len(chrome_titles()) == 2)
 
+        # the same through JARVIS's own request handling (what you'd say)
+        from core.assistant import Assistant
+        from core.config import Config
+        from core.vision import parse_act
+        from tests.test_assistant import Events, FakeTTS
+
+        config = Config(Path(tempfile.mkdtemp()) / "config.json")
+        config.update({"voice_enabled": False, "wake_word": False})
+        jarvis = Assistant(config, Events(), tts=FakeTTS(), desktop=desk)
+
+        def say(text):
+            return "".join(jarvis._act(None, parse_act(text)))
+
+        try:
+            reply = say("open a new tab")
+            time.sleep(0.8)
+            check("'open a new tab' opened one", len(chrome_titles()) == 3, {"reply": reply, "tabs": chrome_titles()})
+            say("close tap")  # how speech recognition often hears it
+            time.sleep(0.6)
+            check("'close tap' closed the tab in Chrome", len(chrome_titles()) == 2, chrome_titles())
+            reply = say(f"open {page('Delta Page')} in a new tab")
+            time.sleep(1.5)
+            check("'open X in a new tab' loaded it", "Delta Page" in chrome_titles(), {"reply": reply, "tabs": chrome_titles()})
+            reply = say("switch to the alpha tab")
+            time.sleep(0.4)
+            front = tabs.tab_title(tabs.browser_windows(desk, "chrome")[0].title)
+            check("'switch to the alpha tab' showed it", front == "Alpha Page", {"reply": reply, "front": front})
+            say("next tab")
+            time.sleep(0.4)
+            after_next = tabs.tab_title(tabs.browser_windows(desk, "chrome")[0].title)
+            say("previous tab")
+            time.sleep(0.4)
+            back = tabs.tab_title(tabs.browser_windows(desk, "chrome")[0].title)
+            check("'next tab' / 'previous tab' moved between tabs", after_next != "Alpha Page" and back == "Alpha Page", [after_next, back])
+            reply = say("close the other tabs")
+            time.sleep(0.8)
+            check("'close the other tabs' kept only the one showing", chrome_titles() == ["Alpha Page"], {"reply": reply, "tabs": chrome_titles()})
+            say("reopen the tab")
+            time.sleep(1.0)
+            check("'reopen the tab' brought one back", len(chrome_titles()) == 2, chrome_titles())
+        finally:
+            jarvis.shutdown()
+
         tabs.close_browser(desk, "chrome")
         for _ in range(20):
             if not tabs.browser_windows(desk, "chrome"):

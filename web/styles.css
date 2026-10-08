@@ -910,3 +910,8 @@ body.booting #col-center { transform: scale(.94); }
 .wt-rec.rec i { border-color: rgb(var(--red)); background: radial-gradient(circle, rgb(var(--red) / .55), rgb(var(--red) / .05) 70%); animation: ps-pulse 1s ease-in-out infinite; }
 .wt-rec span { font: 700 11px/1 var(--font-display); letter-spacing: .2em; color: var(--text-hi); }
 .wt-card .field-note { margin-top: 14px; }
+
+/* microphone paused ("stop listening") */
+#mic-btn.paused { opacity: .55; filter: grayscale(.7); }
+#mic-btn.paused::after { content: ''; position: absolute; left: 22%; right: 22%; top: 50%; height: 2px; background: rgb(var(--amber));
+  transform: rotate(-40deg); box-shadow: 0 0 6px rgb(var(--amber)); pointer-events: none; }

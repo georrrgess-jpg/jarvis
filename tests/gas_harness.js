@@ -158,7 +158,7 @@ const sandbox = {
       const f = store.files.find((x) => x.id === id);
       if (!f) throw new Error(`No item with the given ID could be found: ${id}`);
       return { addViewer: (e) => store.shares.push({ id, e, role: 'view' }), addEditor: (e) => store.shares.push({ id, e, role: 'edit' }),
-        getName: () => f.name, getUrl: () => f.getUrl() };
+        getName: () => f.name, getUrl: () => f.getUrl(), getId: () => f.id, setName: (n) => { f.name = n; } };
     },
     searchFiles(q) {
       const mime = /mimeType = '([^']+)'/.exec(q)[1];

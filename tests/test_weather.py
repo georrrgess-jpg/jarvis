@@ -169,3 +169,68 @@ def test_works_without_the_language_model(make, mock_ollama):
     before = len([1 for p, _ in mock_ollama.requests if p == "/api/chat"])
     ask(assistant, events, "is it going to rain tomorrow")
     assert len([1 for p, _ in mock_ollama.requests if p == "/api/chat"]) == before
+
+
+
+# ----------------------------------------------------------------------------- towns
+GEONAMES = {
+    "paris": [{"name": "Paris", "latitude": 48.85, "longitude": 2.35, "country": "France", "country_code": "FR", "admin1": "Île-de-France", "population": 2138551},
+              {"name": "Paris", "latitude": 33.66, "longitude": -95.55, "country": "United States", "country_code": "US", "admin1": "Texas", "population": 24171}],
+    "bothell": [{"name": "Bothell", "latitude": 47.76, "longitude": -122.2, "country": "United States", "country_code": "US", "admin1": "Washington", "population": 48161}],
+    "ashford": [{"name": "Ashford", "latitude": 51.15, "longitude": 0.87, "country": "United Kingdom", "country_code": "GB", "admin1": "England", "admin2": "Kent", "population": 74204},
+                {"name": "Ashford", "latitude": 51.43, "longitude": -0.46, "country": "United Kingdom", "country_code": "GB", "admin1": "England", "admin2": "Surrey", "population": 27382}],
+}
+
+
+class Towns(Service):
+    def __init__(self):
+        super().__init__()
+        self.osm = []
+
+    def handler(self, request):
+        self.calls.append(request.url)
+        host = request.url.host
+        if host == "geocoding-api.open-meteo.com":
+            return httpx.Response(200, json={"results": GEONAMES.get(request.url.params["name"].lower(), [])})
+        if host == "nominatim.openstreetmap.org":
+            self.osm.append(request.url.params["q"])
+            if request.url.params["q"] in ("90210", "Little Snoring"):
+                return httpx.Response(200, json=[{"lat": "34.09", "lon": "-118.41", "display_name": "Beverly Hills, CA",
+                                                  "address": {"city": "Beverly Hills" if request.url.params["q"] == "90210" else None,
+                                                              "village": "Little Snoring", "country": "United States"}}])
+            return httpx.Response(200, json=[])
+        if host == "api.open-meteo.com":
+            return httpx.Response(200, json=forecast_payload())
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def towns(config):
+    service = Towns()
+    return Weather(config, client_factory=lambda: httpx.Client(transport=httpx.MockTransport(service.handler))), service
+
+
+@pytest.mark.parametrize("spoken, name, lat", [
+    ("Bothell Washington", "Bothell", 47.76), ("Bothell, WA", "Bothell", 47.76), ("Paris", "Paris", 48.85),
+    ("Paris Texas", "Paris", 33.66), ("Paris, TX", "Paris", 33.66), ("Ashford Kent", "Ashford", 51.15),
+    ("Ashford Surrey England", "Ashford", 51.43), ("Ashford", "Ashford", 51.15),
+])
+def test_finds_towns_however_they_are_said(towns, spoken, name, lat):
+    weather, service = towns
+    place = weather.geocode(spoken)
+    assert place.name == name and place.latitude == lat
+
+
+def test_villages_and_postcodes_fall_back_to_openstreetmap(towns):
+    weather, service = towns
+    assert weather.geocode("90210").name == "Beverly Hills"
+    assert weather.geocode("Little Snoring").name == "Little Snoring"
+    assert service.osm == ["90210", "Little Snoring"]
+    with pytest.raises(WeatherError, match="couldn't find a place called Atlantis"):
+        weather.geocode("Atlantis")
+
+
+def test_spoken_town_and_state_end_to_end(towns):
+    weather, service = towns
+    reply = weather.answer(parse_weather("what's the weather in Bothell Washington tomorrow"), "sir")
+    assert reply.startswith("Tomorrow in Bothell:")

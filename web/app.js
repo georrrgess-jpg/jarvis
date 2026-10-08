@@ -788,7 +788,9 @@
     updateSub() {
       const st = S.state, ph = S.listenPhase, o = S.ollama;
       let sub = '';
-      if (st === 'IDLE') {
+      if (st === 'IDLE' && S.paused) {
+        sub = 'Not listening · press the mic or type "start listening"';
+      } else if (st === 'IDLE') {
         const wake = S.wake && S.wake.active;
         sub = !(o && o.online && o.model) ? 'Neural core offline · limited functionality'
           : wake ? `Awaiting your command, ${title()} · say “${S.wake.phrase || 'Hey Jarvis'}”` : `Awaiting your command, ${title()}`;
@@ -841,7 +843,8 @@
       else this.chip('#chip-voice', 'ok', voiceShort(set.voice).toUpperCase());
       const engine = (mic.engine || '').replace(/ \(.*\)/, '').toUpperCase();
       const wake = S.wake || {};
-      if (mic.available && wake.active) this.chip('#chip-mic', 'ok', (wake.phrase || 'Hey Jarvis').toUpperCase());
+      if (mic.available && S.paused) this.chip('#chip-mic', 'warn', 'PAUSED');
+      else if (mic.available && wake.active) this.chip('#chip-mic', 'ok', (wake.phrase || 'Hey Jarvis').toUpperCase());
       else if (mic.available) this.chip('#chip-mic', 'ok', engine || 'READY');
       else this.chip('#chip-mic', 'bad', 'NO DEVICE');
       $('#wake-hint').classList.toggle('hidden', !(mic.available && wake.active));
@@ -850,6 +853,9 @@
         : `Wake word off${wake.reason ? `: ${wake.reason}` : ''}`;
       $('#wake-hint-phrase').textContent = `“${wake.phrase || 'Hey Jarvis'}”`;
       $('#mic-btn').classList.toggle('disabled', !mic.available);
+      $('#mic-btn').classList.toggle('paused', !!S.paused);
+      $('#mic-btn').title = S.paused ? 'Microphone paused: click to listen again' : 'Click to talk · hold for push-to-talk [Space]';
+      if (S.paused) $('#wake-hint').classList.add('hidden');
 
       this.setDD('#am-voice', `${voiceShort(set.voice)} · ${(set.voice || '').split('-').slice(0, 2).join('-')}`, voiceOn && S.voiceOk ? '' : 'warn');
       this.setDD('#am-output', audio.available ? (audio.output ? 'ONLINE' : 'VIRTUAL (no device)') : 'OFFLINE', audio.output ? 'ok' : 'warn');
@@ -1927,6 +1933,7 @@
       case 'mic_status': { const { type, ...m } = ev; S.mic = { ...S.mic, ...m }; Hud.updateAudio(); break; }
       case 'settings': { const { type, ...s } = ev; S.settings = s; Hud.applySettings(); if ($('#settings').classList.contains('open')) Settings.fill(); break; }
       case 'persona': { const { type, ...p } = ev; Personas.apply(p); break; }
+      case 'listening': S.paused = !!ev.paused; Hud.updateAudio(); Hud.updateSub(); if (ev.paused) Chat.system('Microphone paused. Press the mic button, or type "start listening", to talk again.'); break;
       case 'personas': Personas.setList(ev.personas); break;
       case 'wake_learn': Personas.wake(ev); break;
       case 'memory_learned': Chat.memoryNote(ev); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
@@ -2148,6 +2155,7 @@
     S.settings = p.settings; S.mic = { ...p.mic, engine: p.stt_engine }; S.audio = p.audio; S.core = p.core; S.system = p.system;
     S.ollama = p.ollama;
     S.wake = p.wake || null;
+    S.paused = !!p.paused;
     document.body.classList.toggle('framed', !(p.window ? p.window.frameless : true));
     $('#st-cpu-name').textContent = p.system.cpu_name;
     $('#st-cpu-name').title = p.system.cpu_name;
@@ -2173,7 +2181,7 @@
     setTimeout(() => { if (S.ollama) Ollama.update(S.ollama); }, 1500);
     setTimeout(async () => {
       const st = await Google.refresh();
-      if (st && st.configured && st.outdated) Chat.system('Your Google script needs a one-time update for Gmail, Sheets and slide editing: Settings ▸ Google ▸ UPDATE SCRIPT.', 'warn');
+      if (st && st.configured && st.outdated) Chat.system('Your Google script needs a one-time update (it adds renaming documents, plus Gmail, Sheets and slide editing): Settings ▸ Google ▸ UPDATE SCRIPT.', 'warn');
     }, 4000);
   }
 

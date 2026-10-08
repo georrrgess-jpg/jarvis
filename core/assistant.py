@@ -25,6 +25,8 @@ from .compose import (EditRequest, WriteRequest, clean_document, document_prompt
                       parse_edit_request, parse_write_request, revise_prompt, section_prompt, slides_prompt)
 from .config import Config, app_data_dir
 from .gdrive import GoogleRequest, NewFileRequest, parse_google_request, parse_new_file
+from . import docs_keys
+from .docops import DocCommand, docs_tab_title, parse_doc_command, to_plain, writing_prompt
 from .google_bridge import BridgeError
 from .mail import (Draft, EmailRequest, email_prompt, first_name, gmail_compose_url, is_cancellation, is_confirmation,
                    parse_email, parse_email_request)
@@ -57,9 +59,22 @@ log = logging.getLogger("jarvis.assistant")
 
 Emit = Callable[[str, dict], None]
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:]{0,120}$")
+def _bare(text: str) -> str:
+    """'stop listening, Jarvis!' -> 'stop listening' (a personality's name or 'please' at the end)."""
+    return re.sub(r"(?:[,\s]+(?:" + names_pattern() + r"|please|thanks|thank you))+\W*$", "", text.strip(), flags=re.I)
+
+
 def _strip_wake(text: str) -> str:
     """'Hey Harper, what time is it' -> 'what time is it' (any personality's name)."""
     return re.sub(r"^\s*(?:(?:hey|hi|okay|ok)\s+)?(?:" + names_pattern() + r")\b[\s,.!?]*", "", text, count=1, flags=re.I)
+_PAUSE_LISTENING = re.compile(
+    r"^\W*(?:(?:please|can you|could you|would you|just|ok(?:ay)?|now)\s+)*(?:stop\s+listening(?:\s+(?:to\s+me|for\s+(?:now|a\s+(?:while|bit))|please))*|"
+    r"(?:go\s+to\s+sleep|take\s+a\s+break)(?:\s+(?:for\s+now|please))?|(?:mute|turn\s+off|switch\s+off|disable)\s+(?:the\s+|your\s+|my\s+)?(?:mic|microphone|listening)|"
+    r"mute\s+yourself|don'?t\s+listen(?:\s+to\s+me)?(?:\s+(?:for\s+now|anymore|any\s+more))?|stop\s+the\s+(?:mic|microphone))\W*$", re.I)
+_RESUME_LISTENING = re.compile(
+    r"^\W*(?:(?:please|can you|could you|ok(?:ay)?|now|you\s+can)\s+)*(?:start\s+listening(?:\s+(?:again|to\s+me))*|listen\s+(?:again|to\s+me(?:\s+again)?)|"
+    r"resume\s+listening|wake\s+up|unmute(?:\s+(?:yourself|the\s+(?:mic|microphone)))?|(?:turn|switch)\s+(?:the\s+|your\s+)?(?:mic|microphone)\s+(?:back\s+)?on|"
+    r"(?:turn|switch)\s+on\s+(?:the\s+|your\s+)?(?:mic|microphone)|you\s+can\s+listen(?:\s+again)?)\W*$", re.I)
 _STOP_PHRASES = {
     "stop", "stop it", "stop talking", "stop listening", "cancel", "never mind", "nevermind", "forget it",
     "that's all", "thats all", "that is all", "nothing", "be quiet", "quiet", "shut up", "hush", "enough",
@@ -329,6 +344,7 @@ class Assistant:
         self._drafts: dict[str, Draft] = {}  # emails shown on screen, by id
         self._awaiting: Draft | None = None  # the draft JARVIS just asked "shall I send it?" about
         self._pending_forget = 0.0  # when JARVIS asked "forget everything?"
+        self._paused = False  # "stop listening": the microphone stays closed until asked again
         self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
         self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
         self.weather = Weather(config, self.memory)
@@ -476,6 +492,7 @@ class Assistant:
             "personas": self.persona_list(),
             "memory": self.memory.stats(),
             "restored": self._restored,
+            "paused": self._paused,
         }
 
     def boot_complete(self) -> None:
@@ -542,13 +559,15 @@ class Assistant:
             state = self.wakewords.status(self.persona.name)
             if state["state"] in ("learning", "queued"):
                 learning = {"name": self.persona.name, "progress": state["progress"]}
+        if self._paused:
+            reason, active = "paused (you said \"stop listening\")", False
         return {"enabled": bool(self.config.get("wake_word", True)), "active": active, "phrase": phrases[0] if phrases else "Hey Jarvis",
-                "phrases": phrases, "reason": reason, "learning": learning}
+                "phrases": phrases, "reason": reason, "learning": learning, "paused": self._paused}
 
     def _sync_wake_word(self) -> None:
         """Start or stop the background "Hey Jarvis" listener to match settings and hardware."""
         ok, why = wakeword.available()
-        want = bool(self.config.get("wake_word", True)) and ok and self._mic.get("available")
+        want = bool(self.config.get("wake_word", True)) and ok and self._mic.get("available") and not self._paused
         if want and not (self.wake and self.wake.running):
             self.wake = wakeword.WakeListener(self._on_wake, lambda: float(self.config.get("wake_sensitivity", 0.5)),
                                               words=self._wake_words)
@@ -568,6 +587,8 @@ class Assistant:
 
     def _on_wake(self, score: float) -> None:
         """Called from the wake-word thread: barge in if busy, then listen for the command."""
+        if self._paused:
+            return
         self.emit("wake", score=round(score, 2))
         if self.state.state in (State.SPEAKING, State.THINKING):
             with self._turn_lock:
@@ -600,7 +621,35 @@ class Assistant:
 
         self._spawn(run, name=f"announce-{turn.id}")
 
+    # ================================================================== "stop listening"
+    def pause_listening(self) -> str:
+        """Close the microphone (wake word included) until the user presses the mic button or says/types "start listening"."""
+        self._paused = True
+        if self.wake is not None:
+            self.wake.stop()
+            self.wake = None
+            self.stt.set_source_provider(None)
+        self.emit("listening", paused=True)
+        self.emit("wake_status", **self.wake_status())
+        return (f"Okay, {self.title}, I've stopped listening. Press the microphone button, or type \"start listening\", "
+                "whenever you need me.")
+
+    def resume_listening(self) -> str:
+        was = self._paused
+        self._paused = False
+        self.emit("listening", paused=False)
+        self._spawn(self._sync_wake_word, name="wake-sync")
+        if not was:
+            return f"I'm already listening, {self.title}."
+        phrase = self.wake_status().get("phrase") or "Hey Jarvis"
+        hands_free = f" Say \"{phrase}\" any time." if self.config.get("wake_word", True) else ""
+        return f"I'm listening again, {self.title}.{hands_free}"
+
     def start_listening(self) -> str:
+        if self._paused:  # pressing the mic button means "I want to talk": listen again
+            self._paused = False
+            self.emit("listening", paused=False)
+            self._spawn(self._sync_wake_word, name="wake-sync")
         with self._turn_lock:
             current = self._turn
             if current is not None and current.kind == "listen" and self.state.state == State.LISTENING:
@@ -695,6 +744,9 @@ class Assistant:
         text = _strip_wake(text).strip()
         if not text:
             self._missed(turn)
+            return
+        if _PAUSE_LISTENING.match(_bare(text)):
+            self._converse(turn, text, "voice")  # "stop listening": handled (and answered) like any request
             return
         if re.sub(r"[^\w' ]+", "", text.lower()).strip() in _STOP_PHRASES and self._awaiting is None:
             self.sfx.play("interrupt")
@@ -1000,7 +1052,8 @@ class Assistant:
         if not self.config.get("allow_control", True):
             yield f"Screen control is switched off in Settings, {title}."
             return
-        if act.action in ("close_tab", "reopen_tab", "close_browser", "close_app"):
+        if act.action in ("close_tab", "reopen_tab", "close_browser", "close_app", "new_tab", "next_tab", "previous_tab",
+                          "switch_tab", "close_other_tabs"):
             yield self._window_command(act)
             return
         try:
@@ -1059,14 +1112,25 @@ class Assistant:
                 closed = tabs.close_named_tab(self.desktop, act.tab, act.app or "browser", current)
                 done = f"Closed the {closed or act.tab} tab, {title}."
             elif act.action == "close_tab":
-                if not act.app or act.app == "browser":
-                    if current is not None and tabs.is_browser(current):
-                        self.desktop.press([0x11, ord("W")], window=current)
-                    else:
-                        tabs.close_current_tab(self.desktop, "browser", current)
-                else:
-                    tabs.close_current_tab(self.desktop, act.app, current)
+                # the browser you were just in, else the browser window nearest the front: never some other app
+                tabs.close_current_tab(self.desktop, act.app or "browser", current)
                 done = f"Tab closed, {title}."
+            elif act.action == "new_tab":
+                address = (self.tools.website_for(act.text) or act.text) if act.text else ""
+                if not tabs.browser_windows(self.desktop, act.app or "browser", current):
+                    self.tools.open_website(address or "google.com")  # no browser open: start one
+                    return f"Opening {act.text or 'a new tab'}, {title}."
+                tabs.new_tab(self.desktop, act.app or "browser", current, address)
+                return f"Opened {act.text} in a new tab, {title}." if act.text else f"New tab, {title}."
+            elif act.action in ("next_tab", "previous_tab"):
+                tabs.step_tab(self.desktop, act.action == "next_tab", act.app or "browser", current)
+                return f"Done, {title}."
+            elif act.action == "switch_tab":
+                shown = tabs.switch_to_tab(self.desktop, act.tab, act.app or "browser", current)
+                return f"Here's {shown}, {title}."
+            elif act.action == "close_other_tabs":
+                count = tabs.close_other_tabs(self.desktop, act.app or "browser", current)
+                return (f"Closed {count} other tab{'s' if count != 1 else ''}, {title}." if count else f"That was the only tab, {title}.")
             elif act.action == "reopen_tab":
                 tabs.reopen_tab(self.desktop, act.app or "browser", current)
                 return f"Brought it back, {title}."
@@ -1478,6 +1542,15 @@ class Assistant:
                 self._deliver(turn, [f"Very well, {self.title}. I've discarded that email."])
                 return
 
+        if _PAUSE_LISTENING.match(_bare(text)):
+            turn.learn = False
+            self._deliver(turn, [self.pause_listening()])
+            return
+        if _RESUME_LISTENING.match(_bare(text)) and (self._paused or source == "text"):
+            turn.learn = False
+            self._deliver(turn, [self.resume_listening()])
+            return
+
         asked_forget, self._pending_forget = self._pending_forget, 0.0
         if asked_forget and time.time() - asked_forget < 120:
             turn.learn = False
@@ -1510,6 +1583,11 @@ class Assistant:
             if answer:
                 self._deliver(turn, [answer], listen_after=lambda: bool(self._pending_forget))
                 return
+
+        doc_cmd = parse_doc_command(text)
+        if doc_cmd is not None and self._doc_command_applies(doc_cmd, text):
+            self._deliver(turn, self._doc_command(turn, text, doc_cmd, lang), language=lang.code if lang else None, working=True)
+            return
 
         try:
             direct = self._direct_chain(turn, text) or self._direct_command(turn, text)
@@ -1634,7 +1712,7 @@ class Assistant:
         if self._finish_turn(turn) and not turn.cancel.is_set():
             if callable(listen_after):
                 listen_after = listen_after()  # decided after the reply ("shall I click it?" -> listen for yes)
-            if turn.kind == "listen" and not error and (self.config.get("auto_listen") or listen_after):
+            if turn.kind == "listen" and not error and not self._paused and (self.config.get("auto_listen") or listen_after):
                 self.start_listening()
 
     # ================================================================== long-form writing
@@ -1715,6 +1793,238 @@ class Assistant:
         self.llm.remember(text, f'I wrote {summary} in the Google {"Slides presentation" if kind == "slides" else "Doc"} '
                                 f'"{result.get("title") or title}" ({url}).')
         yield f"Done. I've written {summary} and opened it for you."
+
+    # ================================================================== working on a document step by step
+    def _docs_windows(self) -> list:
+        """Browser windows showing a Google Doc, the one the user was just using first."""
+        current = self.tracker.current()
+        found = [w for w in self._safe_windows() if tabs.is_browser(w) and docs_tab_title(w.title)]
+        if current is not None and docs_tab_title(current.title or ""):
+            found.sort(key=lambda w: w.hwnd != current.hwnd)
+        return found
+
+    def _doc_command_applies(self, cmd: DocCommand, text: str = "") -> bool:
+        if len(cmd.steps) == 1 and cmd.steps[0].action == "write" and self.tools.google.configured:
+            change = parse_edit_request(text)
+            if change is not None and self._edit_target(change) is not None:
+                return False  # "add a section about X to it": the dedicated section writer does that best
+        if cmd.needs_document:
+            return True
+        # "type out a cover letter" with no document mentioned: into the Google Doc on screen, or whatever app is in front
+        if any(s.verb == "type" or s.action == "type" for s in cmd.steps):
+            return True
+        current = self.tracker.current()
+        return bool(current is not None and docs_tab_title(current.title or ""))
+
+    def _resolve_doc(self, cmd: DocCommand) -> dict | None:
+        """Which document: one the user named, the Google Doc open on screen, or the one JARVIS used last."""
+        google = self.tools.google
+        windows = self._docs_windows()
+        if cmd.name:
+            window = next((w for w in windows if cmd.name.lower() in (docs_tab_title(w.title) or "").lower()), None)
+            file = google.find_file(cmd.kind, cmd.name) if google.configured else None
+            if file:
+                return {"kind": file.get("kind") or cmd.kind, "id": file.get("id") or "", "title": file.get("title") or cmd.name,
+                        "url": file.get("url") or "", "window": window}
+            if window is not None:
+                return {"kind": "doc", "id": "", "title": docs_tab_title(window.title), "url": "", "window": window}
+            raise BridgeError(f"I couldn't find a document called {cmd.name}")
+        last = self._last_doc
+        if windows:
+            window = windows[0]
+            title = docs_tab_title(window.title)
+            if last and last.get("kind") == "doc" and last.get("title", "").lower() == title.lower():
+                return {**last, "window": window}
+            if google.configured:
+                try:
+                    file = google.find_file("doc", title)
+                except BridgeError:
+                    file = None
+                if file and (file.get("title") or "").lower() == title.lower():
+                    return {"kind": "doc", "id": file.get("id") or "", "title": file.get("title"), "url": file.get("url") or "", "window": window}
+            return {"kind": "doc", "id": "", "title": title, "url": "", "window": window}
+        if last and last.get("kind") == "doc":
+            return {**last, "window": None}
+        return None
+
+    def _wait_for_docs_window(self, timeout: float = 20.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            windows = self._docs_windows()
+            if windows:
+                time.sleep(1.5)  # let the editor finish loading before typing into it
+                return self._docs_windows()[0]
+            time.sleep(0.4)
+        return None
+
+    def _doc_command(self, turn: Turn, text: str, cmd: DocCommand, lang: Detection | None) -> Iterator[str]:
+        """Run "rename it to X, then type out Y" one step at a time, saying what happened."""
+        title, google = self.title, self.tools.google
+        bridge = google.configured
+        done: list[str] = []
+        current = self.tracker.current()
+        needs_doc = cmd.needs_document or bool(current is not None and docs_tab_title(current.title or ""))
+        typing_only = not needs_doc  # "type out a poem" into whatever app is in front
+        target = None
+        try:
+            if needs_doc:
+                create = next((s for s in cmd.steps if s.action == "create"), None)
+                target = None if create else self._resolve_doc(cmd)
+                if target is None:
+                    # nothing to work on yet: start a new doc (named after the rename, if there is one)
+                    name = (create.text if create else "") or next((s.text for s in cmd.steps if s.action == "rename"), "")
+                    if bridge:
+                        self._emit_turn(turn, "tool_activity", tool="google_doc", label="Creating a new Google Doc")
+                        made = google.doc("create", title=name or "Untitled document", text="")
+                        target = {"kind": "doc", "id": made.get("id") or "", "title": made.get("title") or name, "url": made.get("url") or "", "window": None}
+                        done.append(f"created {target['title']}")
+                    else:
+                        if not self.config.get("allow_control", True):
+                            yield (f"I'd need either the Google link (Settings, Google) or screen control to make a document, {title}.")
+                            return
+                        self.tools.open_link(self._NEW_URLS["doc"])
+                        self._emit_turn(turn, "tool_activity", tool="google_doc", label="Opening a new Google Doc")
+                        window = self._wait_for_docs_window()
+                        if window is None:
+                            yield (f"I opened a new Google Doc, {title}, but it didn't appear in time (is your browser signed in to Google?). "
+                                   "Link Google in Settings and I can do all of this directly.")
+                            return
+                        target = {"kind": "doc", "id": "", "title": docs_tab_title(window.title), "url": "", "window": window}
+                        done.append("opened a new document")
+                    if name and create is None:
+                        cmd.steps = [s for s in cmd.steps if not (s.action == "rename" and s.text == name and target.get("id"))]
+            for step in cmd.steps:
+                if turn.cancel.is_set():
+                    return
+                if step.action in ("create",):
+                    continue
+                if step.action == "open":
+                    if target and target.get("window") is not None:
+                        self.desktop.bring_to_front(target["window"])
+                    elif target and target.get("url"):
+                        self.tools.open_link(target["url"])
+                    continue
+                if step.action == "rename":
+                    yield self._doc_rename(turn, target, step.text)
+                    done.append(f"renamed it to {step.text}")
+                    continue
+                if step.action == "clear":
+                    self._doc_clear(turn, target)
+                    done.append("cleared it")
+                    continue
+                # write (generated) or type (exact words)
+                if step.action == "type":
+                    body_md, body_plain, about = step.text, step.text, "that"
+                else:
+                    if not (self.llm.online and self.llm.model):
+                        self.check_ollama(emit_event=False)
+                    if not (self.llm.online and self.llm.model):
+                        yield f"My neural core is offline, {title}, so I can't write {step.text} right now."
+                        return
+                    about = step.text
+                    current = ""
+                    if target and target.get("id") and bridge:
+                        try:
+                            current = google.doc("read", document=target["id"]).get("text", "")
+                        except BridgeError:
+                            current = ""
+                    plain = typing_only or not (bridge and target and target.get("id"))
+                    self._emit_turn(turn, "tool_activity", tool="compose", label=f"Writing {about}")
+                    system, prompt = writing_prompt(about, current, lang.name if lang else None, plain=plain)
+                    draft = self.llm.compose(system, prompt, turn.cancel, max_tokens=1400,
+                                             on_progress=lambda p: self._emit_turn(turn, "activity", label=f"Writing · {len(p.split())} words"))
+                    if turn.cancel.is_set():
+                        return
+                    _t, body_md = clean_document(draft) if not plain else ("", draft.strip())
+                    body_md = body_md or draft.strip()
+                    body_plain = to_plain(draft)
+                    if len(body_plain.split()) < 3:
+                        yield f"I couldn't come up with {about} just now, {title}. Please try again."
+                        return
+                if typing_only:
+                    yield self._type_into_app(turn, body_plain, about)
+                    return
+                self._doc_write(turn, target, body_md, body_plain)
+                done.append(f"wrote {about} in it" if step.action == "write" else "typed it in")
+        except BridgeError as exc:
+            self._emit_turn(turn, "system_message", level="error", text=f"Google: {exc}")
+            yield f"I'm afraid I couldn't finish that, {title}: {exc}."
+            return
+        except ScreenError as exc:
+            yield f"I'm afraid I couldn't finish that, {title}: {exc}"
+            return
+        if target is None:
+            return
+        if target.get("id"):
+            self._last_doc = {k: target.get(k) or "" for k in ("kind", "id", "title", "url")}
+            self._emit_turn(turn, "document", doc_kind=target["kind"], id=target["id"], title=target["title"], url=target.get("url") or "")
+            if target.get("window") is None and target.get("url"):
+                self.tools.open_link(target["url"])  # show it
+        summary = ", then ".join(d for d in done if not d.startswith("renamed"))
+        self.llm.remember(text, f"I {', then '.join(done) or 'worked on the document'} ({target.get('title')}).")
+        if summary:
+            yield f"Done, {title}. I {summary}" + (f" ({target.get('title')})." if target.get("title") else ".")
+
+    def _doc_rename(self, turn: Turn, target: dict, name: str) -> str:
+        google = self.tools.google
+        self._emit_turn(turn, "tool_activity", tool="google_doc", label=f"Renaming to {name}")
+        if target.get("id") and google.configured:
+            try:
+                result = google.rename(target["kind"], target["id"], name)
+                target["title"] = result.get("title") or name
+                target["url"] = result.get("url") or target.get("url") or ""
+                return f"Renamed it to {target['title']}. "
+            except BridgeError as exc:
+                if target.get("window") is None or "out of date" not in str(exc):
+                    raise
+                log.info("Bridge can't rename yet (%s); renaming in the browser instead", exc)
+        if target.get("window") is None:
+            raise BridgeError("I can only rename a document through the Google link, or when it's open in your browser")
+        if not self.config.get("allow_control", True):
+            raise BridgeError("screen control is switched off in Settings, so I can't rename it in the browser")
+        docs_keys.rename(self.desktop, target["window"], name)
+        target["title"] = name
+        return f"Renamed it to {name}. "
+
+    def _doc_write(self, turn: Turn, target: dict, body_md: str, body_plain: str) -> None:
+        google = self.tools.google
+        if target.get("id") and google.configured:
+            result = google.doc("append", document=target["id"], text=body_md)
+            target["url"] = result.get("url") or target.get("url") or ""
+            return
+        if target.get("window") is None:
+            raise BridgeError("I can only write in a document through the Google link, or when it's open in your browser")
+        if not self.config.get("allow_control", True):
+            raise BridgeError("screen control is switched off in Settings, so I can't type into it")
+        self._emit_turn(turn, "tool_activity", tool="vision", label=f"Typing into {target.get('title') or 'the document'}")
+        docs_keys.type_at_end(self.desktop, target["window"], body_plain)
+
+    def _doc_clear(self, turn: Turn, target: dict) -> None:
+        google = self.tools.google
+        if target.get("id") and google.configured:
+            google.call("doc_rewrite", document=target["id"], text=" ")
+            return
+        if target.get("window") is None:
+            raise BridgeError("I can only clear a document through the Google link, or when it's open in your browser")
+        docs_keys.clear(self.desktop, target["window"])
+
+    def _type_into_app(self, turn: Turn, text: str, about: str) -> str:
+        """Type generated text into whatever app the user is working in (Notepad, Word, an email...)."""
+        title = self.title
+        if not self.config.get("allow_control", True):
+            return f"Screen control is switched off in Settings, {title}, so I can't type for you."
+        window = self.tracker.current()
+        if window is None:
+            return f"Click where you'd like me to type it, {title}, then ask me again."
+        if is_private(window, self.config.get("vision_exclusions") or ""):
+            return f"{window.label} is on your privacy list, {title}, so I won't type into it."
+        self._emit_turn(turn, "tool_activity", tool="vision", label=f"Typing into {window.label}")
+        try:
+            self.desktop.type_text(text, window=window)
+        except ScreenError as exc:
+            return f"I couldn't type into {window.label}, {title}: {exc}"
+        self.llm.remember(f"type out {about}", f"[Typed {about} into {window.label}]")
+        return f"Done, {title}. I've typed {about} into {window.label}."
 
     # ================================================================== existing Google files
     _KIND_NAMES = {"doc": "Google Doc", "slides": "Google Slides presentation", "sheet": "Google Sheet"}

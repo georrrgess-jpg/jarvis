@@ -22,6 +22,7 @@ log = logging.getLogger("jarvis.weather")
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 IP_LOOKUPS = ("https://ipwho.is/", "https://get.geojs.io/v1/ip/geo.json", "http://ip-api.com/json/")
 
 CODES = {
@@ -61,7 +62,7 @@ class Place:
 _LEAD = r"^(?:please |can you |could you |would you |tell me |let me know |i want to know |do you know )*"
 _WHEN = (r"(?P<when>today|tonight|right now|now|at the moment|currently|outside|out there|tomorrow|tomorrow morning|tomorrow night|"
          r"this (?:morning|afternoon|evening|weekend)|on the weekend|at the weekend|over the weekend|(?:on |this |next )?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))")
-_PLACE = r"(?:\s+(?:in|for|at|near|around)\s+(?P<place>[a-zà-ÿ][a-zà-ÿ .,'-]{1,50}?))?"
+_PLACE = r"(?:\s+(?:in|for|at|near|around)\s+(?P<place>[a-zà-ÿ0-9][a-zà-ÿ0-9 .,'-]{1,60}?))?"
 _TAIL = r"(?:\s+(?:here|around here|where i am))?(?:\s+" + _WHEN + r")?" + _PLACE + r"(?:\s+" + _WHEN.replace("?P<when>", "?P<when2>") + r")?(?:\s+(?:please|for me))?[\s?.!]*$"
 _PATTERNS = [
     ("temperature", re.compile(_LEAD + r"(?:(?:what(?:'s| is)|check|get(?: me)?|give me|show me)\s+)?(?:the\s+)?(?:current\s+|outside\s+)?(?:temperature|temp)(?:\s+(?:like|outside|out there))?" + _TAIL, re.I)),
@@ -151,19 +152,38 @@ class Weather:
         return self.ip_location()
 
     def geocode(self, name: str) -> Place:
+        """A town, city, village or postcode -> a place. "Bothell Washington", "Paris, TX", "Ashford Kent", "90210"."""
         key = name.lower().strip()
         if key in self._geo_cache:
             return self._geo_cache[key]
-        city = re.split(r",", name)[0].strip()
-        data = self._get(GEOCODE_URL, {"name": city, "count": 5, "language": "en", "format": "json"})
-        results = data.get("results") or []
-        if not results:
+        found = None
+        for city, hint in _candidates(name):
+            data = self._get(GEOCODE_URL, {"name": city, "count": 10, "language": "en", "format": "json"})
+            found = _pick(data.get("results") or [], city, hint)
+            if found:
+                break
+        if found is None:
+            found = self._nominatim(name)
+        if found is None:
             raise WeatherError(f"I couldn't find a place called {name}.")
-        hint = name.split(",", 1)[1].strip().lower() if "," in name else ""
-        best = next((r for r in results if hint and hint in (str(r.get("country", "")) + " " + str(r.get("admin1", ""))).lower()), results[0])
-        found = Place(str(best.get("name") or city), float(best["latitude"]), float(best["longitude"]), str(best.get("country") or ""))
         self._geo_cache[key] = found
         return found
+
+    def _nominatim(self, name: str) -> Place | None:
+        """OpenStreetMap's free geocoder: villages, neighbourhoods and postcodes the first one doesn't know."""
+        try:
+            rows = self._get(NOMINATIM_URL, {"q": name, "format": "jsonv2", "limit": 1, "addressdetails": 1})
+        except WeatherError as exc:
+            if exc.offline:
+                raise
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+        row = rows[0]
+        address = row.get("address") or {}
+        label = (address.get("city") or address.get("town") or address.get("village") or address.get("hamlet")
+                 or address.get("suburb") or str(row.get("display_name") or name).split(",")[0])
+        return Place(str(label), float(row["lat"]), float(row["lon"]), str(address.get("country") or ""))
 
     def ip_location(self) -> Place:
         with self._lock:
@@ -214,6 +234,8 @@ class Weather:
                 r = client.get(url, params=params)
                 r.raise_for_status()
                 return r.json()
+        except httpx.HTTPStatusError as exc:  # reachable, but it said no (rate limit, bad request...)
+            raise WeatherError(f"the weather service had a problem (HTTP {exc.response.status_code}).") from exc
         except httpx.HTTPError as exc:
             raise WeatherError("I couldn't reach the weather service. Check your internet connection.", offline=True) from exc
         except ValueError as exc:
@@ -304,3 +326,57 @@ _PC_TEMP = re.compile(r"\b(?:(?:cpu|processor|computer|pc|laptop|gpu|system)(?:'
 
 def asks_pc_temperature(text: str) -> bool:
     return bool(_PC_TEMP.search(text or ""))
+
+
+# ----------------------------------------------------------------------------- finding towns
+US_STATES = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california", "co": "colorado", "ct": "connecticut",
+    "de": "delaware", "fl": "florida", "ga": "georgia", "hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
+    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland", "ma": "massachusetts", "mi": "michigan",
+    "mn": "minnesota", "ms": "mississippi", "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada", "nh": "new hampshire",
+    "nj": "new jersey", "nm": "new mexico", "ny": "new york", "nc": "north carolina", "nd": "north dakota", "oh": "ohio", "ok": "oklahoma",
+    "or": "oregon", "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina", "sd": "south dakota", "tn": "tennessee",
+    "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington", "wv": "west virginia", "wi": "wisconsin",
+    "wy": "wyoming", "dc": "district of columbia",
+}
+COUNTRIES = {"uk": "united kingdom", "u.k.": "united kingdom", "england": "united kingdom", "scotland": "united kingdom",
+             "wales": "united kingdom", "britain": "united kingdom", "us": "united states", "usa": "united states",
+             "u.s.": "united states", "america": "united states", "uae": "united arab emirates"}
+_STATE_WORDS = set(US_STATES.values())
+
+
+def _expand(hint: str) -> str:
+    h = hint.lower().strip(" .,")
+    h = re.sub(r"^(?:the\s+)?(?:state\s+of\s+)", "", h)
+    return US_STATES.get(h.replace(".", ""), COUNTRIES.get(h, h))
+
+
+def _candidates(name: str) -> list[tuple[str, str]]:
+    """Ways to read a spoken place: whole, or "town" + "state/country" hint ("Bothell Washington" -> Bothell in Washington)."""
+    name = re.sub(r"\s+", " ", name.strip(" .,"))
+    if "," in name:
+        city, hint = name.split(",", 1)
+        return [(city.strip(), _expand(hint)), (name.replace(",", ""), "")]
+    words = name.split()
+    out = [(name, "")]
+    for k in range(len(words) - 1, 0, -1):
+        out.append((" ".join(words[:k]), _expand(" ".join(words[k:]))))
+    return out
+
+
+def _pick(results: list[dict], city: str, hint: str) -> Place | None:
+    if not results:
+        return None
+    def region(r: dict) -> str:
+        return " ".join(str(r.get(k) or "") for k in ("country", "admin1", "admin2", "admin3", "country_code")).lower()
+    if hint:
+        h = hint.lower()
+        words = [_expand(w) for w in h.split()]
+        matching = [r for r in results if h in region(r) or all(w in region(r) for w in words)
+                    or (len(h) == 2 and h == str(r.get("country_code", "")).lower())]
+        if not matching:
+            return None  # "Paris Texas" must not become Paris, France
+        results = matching
+    exact = [r for r in results if str(r.get("name", "")).lower() == city.lower()]
+    best = max(exact or results, key=lambda r: int(r.get("population") or 0))
+    return Place(str(best.get("name") or city), float(best["latitude"]), float(best["longitude"]), str(best.get("country") or ""))

@@ -613,7 +613,7 @@ _SHORTCUTS = [
     (re.compile(_LEAD + r"(?:save (?:this|it|that|the (?:file|document)))" + _END, re.I), [0x11, ord("S")], "save"),
     (re.compile(_LEAD + r"zoom in" + _END, re.I), [0x11, 0xBB], "zoom in"),
     (re.compile(_LEAD + r"zoom out" + _END, re.I), [0x11, 0xBD], "zoom out"),
-    (re.compile(_LEAD + r"(?:new tab|open a new tab)" + _END, re.I), [0x11, ord("T")], "new tab"),
+
     (re.compile(_LEAD + r"(?:next tab|switch tabs?)" + _END, re.I), [0x11, 0x09], "next tab"),
     (re.compile(_LEAD + r"(?:full ?screen(?: (?:it|this|the video))?|go full ?screen)" + _END, re.I), [0x7A], "full screen"),
 ]
@@ -667,6 +667,20 @@ def parse_watch(text: str) -> WatchRequest | None:
 
 _BROWSER = r"(?:google\s+)?chrome|(?:microsoft\s+)?edge|(?:mozilla\s+)?firefox|brave|opera|vivaldi|(?:the\s+|my\s+|web\s+|internet\s+)?browser"
 _TAB_LEAD = r"close\s+(?:out\s+)?(?:of\s+)?"
+_TAB_LEAD2 = _LEAD + r"(?:(?:go\s+ahead\s+and|now)\s+)?"
+_MORE_TABS = [
+    # "close tab", "close the tab", "close this tab", "close current tab": the browser's tab, never "an app called tab"
+    ("app", re.compile(_TAB_LEAD2 + r"close\s+(?:out\s+)?(?:of\s+)?(?:the\s+|this\s+|that\s+|my\s+)?(?:current\s+|active\s+|open\s+)?tab(?P<app>)" + _END, re.I)),
+    ("all", re.compile(_TAB_LEAD2 + r"close\s+(?:all|every)\s+(?:of\s+)?(?:the\s+|my\s+)?(?:open\s+)?tabs(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    ("others", re.compile(_TAB_LEAD2 + r"close\s+(?:all\s+)?(?:the\s+)?other\s+tabs(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    ("new", re.compile(_TAB_LEAD2 + r"(?:open|start|make|create|give\s+me)?\s*(?:a\s+|another\s+|one\s+more\s+)?(?:new\s+|blank\s+|empty\s+)?tab(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    ("open_in", re.compile(_TAB_LEAD2 + r"(?:open|go\s+to|pull\s+up|bring\s+up|load)\s+(?P<site>.+?)\s+in\s+(?:a\s+)?(?:new\s+|another\s+|separate\s+)?tab(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    ("next", re.compile(_TAB_LEAD2 + r"(?:(?:go|switch|move|jump|skip)\s+(?:to\s+)?(?:the\s+)?)?next\s+tab" + _END, re.I)),
+    ("previous", re.compile(_TAB_LEAD2 + r"(?:(?:go|switch|move|jump)\s+(?:to\s+)?(?:the\s+)?(?:previous|last|prior)\s+tab|previous\s+tab|go\s+back\s+(?:a|one)\s+tab)" + _END, re.I)),
+    ("reopen", re.compile(_TAB_LEAD2 + r"(?:re-?open|open|bring\s+back)\s+(?:the\s+)?(?:last\s+)?tab\s+(?:i|you)\s+(?:just\s+)?closed(?P<app>)" + _END, re.I)),
+    ("switch", re.compile(_TAB_LEAD2 + r"(?:switch|go|change|jump|flip|move)\s+(?:over\s+)?(?:back\s+)?to\s+(?:the\s+|my\s+)?(?P<tab>[\w'&.:\- ]{2,50}?)\s+tab(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    ("switch", re.compile(_TAB_LEAD2 + r"(?:show\s+me|bring\s+up|pull\s+up|open\s+up|find)\s+(?:the\s+|my\s+)?(?P<tab>[\w'&.:\- ]{2,50}?)\s+tab(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+]
 _TABS = [
     # "close the chrome tab", "close this google chrome tab", "close my current edge tab"
     ("app", re.compile(_LEAD + _TAB_LEAD + r"(?:the\s+|this\s+|that\s+|my\s+)?(?:current\s+|active\s+|open\s+)?(?P<app>" + _BROWSER + r")\s+tab" + _END, re.I)),
@@ -691,6 +705,32 @@ _NOT_A_TAB_NAME = re.compile(r"^(?:this|that|the|current|active|open|last|new|ot
 def _tab_request(t: str) -> ActRequest | None:
     from .tabs import browser_key
 
+    # speech recognition often hears "tab" as "tap"
+    if re.search(r"\btaps?\b", t, re.I) and re.search(r"\b(?:close|open|new|switch|next|previous|reopen|go|tabs?)\b", t, re.I):
+        t = re.sub(r"\btap(s?)\b", r"tab\1", t, flags=re.I)
+    for kind, pattern in _MORE_TABS:
+        m = pattern.match(t)
+        if not m:
+            continue
+        app = browser_key(m.groupdict().get("app") or "")
+        if kind == "app":
+            return ActRequest("close_tab", app=app, label="close the tab")
+        if kind == "all":
+            return ActRequest("close_browser", app=app, label="close all tabs")
+        if kind == "others":
+            return ActRequest("close_other_tabs", app=app, label="close the other tabs")
+        if kind == "new":
+            return ActRequest("new_tab", app=app, label="new tab")
+        if kind == "open_in":
+            return ActRequest("new_tab", app=app, text=m.group("site").strip(" \"'"), label=f"open {m.group('site').strip()} in a new tab")
+        if kind in ("next", "previous"):
+            return ActRequest(f"{kind}_tab", app=app, label=f"{kind} tab")
+        if kind == "reopen":
+            return ActRequest("reopen_tab", app=app, label="reopen the tab")
+        tab = re.sub(r"^(?:current|active|open)\s+", "", m.group("tab").strip(), flags=re.I)
+        if _NOT_A_TAB_NAME.match(tab) or re.fullmatch(r"(?:next|previous|last|new|first)", tab, re.I):
+            return None
+        return ActRequest("switch_tab", app=app, tab=tab, label=f"switch to the {tab} tab")
     for kind, pattern in _TABS:
         m = pattern.match(t)
         if not m:
@@ -715,10 +755,9 @@ def parse_act(text: str) -> ActRequest | None:
     t = (text or "").strip()
     if not t or len(t) > 200:
         return None
-    if _CLOSE.match(t) is None or re.search(r"\btab\b", t, re.I) is None:
-        tab = _tab_request(t)
-        if tab is not None:
-            return tab
+    tab = _tab_request(t)
+    if tab is not None:
+        return tab
     for pattern, keys, label in _SHORTCUTS:
         if pattern.match(t):
             return ActRequest("keys", keys=keys, label=label)

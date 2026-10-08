@@ -130,3 +130,54 @@ def close_browser(desktop, key: str = "browser", current: Window | None = None) 
     for w in windows:
         desktop.close(w)
     return len(windows)
+
+
+def _front_browser(desktop, key: str, current: Window | None) -> Window:
+    windows = browser_windows(desktop, key, current)
+    if not windows:
+        raise ScreenError(f"{BROWSER_NAMES.get(key, key.title())} isn't open.")
+    return windows[0]
+
+
+def new_tab(desktop, key: str = "browser", current: Window | None = None, address: str = "", settle: float = 0.35) -> Window:
+    """Ctrl+T in the browser; with an address, type it into the new tab and go there."""
+    window = _front_browser(desktop, key, current)
+    desktop.press([VK_CONTROL, VK_T], window=window)
+    if address:
+        time.sleep(settle)
+        desktop.type_text(address, window=window)
+        desktop.press([0x0D], window=window)
+    return window
+
+
+def step_tab(desktop, forward: bool = True, key: str = "browser", current: Window | None = None) -> Window:
+    window = _front_browser(desktop, key, current)
+    desktop.press([VK_CONTROL, VK_TAB] if forward else [VK_CONTROL, VK_SHIFT, VK_TAB], window=window)
+    return window
+
+
+def switch_to_tab(desktop, wanted: str, key: str = "browser", current: Window | None = None) -> str:
+    if not browser_windows(desktop, key, current):
+        raise ScreenError(f"{BROWSER_NAMES.get(key, key.title())} isn't open.")
+    window = find_tab(desktop, wanted, key, current)
+    if window is None:
+        raise ScreenError(f"I couldn't find a {wanted} tab in {BROWSER_NAMES.get(key, 'your browser')}.")
+    return tab_title(window.title)
+
+
+def close_other_tabs(desktop, key: str = "browser", current: Window | None = None, settle: float = 0.18) -> int:
+    """Close every tab except the one showing, in the front browser window."""
+    window = _front_browser(desktop, key, current)
+    desktop.bring_to_front(window)
+    keep = (desktop.window_info(window.hwnd) or window).title
+    closed = 0
+    desktop.press([VK_CONTROL, VK_TAB], window=window)
+    time.sleep(settle)
+    for _ in range(MAX_TABS):
+        info = desktop.window_info(window.hwnd)
+        if info is None or info.title == keep:
+            break  # back on the one we keep: everything else is gone
+        desktop.press([VK_CONTROL, VK_W], window=window)  # the browser then shows the next tab, which we close in turn
+        time.sleep(settle)
+        closed += 1
+    return closed

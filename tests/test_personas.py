@@ -241,7 +241,9 @@ def test_carries_on_after_a_restart(make, config, mock_ollama):
     assert [t["role"] for t in payload["restored"]] == ["user", "assistant"]
     assert assistant.llm.history_turns == 1
     assistant.boot_complete()
-    events.wait_for(lambda: assistant.tts.spoken, 10)
+    deadline = time.time() + 10  # the greeting is spoken sentence by sentence
+    while time.time() < deadline and "Welcome back" not in " ".join(assistant.tts.spoken):
+        time.sleep(0.05)
     assert "Welcome back" in " ".join(assistant.tts.spoken)
     ask(assistant, events, "explain the arc reactor")
     chats = [b for p, b in mock_ollama.requests if p == "/api/chat" and b.get("format") != "json"]

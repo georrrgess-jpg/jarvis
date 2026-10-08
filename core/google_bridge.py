@@ -248,6 +248,10 @@ class GoogleBridge:
         return {"kind": "doc", "title": data.get("title"), "url": data.get("url"),
                 "markdown": data.get("markdown") or data.get("text") or "", "truncated": bool(data.get("truncated"))}
 
+    def rename(self, kind: str, ref: str, title: str) -> dict:
+        """Rename a Doc / Slides / Sheet (by ID, link or name). Needs bridge version 5."""
+        return self.call("file_rename", kind=kind, file=ref, title=title)
+
     def create_deck(self, title: str, subtitle: str, slides: list[dict]) -> dict:
         return self.call("slides_create", title=title or "Untitled presentation", subtitle=subtitle, slides=slides)
 

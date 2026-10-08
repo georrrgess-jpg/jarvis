@@ -29,6 +29,11 @@ class Browser:
         elif keys == [0x11, 0x10, ord("T")]:
             self.tabs.insert(self.active + 1, self.closed.pop())
             self.active += 1
+        elif keys == [0x11, 0x10, 0x09]:
+            self.active = (self.active - 1) % len(self.tabs)
+        elif keys == [0x11, ord("T")]:
+            self.tabs.insert(self.active + 1, "New Tab")
+            self.active += 1
 
 
 class FakeDesktop:
@@ -60,6 +65,11 @@ class FakeDesktop:
 
     def close(self, window):
         self.closed_windows.append(window.hwnd)
+
+    def type_text(self, text, window=None):
+        target = {1: self.chrome, 2: self.edge}.get(window.hwnd if window else self.front)
+        if target and target.tabs[target.active] == "New Tab":
+            target.tabs[target.active] = text  # what was typed into the new tab's address bar
 
 
 @pytest.fixture
@@ -170,3 +180,73 @@ def test_close_requests_are_never_offered_open_tools():
 def test_not_app_closing(text):
     act = parse_act(text)
     assert act is None or act.action != "close_app"
+
+
+
+# ----------------------------------------------------------------------------- more tab commands
+@pytest.mark.parametrize("text, action, tab", [
+    ("close tab", "close_tab", ""), ("close tap", "close_tab", ""), ("close the tap", "close_tab", ""), ("close this tab", "close_tab", ""),
+    ("close the youtube tap", "close_tab", "youtube"), ("open a new tab", "new_tab", ""), ("open new tab", "new_tab", ""),
+    ("new tab", "new_tab", ""), ("switch to the youtube tab", "switch_tab", "youtube"), ("go to the gmail tab", "switch_tab", "gmail"),
+    ("next tab", "next_tab", ""), ("previous tab", "previous_tab", ""), ("close the other tabs", "close_other_tabs", ""),
+    ("open the last tab I closed", "reopen_tab", ""), ("close all tabs", "close_browser", ""),
+])
+def test_tab_phrasings(text, action, tab):
+    act = parse_act(text)
+    assert act is not None and (act.action, act.tab) == (action, tab)
+
+
+def test_open_a_site_in_a_new_tab_phrasing():
+    act = parse_act("open youtube in a new tab")
+    assert act.action == "new_tab" and act.text == "youtube"
+
+
+def test_close_tab_goes_to_the_browser_even_if_another_app_was_last(jarvis, desk):
+    jarvis.tracker.current = lambda: desk.other[0]  # Spotify was the last window used
+    assert say(jarvis, "close tab").startswith("Tab closed")
+    assert desk.chrome.closed == ["Inbox - Gmail"] and desk.closed_windows == [], "Spotify untouched"
+
+
+def test_close_tap_mishearing(jarvis, desk):
+    say(jarvis, "close the youtube tap")
+    assert desk.chrome.closed == ["Never Gonna Give You Up - YouTube"]
+
+
+def test_new_tab_and_site_in_new_tab(jarvis, desk):
+    assert say(jarvis, "open a new tab") == "New tab, sir."
+    assert "New Tab" in desk.chrome.tabs
+    say(jarvis, "open youtube in a new tab")
+    assert "https://www.youtube.com" in desk.chrome.tabs[desk.chrome.active]
+
+
+def test_switch_next_previous(jarvis, desk):
+    assert say(jarvis, "switch to the youtube tab").startswith("Here's Never Gonna Give You Up - YouTube")
+    assert desk.chrome.active == 1
+    say(jarvis, "next tab")
+    assert desk.chrome.active == 2
+    say(jarvis, "previous tab")
+    assert desk.chrome.active == 1
+
+
+def test_close_the_other_tabs(jarvis, desk):
+    reply = say(jarvis, "close the other tabs")
+    assert desk.chrome.tabs == ["Inbox - Gmail"] and reply.startswith("Closed 2 other tabs")
+
+
+def test_new_tab_with_no_browser_open_starts_one(config):
+    from core.assistant import Assistant
+    from tests.test_assistant import Events, FakeTTS
+
+    class Empty(FakeDesktop):
+        def windows(self, include_own=False):
+            return []
+
+    desk = Empty()
+    assistant = Assistant(config, Events(), tts=FakeTTS(), desktop=desk)
+    opened = []
+    assistant.tools.open_website = lambda url: opened.append(url) or {}
+    try:
+        assert say(assistant, "open a new tab").startswith("Opening")
+        assert opened == ["google.com"]
+    finally:
+        assistant.shutdown()

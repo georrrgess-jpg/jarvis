@@ -746,6 +746,11 @@ def run_selftest(report_path: str | None) -> int:
         from core.vision import parse_act
         from core.weather import parse_weather
 
+        from core.docops import parse_doc_command
+
+        pizza = parse_doc_command("rename the Google Doc to Pizza recipe and then type out a pizza recipe")
+        if not (pizza and [s.action for s in pizza.steps] == ["rename", "write"] and parse_act("close tap").action == "close_tab"):
+            raise RuntimeError("document steps / tab understanding misbehaved")
         tab = parse_act("close the google chrome tab")
         if not (tab and tab.action == "close_tab" and tab.app == "chrome" and parse_weather("what's the temperature")
                 and parse_new_file("create a new document") and parse_monitor_command("move this window to my other monitor")):

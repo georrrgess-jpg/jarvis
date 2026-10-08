@@ -44,6 +44,15 @@ def main() -> int:
         check("rain in Tokyo tomorrow", "Tokyo" in tomorrow and "tomorrow" in tomorrow, tomorrow)
         here = weather.answer(WeatherRequest("now"), "sir")
         check("weather where this computer is (IP location)", re.search(r"-?\d+ degrees?", here) is not None, here)
+        for spoken, town in (("Bothell Washington", "Bothell"), ("Paris Texas", "Paris"), ("Ashford Kent", "Ashford"),
+                             ("Little Snoring", "Little Snoring"), ("Tralee", "Tralee"), ("90210", "Beverly Hills")):
+            place = weather.geocode(spoken)
+            check(f"found the town: {spoken}", town.lower() in place.name.lower(),
+                  {"name": place.name, "lat": round(place.latitude, 2), "lon": round(place.longitude, 2), "country": place.country})
+        texas = weather.geocode("Paris Texas")
+        check("Paris Texas is in the USA, not France", texas.longitude < -90, texas.longitude)
+        town = weather.answer(parse_weather("what's the weather in Bothell Washington"), "sir")
+        check("weather for a small town", "Bothell" in town and re.search(r"-?\d+ degrees?", town) is not None, town)
         weekend = weather.answer(parse_weather("what's the forecast for this weekend in Paris"), "sir")
         check("weekend forecast", "Saturday" in weekend and "Sunday" in weekend, weekend)
     except Exception as exc:  # noqa: BLE001

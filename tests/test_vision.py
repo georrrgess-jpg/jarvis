@@ -130,7 +130,7 @@ def test_not_watch_requests(text):
     ("right click the file", "right", "the file", None), ("press enter", "keys", "", [13]), ("hit control c", "keys", "", [17, 67]),
     ("press the submit button", "click", "the submit button", None), ("type hello world", "type", "", "hello world"),
     ("type my name into the search box", "type", "search box", "my name"), ("scroll down", "scroll", "", -5),
-    ("scroll to the top", "keys", "", [17, 36]), ("close this window", "close", "", None), ("close that tab", "keys", "", [17, 87]),
+    ("scroll to the top", "keys", "", [17, 36]), ("close this window", "close", "", None), ("close that tab", "close_tab", "", None),
     ("go back", "keys", "", [18, 37]), ("refresh the page", "keys", "", [116]), ("select the second option", "click", "the second option", None),
 ])
 def test_act_requests(text, action, target, extra):

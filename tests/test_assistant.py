@@ -272,3 +272,42 @@ def test_recogniser_crash_is_a_friendly_message(make):
     events.wait_for(lambda: events.of("system_message"), 20)
     assert "Internal error" not in " ".join(p["text"] for p in events.of("notice"))
     assert events.states()[-1] == "IDLE"
+
+
+def test_stop_listening_by_voice_closes_the_microphone(make):
+    assistant, events = make(auto_listen=True)
+    assistant.stt._recognize_google = lambda capture, on_status=None: "stop listening"
+    assistant.start_listening()
+    events.wait_for(lambda: events.of("listening"), 20)
+    events.wait_for(lambda: events.states()[-1:] == ["IDLE"] and assistant._turn is None, 20)
+    time.sleep(0.8)
+    assert assistant._paused and events.of("listening")[-1]["paused"] is True
+    assert events.states().count("LISTENING") == 1, "conversation mode must not reopen the microphone"
+    assert any("stopped listening" in s for s in assistant.tts.spoken)
+    status = assistant.wake_status()
+    assert status["paused"] and not status["active"] and "stop listening" in status["reason"]
+    assistant._on_wake(0.99)  # even a stray wake call does nothing while paused
+    time.sleep(0.3)
+    assert events.states().count("LISTENING") == 1
+
+
+def test_start_listening_by_text_and_by_the_mic_button(make):
+    assistant, events = make()
+    from tests.test_personas import ask
+
+    assert ask(assistant, events, "stop listening, Jarvis").startswith("Okay, sir, I've stopped listening")
+    assert assistant._paused
+    assert ask(assistant, events, "start listening").startswith("I'm listening again")
+    assert not assistant._paused and events.of("listening")[-1]["paused"] is False
+    assert ask(assistant, events, "please stop listening for now").startswith("Okay")
+    assistant.start_listening()  # pressing the mic button
+    assert not assistant._paused
+    events.wait_for(lambda: events.states()[-1:] == ["IDLE"] and assistant._turn is None, 20)
+
+
+def test_stop_alone_still_just_stops(make):
+    assistant, events = make()
+    assistant.stt._recognize_google = lambda capture, on_status=None: "stop"
+    assistant.start_listening()
+    events.wait_for(lambda: any(p.get("text") == "Standing by." for p in events.of("notice")), 20)
+    assert not assistant._paused

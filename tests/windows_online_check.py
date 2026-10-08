@@ -68,9 +68,12 @@ def main() -> int:
     run("weather where this computer is (IP location)", lambda: weather.answer(WeatherRequest("now"), "sir"),
         lambda r: re.search(r"-?\d+ degrees?", r) is not None)
     for spoken, town in (("Bothell Washington", "Bothell"), ("Paris Texas", "Paris"), ("Ashford Kent", "Ashford"),
-                         ("Little Snoring", "Little Snoring"), ("Tralee", "Tralee"), ("90210", "Beverly Hills")):
+                         ("Little Snoring", "Little Snoring"), ("Tralee", "Tralee")):
         run(f"found the town: {spoken}", lambda spoken=spoken: weather.geocode(spoken), lambda p, town=town: town.lower() in p.name.lower(),
             lambda p: {"name": p.name, "lat": round(p.latitude, 2), "lon": round(p.longitude, 2), "country": p.country})
+    run("found the postcode: 90210 (Beverly Hills, whatever the area is called)", lambda: weather.geocode("90210"),
+        lambda p: 33.9 < p.latitude < 34.2 and -118.6 < p.longitude < -118.2,
+        lambda p: {"name": p.name, "lat": round(p.latitude, 2), "lon": round(p.longitude, 2)})
     run("Paris Texas is in the USA, not France", lambda: weather.geocode("Paris Texas"), lambda p: p.longitude < -90, lambda p: p.longitude)
     run("weather for a small town", lambda: weather.answer(parse_weather("what's the weather in Bothell Washington"), "sir"),
         lambda r: "Bothell" in r and re.search(r"-?\d+ degrees?", r) is not None)

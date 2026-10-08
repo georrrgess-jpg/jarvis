@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import random
 import queue
 import re
 import threading
@@ -22,18 +23,21 @@ from .audio import VIS_FPS, AudioEngine, spectrum_frames
 from .compose import (EditRequest, WriteRequest, clean_document, document_prompt, extra_slide_prompt, parse_deck,
                       parse_edit_request, parse_write_request, revise_prompt, section_prompt, slides_prompt)
 from .config import Config, app_data_dir
+from .gdrive import GoogleRequest, parse_google_request
 from .google_bridge import BridgeError
 from .mail import (Draft, EmailRequest, email_prompt, first_name, gmail_compose_url, is_cancellation, is_confirmation,
                    parse_email, parse_email_request)
 from .llm import LLMConnectionError, LLMEngine, LLMError, LLMModelError, OllamaStatus
 from .sfx import SoundFX
 from .state import State, StateMachine
-from .stt import ENGINE_LABELS, SpeechInput, STTError
+from .stt import ENGINE_LABELS, Capture, SpeechInput, STTError
 from .system import SystemMonitor
 from .tools import Toolbox, ToolError, describe_call
-from . import wakeword
+from . import osctl, wakeword
+from .quick import Quick, describe_duration, parse_quick, pick
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
+from .patience import looks_unfinished
 from .tts import CODE_MARK, EdgeTTS, SentenceSplitter, TTSError, clean_for_speech
 
 log = logging.getLogger("jarvis.assistant")
@@ -65,13 +69,41 @@ _CLOCK = re.compile(
 _TOOL_CUES = re.compile(
     r"\b(open|launch|start|run|play|close|file|files|folder|document|doc|docs|docx|pdf|read|find|desktop|downloads|"
     r"spreadsheet|sheet|sheets|slides?|presentation|deck|app|game|search|look up|google|internet|online|web|website|"
-    r"news|weather|latest|current|price|who|what|when|where|which|how much|how many|define|meaning|summari[sz]e|"
+    r"news|weather|latest|current|price|summari[sz]e|"
     r"write|create|make|add|edit|update|replace|list|delete|remove|move|reorder|rearrange|rename|table|row|rows|column|cell)\b", re.IGNORECASE)
+_CHAIN_SPLIT = re.compile(r"\s*(?:,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+)(?=(?:open|launch|start|play|fire up|boot up)\b)", re.IGNORECASE)
 _OPEN_COMMAND = re.compile(
     r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you )*(?:open|launch|start|run|load|pull up|bring up|show me)"
     r"\s+(?:up\s+)?(?:the\s+|my\s+)?(?P<target>.+?)(?:\s+(?:please|for me|now))?[\s.!?]*$",
     re.IGNORECASE,
 )
+
+
+def _quick_small_talk():
+    from .quick import _SMALL_TALK
+
+    return _SMALL_TALK
+
+
+def _seconds_until(clock: str) -> int | None:
+    """'6 pm' / '6:30 pm' -> seconds until the next time the clock shows that."""
+    m = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\s*$", clock or "", re.I)
+    if not m:
+        return None
+    hour, minute = int(m.group(1)) % 12, int(m.group(2) or 0)
+    if m.group(3).lower() == "p":
+        hour += 12
+    now = datetime.now()
+    due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if due <= now:
+        due = due.replace(day=now.day) + __import__("datetime").timedelta(days=1)
+    return int((due - now).total_seconds())
+
+
+def _view_event(data: dict, file_id: str | None) -> dict:
+    """Payload for the reader: ``kind`` is taken by emit(), so the file type travels as ``doc_kind``."""
+    out = {k: v for k, v in data.items() if k != "kind"}
+    return {**out, "doc_kind": data.get("kind"), "id": file_id}
 
 
 class Turn:
@@ -241,6 +273,10 @@ class Assistant:
         self.wake: wakeword.WakeListener | None = None
         self._wake_error: str | None = None
         self._last_doc: dict | None = None  # the Google Doc / deck JARVIS made or edited last ("add a section to it")
+        self._timers: dict[int, dict] = {}
+        self._timer_ids = itertools.count(1)
+        self._prewarm_stop = threading.Event()
+        self._open_hints = 0  # how often we've explained the "sign in / show it here" fallback
         self._drafts: dict[str, Draft] = {}  # emails shown on screen, by id
         self._awaiting: Draft | None = None  # the draft JARVIS just asked "shall I send it?" about
 
@@ -359,6 +395,8 @@ class Assistant:
         if status and status.online and status.model:
             text = f"Good {part}, {self.title}. All systems are online. How may I help?"
             self._spawn(self.llm.warmup, name="warmup")
+            if self.config.get("voice_enabled", True):
+                self._spawn(self._prewarm_voice, name="voice-prewarm")
         elif status and status.online:
             text = f"Good {part}, {self.title}. Ollama is running, but no language model is installed yet. I've put the details on screen."
         else:
@@ -367,6 +405,9 @@ class Assistant:
         self.speak(text, delay=0.45)
 
     def shutdown(self) -> None:
+        self._prewarm_stop.set()
+        for entry in list(self._timers.values()):
+            entry["timer"].cancel()
         if self.wake is not None:
             self.wake.stop()
         with self._turn_lock:
@@ -508,6 +549,7 @@ class Assistant:
                 turn.hold,
                 on_frame=lambda bands, level: self._emit_turn(turn, "mic_frame", bands=bands, level=level),
                 on_phase=lambda phase: self._emit_turn(turn, "listen_phase", phase=phase),
+                probe=self._probe if float(self.config.get("patience", 3.0)) > 0 else None,
             )
         except STTError as exc:
             self._fail_turn(turn, str(exc))
@@ -523,7 +565,7 @@ class Assistant:
         self._set_state(State.THINKING, turn, "transcribing")
         self._emit_turn(turn, "listen_phase", phase="transcribing")
         try:
-            text = self.stt.transcribe(
+            text = capture.text if capture.text is not None else self.stt.transcribe(
                 capture, on_status=lambda msg: self._emit_turn(turn, "notice", level="info", text=msg)
             )
         except STTError as exc:
@@ -542,6 +584,11 @@ class Assistant:
             self._finish_turn(turn)
             return
         self._converse(turn, text, "voice")
+
+    def _probe(self, pcm: bytes, rate: int) -> tuple[str, bool]:
+        """Recognise the speech so far, in the background, to decide whether the speaker has finished."""
+        text = self.stt.transcribe(Capture(pcm, rate))
+        return text, not looks_unfinished(_WAKE_PREFIX.sub("", text, count=1) or text)
 
     def _fail_turn(self, turn: Turn, message: str) -> None:
         if self._is_current(turn):
@@ -566,6 +613,208 @@ class Assistant:
             return f"It's {hour}:{now.minute:02d} {'AM' if now.hour < 12 else 'PM'}, {self.title}."
         return f"Today is {now.strftime('%A')}, {now.day} {now.strftime('%B %Y')}, {self.title}."
 
+    def _direct_chain(self, turn: Turn, text: str) -> str | None:
+        """'open Spotify and open Notepad' / 'launch chrome, then play GTA 5': run each part in order."""
+        parts = [p.strip() for p in _CHAIN_SPLIT.split(text.strip()) if p.strip()]
+        if len(parts) < 2 or len(parts) > 5:
+            return None
+        replies = []
+        for part in parts:
+            if turn.cancel.is_set():
+                break
+            reply = self._direct_command(turn, part)
+            if reply is None:
+                replies.append(f"I couldn't work out '{part}', {self.title}.")
+                continue
+            replies.append(reply)
+        suffix = f", {self.title}."
+        return " ".join(r[: -len(suffix)] + "." if i < len(replies) - 1 and r.endswith(suffix) else r for i, r in enumerate(replies))
+
+    # ================================================================== instant skills (no model)
+    def _quick(self, turn: Turn, text: str) -> str | None:
+        q = parse_quick(text)
+        if q is None:
+            return None
+        title = self.title
+        handler = getattr(self, f"_quick_{q.kind}", None)
+        return handler(turn, q, title) if handler else None
+
+    def _quick_greeting(self, turn: Turn, q: Quick, title: str) -> str:
+        hour = datetime.now().hour
+        part = "morning" if 5 <= hour < 12 else "afternoon" if 12 <= hour < 18 else "evening"
+        return pick([f"Good {part}, {{title}}. How may I help?", "At your service, {title}.", "Hello, {title}. What can I do for you?"], title)
+
+    def _quick_talk(self, turn: Turn, q: Quick, title: str) -> str:
+        return pick(q.args["replies"], title)
+
+    def _quick_math(self, turn: Turn, q: Quick, title: str) -> str:
+        answer = q.args["answer"]
+        return pick([f"That comes to {answer}, {{title}}.", f"The answer is {answer}, {{title}}.", f"{answer}, {{title}}."], title)
+
+    def _quick_coin(self, turn: Turn, q: Quick, title: str) -> str:
+        return f"{pick(['Heads', 'Tails'], title)}, {title}."
+
+    def _quick_dice(self, turn: Turn, q: Quick, title: str) -> str:
+        sides = max(2, min(1000, int(q.args.get("sides", 6))))
+        return f"You rolled a {random.randint(1, sides)}, {title}."
+
+    def _quick_random(self, turn: Turn, q: Quick, title: str) -> str:
+        a, b = sorted((int(q.args["a"]), int(q.args["b"])))
+        return f"{random.randint(a, b)}, {title}."
+
+    def _quick_status(self, turn: Turn, q: Quick, title: str) -> str:
+        snap = self.monitor.snapshot()
+        what = q.args["what"]
+        battery = snap.get("battery")
+        if what == "battery":
+            if not battery:
+                return f"This computer doesn't appear to have a battery, {title}."
+            state = "and charging" if battery["plugged"] else "and running on battery"
+            return f"The battery is at {battery['percent']} percent {state}, {title}."
+        if what == "cpu":
+            return f"The processor is at {round(snap['cpu'])} percent load, {title}."
+        if what == "ram":
+            return f"Memory is {round(snap['ram'])} percent in use: {snap['ram_used_gb']} of {snap['ram_total_gb']} gigabytes, {title}."
+        if what == "disk":
+            return (f"The system drive is {round(snap['disk'])} percent full, {title}." if snap.get("disk") is not None
+                    else f"I couldn't read the disk usage, {title}.")
+        if what == "uptime":
+            return f"This computer has been running for {describe_duration(max(60, snap['uptime_s']))}, {title}."
+        parts = [f"processor at {round(snap['cpu'])} percent", f"memory at {round(snap['ram'])} percent"]
+        if snap.get("disk") is not None:
+            parts.append(f"the system drive {round(snap['disk'])} percent full")
+        if battery:
+            parts.append(f"battery at {battery['percent']} percent")
+        return f"All systems nominal, {title}: " + ", ".join(parts) + "."
+
+    def _quick_volume(self, turn: Turn, q: Quick, title: str) -> str:
+        try:
+            if q.args.get("mute"):
+                osctl.toggle_mute()
+                return f"Toggling the sound, {title}."
+            if "set" in q.args:
+                osctl.set_volume(q.args["set"])
+                return f"Volume set to {q.args['set']} percent, {title}."
+            delta = int(q.args["delta"])
+            osctl.change_volume(delta)
+            return f"Volume {'up' if delta > 0 else 'down'}, {title}."
+        except osctl.OsControlError as exc:
+            return f"I'm afraid {exc}"
+
+    def _quick_screenshot(self, turn: Turn, q: Quick, title: str) -> str:
+        try:
+            path = osctl.take_screenshot()
+        except osctl.OsControlError as exc:
+            return f"I'm afraid {exc}"
+        self.emit("notice", level="info", text=f"Screenshot saved: {path}")
+        return f"Done, {title}. The screenshot is in your Screenshots folder."
+
+    def _quick_desktop(self, turn: Turn, q: Quick, title: str) -> str:
+        try:
+            osctl.show_desktop()
+        except osctl.OsControlError as exc:
+            return f"I'm afraid {exc}"
+        return f"Desktop cleared, {title}."
+
+    def _quick_lock(self, turn: Turn, q: Quick, title: str) -> str:
+        try:
+            osctl.lock_screen()
+        except osctl.OsControlError as exc:
+            return f"I'm afraid {exc}"
+        return f"Locking the computer, {title}."
+
+    # -- timers and reminders
+    def _quick_timer(self, turn: Turn, q: Quick, title: str) -> str:
+        seconds = q.args.get("seconds")
+        clock = q.args.get("clock")
+        if clock and not seconds:
+            seconds = _seconds_until(clock)
+        if not seconds or seconds < 1:
+            return f"I didn't catch how long, {title}. Try 'set a timer for five minutes'."
+        if seconds > 86400:
+            return f"I can only keep timers up to 24 hours, {title}."
+        label = q.args.get("label") or ""
+        tid = next(self._timer_ids)
+        timer = threading.Timer(seconds, self._timer_fired, args=(tid,))
+        timer.daemon = True
+        self._timers[tid] = {"timer": timer, "due": time.time() + seconds, "label": label, "seconds": seconds}
+        timer.start()
+        self._emit_timers()
+        span = describe_duration(seconds)
+        if label:
+            return f"Very well, {title}. I'll remind you to {label} in {span}."
+        return f"Timer set for {span}, {title}."
+
+    def _quick_timer_cancel(self, turn: Turn, q: Quick, title: str) -> str:
+        count = len(self._timers)
+        for entry in self._timers.values():
+            entry["timer"].cancel()
+        self._timers.clear()
+        self._emit_timers()
+        if not count:
+            return f"You have no timers running, {title}."
+        return f"Cancelled {'your timer' if count == 1 else f'all {count} timers'}, {title}."
+
+    def _quick_timer_status(self, turn: Turn, q: Quick, title: str) -> str:
+        if not self._timers:
+            return f"You have no timers running, {title}."
+        now = time.time()
+        parts = []
+        for entry in sorted(self._timers.values(), key=lambda e: e["due"]):
+            left = describe_duration(max(1, entry["due"] - now))
+            parts.append(f"{left} left" + (f" to {entry['label']}" if entry["label"] else ""))
+        return (f"You have {len(parts)} timer{'s' if len(parts) != 1 else ''}, {title}: " + "; ".join(parts) + ".") if len(parts) > 1 \
+            else f"{parts[0].capitalize()}, {title}."
+
+    def _emit_timers(self) -> None:
+        now = time.time()
+        self.emit("timers", timers=[{"id": tid, "label": e["label"], "left": max(0, int(e["due"] - now)), "total": e["seconds"]}
+                                    for tid, e in sorted(self._timers.items(), key=lambda kv: kv[1]["due"])])
+
+    def _timer_fired(self, tid: int) -> None:
+        entry = self._timers.pop(tid, None)
+        if entry is None:
+            return
+        self._emit_timers()
+        label, title = entry["label"], self.title
+        message = f"A reminder, {title}: {label}." if label else f"Your {describe_duration(entry['seconds'])} timer is up, {title}."
+        self.emit("notice", level="info", text=("Reminder: " + label) if label else "Timer finished.")
+        self.sfx.play("notify")
+        deadline = time.monotonic() + 90
+        while self.state.state != State.IDLE and time.monotonic() < deadline:  # never talk over a conversation
+            time.sleep(0.5)
+        if not self._prewarm_stop.is_set():
+            self.speak(message, delay=0.4)
+
+    def _prewarm_phrases(self) -> list[str]:
+        title = self.title
+        phrases = [f"Good morning, {title}. How may I help?", f"Good afternoon, {title}. How may I help?", f"Good evening, {title}. How may I help?",
+                   f"At your service, {title}.", f"Hello, {title}. What can I do for you?", f"Done, {title}.", f"Very well, {title}.",
+                   f"Standing by, {title}.", f"Volume up, {title}.", f"Volume down, {title}.", f"Toggling the sound, {title}.",
+                   f"Desktop cleared, {title}.", f"Heads, {title}.", f"Tails, {title}.", f"Timer set for 5 minutes, {title}.",
+                   f"Timer set for 10 minutes, {title}.", f"You have no timers running, {title}.", f"Shall I send it?",
+                   f"I couldn't find that, {title}.", f"Opening Spotify, {title}.", f"Opening Chrome, {title}.", f"Opening Notepad, {title}."]
+        for _pattern, replies in _quick_small_talk():
+            phrases += [r.format(title=title) for r in replies if len(r) < 160]
+        return phrases
+
+    def _prewarm_voice(self) -> None:
+        """Synthesise the phrases JARVIS says most so they play instantly (the voice cache does the rest)."""
+        time.sleep(12)  # let the greeting and the first request go first
+        for phrase in self._prewarm_phrases():
+            if self._prewarm_stop.is_set() or not self.config.get("voice_enabled", True):
+                return
+            while self._turn is not None and not self._prewarm_stop.is_set():
+                time.sleep(1.0)  # never compete with a live request
+            try:
+                self.tts.synthesize(phrase)
+            except TTSError:
+                return  # offline: try again next launch
+            except Exception:
+                log.debug("prewarm failed", exc_info=True)
+                return
+            time.sleep(0.15)
+
     def _direct_command(self, turn: Turn, text: str) -> str | None:
         """Handle plain "open X" / "play X" requests without the model: instant, and reliable even with small models."""
         play = _PLAY_COMMAND.match(text.strip())
@@ -577,6 +826,12 @@ class Assistant:
                 return f"Launching {result['name']}. Enjoy, {self.title}."
             except ToolError:
                 return None  # "play some jazz" etc. goes to the model
+        google = parse_google_request(text, have_last=self._last_doc is not None) if self.tools.web_enabled else None
+        ready = self.tools.google.configured
+        if google and (google.action != "open" or google.google or not google.name or google.recent):
+            reply = self._google_request(turn, google, ready)  # "open the doc", "show me my budget sheet"...
+            if reply:
+                return reply
         match = _OPEN_COMMAND.match(text.strip())
         if not match:
             return None
@@ -590,6 +845,10 @@ class Assistant:
                 return f"Opening {result['name']}, {self.title}."
             except ToolError:
                 pass
+        if google and google.name and not site:  # no such file on this PC: maybe it's in Google Drive
+            reply = self._google_request(turn, google, ready)
+            if reply:
+                return reply
         if site:
             self.tools.open_website(site)
             self._tool_used(turn, "open_website", {"url": site})
@@ -626,7 +885,7 @@ class Assistant:
                 return
 
         try:
-            direct = self._direct_command(turn, text)
+            direct = self._direct_chain(turn, text) or self._direct_command(turn, text)
         except Exception:
             log.exception("Direct command failed")
             direct = None
@@ -636,6 +895,14 @@ class Assistant:
         clock = self._clock_answer(text)
         if clock:
             self._deliver(turn, [clock])
+            return
+        try:
+            quick = self._quick(turn, text)  # small talk, sums, volume, timers...: no language model needed
+        except Exception:
+            log.exception("Quick skill failed")
+            quick = None
+        if quick:
+            self._deliver(turn, [quick])
             return
 
         if not (self.llm.online and self.llm.model):
@@ -789,12 +1056,89 @@ class Assistant:
             return
         url = result.get("url") or ""
         self._last_doc = {"kind": kind, "id": result.get("id") or "", "title": result.get("title") or title, "url": url}
-        self._emit_turn(turn, "document", doc_kind=kind, title=result.get("title") or title, url=url)
+        self._emit_turn(turn, "document", doc_kind=kind, id=result.get("id"), title=result.get("title") or title, url=url)
         if url:
             self.tools.open_link(url)
         self.llm.remember(text, f'I wrote {summary} in the Google {"Slides presentation" if kind == "slides" else "Doc"} '
                                 f'"{result.get("title") or title}" ({url}).')
         yield f"Done. I've written {summary} and opened it for you."
+
+    # ================================================================== existing Google files
+    _KIND_NAMES = {"doc": "Google Doc", "slides": "Google Slides presentation", "sheet": "Google Sheet"}
+
+    def _google_request(self, turn: Turn, req: GoogleRequest, ready: bool) -> str | None:
+        """Open, show or list the user's Google files. Returns what to say, or None to let other handlers try."""
+        google = self.tools.google
+        if not ready:
+            if req.action == "open" and (req.google or not req.name):
+                site = {"doc": "google docs", "slides": "google slides", "sheet": "google sheets"}.get(req.kind or "doc")
+                self.tools.open_website(self.tools.website_for(site) or "")
+                self._tool_used(turn, "open_website", {"url": site})
+                return (f"Opening {site.title()}, {self.title}. Link Google in Settings and I can open your files by name "
+                        "and show them right here.")
+            return None
+        try:
+            if req.action == "list":
+                self._tool_used(turn, "google_doc", {"action": "list"})
+                files = google.recent_files(6)
+                if not files:
+                    return f"I couldn't find any Google files in your Drive, {self.title}."
+                self._emit_turn(turn, "file_list", files=files)
+                return f"Here are your {len(files)} most recent files, {self.title}."
+            last = self._last_doc
+            file = None
+            if req.recent and not req.name and last and req.kind in (None, last["kind"]):
+                file = dict(last)
+            else:
+                kind = req.kind or (last["kind"] if last else "doc")
+                label = f"Looking for {req.name}" if req.name else "Finding your latest " + kind
+                self._emit_turn(turn, "tool_activity", tool="google_doc", label=label)
+                file = google.find_file(kind, req.name)
+                if file is None and req.name:  # "doc" said, but it's a deck (or the other way round)
+                    file = next((f for k in ("doc", "slides", "sheet") if k != kind
+                                 for f in [google.find_file(k, req.name)] if f), None)
+            if file is None:
+                what = {"doc": "document", "slides": "presentation", "sheet": "spreadsheet"}.get(req.kind or "doc")
+                return (f"I couldn't find a Google {what} called {req.name}, {self.title}." if req.name
+                        else f"You don't seem to have any Google {what}s yet, {self.title}.")
+            return self._show_file(turn, file, req)
+        except BridgeError as exc:
+            self._emit_turn(turn, "system_message", level="error", text=f"Google: {exc}")
+            return f"I'm afraid I couldn't reach your Google files, {self.title}: {exc}."
+
+    def _show_file(self, turn: Turn, file: dict, req: GoogleRequest) -> str:
+        title = file.get("title") or "that file"
+        self._last_doc = {"kind": file["kind"], "id": file.get("id") or "", "title": title, "url": file.get("url") or ""}
+        if req.action == "view":
+            data = self.tools.google.view(file["kind"], file.get("id") or title)
+            self._emit_turn(turn, "document_view", **_view_event(data, file.get("id")))
+            if req.aloud and data.get("markdown"):
+                plain = re.sub(r"^#+\s*|^[-*]\s+|\*\*", "", data["markdown"], flags=re.M)
+                return f"Here is {title}. " + plain[:1400].strip()
+            return f"Here is {title}, {self.title}."
+        self._emit_turn(turn, "document", doc_kind=file["kind"], id=file.get("id"), title=title, url=file.get("url") or "")
+        self.tools.open_link(file.get("url") or "")
+        hint = ""
+        if self.config.get("link_browser", "default") == "default" and self._open_hints < 2:
+            self._open_hints += 1
+            hint = " If your browser asks you to sign in, say 'show it here' and I'll display it myself."
+        return f"Opening {title}.{hint}"
+
+    def view_google(self, kind: str, ref: str) -> dict:
+        """The 'VIEW' button on a document card: show the file in JARVIS's own reader (no browser, no sign-in)."""
+        def run() -> None:
+            try:
+                data = self.tools.google.view(kind, ref)
+                self.emit("document_view", **_view_event(data, ref if len(ref) > 20 else None))
+            except BridgeError as exc:
+                self.emit("notice", level="error", text=f"Google: {exc}")
+
+        self._spawn(run, name="view-google")
+        return {"ok": True}
+
+    def open_google_link(self, url: str) -> bool:
+        """Open a Google link from the UI with the chosen browser, signed in as the linked account."""
+        return self.tools.open_link(url)
 
     # ================================================================== email
     def _find_document(self, name: str) -> dict | None:
@@ -969,7 +1313,7 @@ class Assistant:
         url = result.get("url") or target.get("url") or ""
         self._last_doc = {"kind": target["kind"], "id": result.get("id") or target["id"],
                           "title": result.get("title") or target["title"], "url": url}
-        self._emit_turn(turn, "document", doc_kind=target["kind"], title=self._last_doc["title"], url=url)
+        self._emit_turn(turn, "document", doc_kind=target["kind"], id=self._last_doc["id"], title=self._last_doc["title"], url=url)
         self.llm.remember(text, done)
         yield f"Done. {done}"
 

@@ -29,15 +29,28 @@ class Paragraph {
     return { setBold: mark('bold'), setItalic: mark('italic') };
   }
   setHeading(h) { this.heading = h; return this; }
+  getType() { return this.table ? 'TABLE' : this.list ? 'LIST_ITEM' : 'PARAGRAPH'; }
+  asParagraph() { return this; }
+  asListItem() { return this; }
+  getHeading() { return this.heading; }
+  getGlyphType() { return this.glyph; }
+  getText() { return this.text; }
+  asTable() {
+    const rows = this.table;
+    return { getNumRows: () => rows.length, getRow: (r) => ({ getNumCells: () => rows[r].length, getCell: (c) => ({ getText: () => rows[r][c] }) }) };
+  }
   setGlyphType(g) { this.glyph = g; return this; }
 }
 class Body {
   constructor() { this.paragraphs = [new Paragraph('')]; this.tables = []; }
-  getParagraphs() { return this.paragraphs.filter((p) => !p.list); }
+  getParagraphs() { return this.paragraphs.filter((p) => !p.list && !p.table); }
+  getNumChildren() { return this.paragraphs.length; }
+  getChild(i) { return this.paragraphs[i]; }
   clear() { this.paragraphs = [new Paragraph('')]; this.tables = []; return this; }
   appendTable(cells) {
     if (!cells.every((r) => r.length === cells[0].length)) throw new Error('ragged table');
-    this.tables.push(cells); this.paragraphs.push(new Paragraph(cells.map((r) => r.join('\t')).join('\n'))); return {};
+    this.tables.push(cells);
+    const p = new Paragraph(cells.map((r) => r.join('\t')).join('\n')); p.table = cells; this.paragraphs.push(p); return {};
   }
   appendParagraph(t) { const p = new Paragraph(t); this.paragraphs.push(p); return p; }
   appendListItem(t) { const p = new Paragraph(t, true); this.paragraphs.push(p); return p; }
@@ -122,7 +135,8 @@ const byId = (id, cls) => { const f = store.files.find((x) => x.id === id && x i
 const sandbox = {
   DocumentApp: {
     create: (n) => new Doc(n), openById: (id) => byId(id, Doc),
-    ParagraphHeading: { HEADING1: 'HEADING1', HEADING2: 'HEADING2', HEADING3: 'HEADING3', NORMAL: 'NORMAL' }, GlyphType: { BULLET: 'BULLET', NUMBER: 'NUMBER' },
+    ElementType: { PARAGRAPH: 'PARAGRAPH', LIST_ITEM: 'LIST_ITEM', TABLE: 'TABLE' },
+    ParagraphHeading: { HEADING1: 'HEADING1', HEADING2: 'HEADING2', HEADING3: 'HEADING3', NORMAL: 'NORMAL', TITLE: 'TITLE', SUBTITLE: 'SUBTITLE' }, GlyphType: { BULLET: 'BULLET', NUMBER: 'NUMBER' },
   },
   SlidesApp: {
     create: (n) => new Deck(n), openById: (id) => byId(id, Deck),
@@ -148,9 +162,10 @@ const sandbox = {
     },
     searchFiles(q) {
       const mime = /mimeType = '([^']+)'/.exec(q)[1];
-      const title = /title contains '((?:[^'\\]|\\.)*)'/.exec(q);
-      const needle = title ? title[1].replace(/\\(.)/g, '$1').toLowerCase() : '';
-      const hits = store.files.filter((f) => f.mime === mime && f.name.toLowerCase().includes(needle));
+      const needles = [...q.matchAll(/title contains '((?:[^'\\]|\\.)*)'/g)].map((m) => m[1].replace(/\\(.)/g, '$1').toLowerCase());
+      const anyOf = / or title contains /.test(q);
+      const hits = store.files.filter((f) => f.mime === mime && (anyOf ? needles.some((n) => f.name.toLowerCase().includes(n))
+        : needles.every((n) => f.name.toLowerCase().includes(n))));
       let i = 0;
       return { hasNext: () => i < hits.length, next: () => { const f = hits[i++]; return { getId: () => f.id, getName: () => f.name, getUrl: () => f.getUrl(), getLastUpdated: () => new Date(f.updated) }; } };
     },

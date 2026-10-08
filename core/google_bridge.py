@@ -222,6 +222,32 @@ class GoogleBridge:
     def share_file(self, file_id: str, email: str, role: str = "view") -> dict:
         return self.call("share_file", file=file_id, email=email, role=role)
 
+    # ------------------------------------------------------------------ existing files
+    _KINDS = {"doc": "docs", "slides": "slides", "sheet": "sheets"}
+
+    def find_file(self, kind: str, name: str = "") -> dict | None:
+        """The best match for ``name`` (the most recently edited file when empty) among docs/slides/sheets."""
+        files = self.call("list", kind=self._KINDS.get(kind, "docs"), query=name).get("files") or []
+        return {**files[0], "kind": kind} if files else None
+
+    def recent_files(self, limit: int = 6) -> list[dict]:
+        return list(self.call("recent_files", limit=limit).get("files") or [])
+
+    def view(self, kind: str, ref: str) -> dict:
+        """The contents of a file in a form JARVIS's own reader can show: {kind, title, url, markdown | rows}."""
+        if kind == "slides":
+            data = self.call("slides_read", presentation=ref)
+            body = "\n\n".join(f"## Slide {s.get('number')}\n" + "\n".join(f"- {line}" if i else line
+                                 for i, line in enumerate(str(s.get("text", "")).split("\n"))) for s in data.get("slides", []))
+            return {"kind": "slides", "title": data.get("title"), "url": data.get("url"), "markdown": body}
+        if kind == "sheet":
+            data = self.call("sheet_read", spreadsheet=ref)
+            return {"kind": "sheet", "title": data.get("title"), "url": data.get("url"), "rows": data.get("rows") or [],
+                    "tab": data.get("tab"), "tabs": data.get("tabs") or [], "truncated": bool(data.get("truncated"))}
+        data = self.call("doc_read", document=ref)
+        return {"kind": "doc", "title": data.get("title"), "url": data.get("url"),
+                "markdown": data.get("markdown") or data.get("text") or "", "truncated": bool(data.get("truncated"))}
+
     def create_deck(self, title: str, subtitle: str, slides: list[dict]) -> dict:
         return self.call("slides_create", title=title or "Untitled presentation", subtitle=subtitle, slides=slides)
 

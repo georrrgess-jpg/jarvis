@@ -652,3 +652,52 @@ body.booting #col-center { transform: scale(.94); }
 @media (max-height: 700px) {
   #hints { margin-top: 6px; }
 }
+
+/* ------------------------------------------------------------ reader, recent files */
+.reader-card { width: min(820px, 94vw); display: flex; flex-direction: column; border-color: rgb(var(--cyan) / .4);
+  box-shadow: 0 0 60px rgb(var(--cyan) / .14), inset 0 0 60px rgb(var(--cyan) / .04); }
+.rd-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; }
+.rd-head h2 { margin: 6px 0 0; font: 700 21px/1.25 var(--font-ui); color: var(--text-hi); }
+.rd-body { flex: 1; min-height: 120px; max-height: 58vh; overflow: auto; padding: 14px 16px; background: rgb(0 8 16 / .55);
+  border: 1px solid var(--line); font: 500 15.5px/1.65 var(--font-ui); color: var(--text); white-space: pre-wrap; user-select: text; }
+.rd-body .md-h { margin-top: 10px; }
+.rd-body table { border-collapse: collapse; width: 100%; white-space: normal; font-size: 14px; }
+.rd-body th, .rd-body td { padding: 6px 10px; border: 1px solid var(--line); text-align: left; }
+.rd-body th { background: rgb(var(--cyan) / .12); color: var(--text-hi); font: 600 12px/1.3 var(--font-display); letter-spacing: .08em; }
+.rd-note { margin: 12px 0 0; font: 400 12px var(--font-mono); color: var(--text-faint); }
+.dc-btns { display: flex; gap: 6px; }
+.files-card { display: block; }
+.fl-list { display: flex; flex-direction: column; gap: 6px; }
+.fl-row { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--line); background: rgb(var(--cyan) / .04); }
+.fl-row:hover { border-color: rgb(var(--cyan) / .45); }
+.fl-kind { padding: 3px 0; text-align: center; border: 1px solid currentColor; font: 700 8px/1 var(--font-display); letter-spacing: .16em; }
+.fl-kind.cyan { color: rgb(var(--cyan)); } .fl-kind.amber { color: rgb(var(--amber)); } .fl-kind.green { color: rgb(var(--green)); }
+.fl-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 14px/1.2 var(--font-ui); color: var(--text-hi); }
+.fl-ago { font: 400 11px var(--font-mono); color: var(--text-faint); white-space: nowrap; }
+.fl-row .btn.sm { height: 26px; padding: 0 9px; font-size: 8.5px; }
+@media (max-width: 1250px) {
+  .fl-row { grid-template-columns: 50px minmax(0, 1fr) auto auto; } .fl-ago { display: none; }
+  .doc-card { grid-template-columns: 38px minmax(0, 1fr); } .dc-btns { grid-column: 1 / -1; }
+}
+
+/* two-line rows/cards: the comms panel is narrow, titles deserve the full width */
+.fl-row { grid-template-columns: 58px minmax(0, 1fr) auto auto; grid-template-areas: "k t t t" "k a v o"; row-gap: 6px; }
+.fl-kind { grid-area: k; align-self: start; } .fl-title { grid-area: t; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.fl-ago { grid-area: a; display: block !important; align-self: center; } .fl-view { grid-area: v; } .fl-open { grid-area: o; }
+.doc-card { grid-template-columns: 38px minmax(0, 1fr); row-gap: 8px; }
+.dc-btns { grid-column: 2; } .dc-kicker { white-space: nowrap; }
+
+/* ------------------------------------------------------------ timers */
+#timer-strip { flex: none; display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; min-height: 0; margin: 0 0 6px; }
+.timer-pill { position: relative; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 8px; overflow: hidden;
+  border: 1px solid rgb(var(--amber) / .45); background: rgb(var(--amber) / .08); animation: msg-in .4s var(--ease) both; }
+.timer-pill svg { width: 15px; height: 15px; fill: none; stroke: rgb(var(--amber)); stroke-width: 1.5; stroke-linecap: round; }
+.timer-pill b { font: 600 15px/1 var(--font-display); letter-spacing: .1em; color: var(--text-hi); }
+.timer-pill span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 11px/1 var(--font-ui); letter-spacing: .1em; color: var(--text-dim); text-transform: uppercase; }
+.timer-pill i { position: absolute; left: 0; bottom: 0; height: 2px; background: rgb(var(--amber)); box-shadow: 0 0 8px rgb(var(--amber)); transition: width .5s linear; }
+.timer-pill.soon { border-color: rgb(var(--red) / .7); animation: timer-soon 1s ease-in-out infinite; }
+.timer-pill.soon i { background: rgb(var(--red)); }
+@keyframes timer-soon { 50% { box-shadow: 0 0 14px rgb(var(--red) / .45); } }
+.sg-chip.accent { border-color: rgb(var(--amber) / .55); background: rgb(var(--amber) / .1); color: rgb(var(--amber)); }
+.sg-chip.accent:hover { background: rgb(var(--amber) / .2); border-color: rgb(var(--amber)); color: var(--text-hi); }

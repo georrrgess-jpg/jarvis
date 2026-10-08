@@ -78,12 +78,15 @@ def clean_for_speech(text: str) -> str:
 class SentenceSplitter:
     """Turns a token stream into speakable sentences, skipping fenced code blocks."""
 
+    EARLY_CHARS = 48
+
     def __init__(self, min_chars: int = 10, soft_limit: int = 220) -> None:
         self.min_chars = min_chars
         self.soft_limit = soft_limit
         self._buf = ""
         self._in_code = False
         self._code_seen = False
+        self._emitted = False  # has anything been spoken yet? (the first chunk is cut early, at a comma)
 
     def feed(self, text: str) -> list[str]:
         self._buf += text
@@ -115,6 +118,8 @@ class SentenceSplitter:
             head = self._buf if fence < 0 else self._buf[:fence]
             sentences, rest = self._split(head)
             out.extend(sentences)
+            if sentences:
+                self._emitted = True
             if fence >= 0:
                 if rest.strip():
                     out.append(rest.strip())
@@ -136,6 +141,13 @@ class SentenceSplitter:
             out.append(sentence)
             start = m.end()
         rest = text[start:]
+        if not self._emitted and not out and len(rest) >= self.EARLY_CHARS + 10:
+            # Nothing spoken yet and the first sentence is long: start at its first natural pause so the
+            # voice begins ~1 s sooner. Later sentences are cut at full stops only.
+            early = _SOFT_BREAK.search(rest, self.EARLY_CHARS)
+            if early and early.end() < len(rest) - 8:
+                out.append(rest[: early.end()].strip())
+                rest = rest[early.end():]
         while len(rest) > self.soft_limit:
             cut = None
             for b in _SOFT_BREAK.finditer(rest, 60, self.soft_limit):

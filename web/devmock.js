@@ -18,8 +18,8 @@ window.createJarvisMock = function createJarvisMock() {
   const settings = {
     ollama_host: 'http://localhost:11434', model: 'llama3.2', temperature: 0.7, max_history_turns: 12, custom_instructions: '',
     voice: 'en-GB-RyanNeural', speech_rate: 0, speech_pitch: 0, voice_enabled: true, sfx_enabled: true, sfx_volume: 0.45,
-    allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 0.9,
-    listen_timeout: 8, max_phrase_seconds: 25, auto_listen: false, user_title: 'sir', frameless: true,
+    link_browser: 'default', theme: params.get('theme') || 'arc', allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 1.0, patience: 3,
+    listen_timeout: 10, max_phrase_seconds: 45, auto_listen: false, user_title: 'sir', frameless: true,
   };
   if (params.has('gold')) settings.google_script_url = 'https://script.google.com/macros/s/preview/exec';
   const later = (ms, fn) => timers.push(setTimeout(fn, ms));
@@ -100,6 +100,28 @@ window.createJarvisMock = function createJarvisMock() {
         later(3700, () => reply(`Done. I've written ${slides ? `an 8-slide presentation on ${topic}` : `a 612-word biography of ${topic}`} and opened it for you.`, true));
         return true;
       }
+      const timer = text.match(/timer for (\d+) (second|minute)/i);
+      if (timer) {
+        const secs = +timer[1] * (/minute/i.test(timer[2]) ? 60 : 1);
+        emit({ type: 'timers', timers: [{ id: ++seq, label: '', left: secs, total: secs }] });
+        reply(`Timer set for ${timer[1]} ${timer[2]}s, sir.`);
+        return true;
+      }
+      if (/\b(recent|what) (docs|documents|files)\b/i.test(text)) {
+        setState('THINKING');
+        later(900, () => emit({ type: 'file_list', files: [
+          { kind: 'doc', id: 'a', title: 'Lionel Messi: The Little Genius', url: 'https://docs.google.com/document/d/a/edit', updated: new Date(Date.now() - 3.6e6).toISOString() },
+          { kind: 'slides', id: 'b', title: 'The Solar System: An Overview', url: 'https://docs.google.com/presentation/d/b/edit', updated: new Date(Date.now() - 8.6e7).toISOString() },
+          { kind: 'sheet', id: 'c', title: 'Budget', url: 'https://docs.google.com/spreadsheets/d/c/edit', updated: new Date(Date.now() - 3e5).toISOString() }] }));
+        later(1000, () => reply('Here are your 3 most recent files, sir.', true));
+        return true;
+      }
+      if (/\b(show|open) (me )?(my )?(messi )?doc\b/i.test(text)) {
+        setState('THINKING');
+        later(700, () => this.google_view('doc'));
+        later(800, () => reply('Here is Lionel Messi: The Little Genius, sir.', true));
+        return true;
+      }
       if (/\be-?mail\b/i.test(text)) {
         setState('THINKING');
         later(400, () => emit({ type: 'tool_activity', tool: 'email', label: 'Writing an email to Sarah Connor' }));
@@ -171,6 +193,12 @@ window.createJarvisMock = function createJarvisMock() {
     google_script: async () => '// J.A.R.V.I.S. bridge script (preview)',
     google_connect: async (url) => (!url && settings.google_script_url ? { ok: true, user: 'tony@example.com' } : /\/exec$/.test(url) ? (settings.google_script_url = url, { ok: true, user: 'tony@example.com' }) : { ok: false, error: 'that doesn\'t look like a web app URL (it should end in /exec)' }),
     google_disconnect: async () => { settings.google_script_url = ''; },
+    installed_browsers: async () => ({ chrome: 'Google Chrome', edge: 'Microsoft Edge' }),
+    google_view: async (kind) => {
+      emit({ type: 'document_view', doc_kind: kind, title: kind === 'sheet' ? 'Budget' : 'Lionel Messi: The Little Genius', url: 'https://docs.google.com/document/d/preview/edit',
+        ...(kind === 'sheet' ? { rows: [['Item', 'Cost'], ['Rent', '1200'], ['Food', '300']] }
+          : { markdown: '# Lionel Messi\n\n## Early life\n\nLionel Andrés Messi was born on 24 June 1987 in Rosario, Argentina.\n\n## Career\n\n- Barcelona (2004–2021)\n- Paris Saint-Germain (2021–2023)\n- Inter Miami (2023–)' }) });
+    },
     email_send: async (id, to) => { setTimeout(() => emit({ type: 'email_status', id, status: 'sent', to }), 600); return { ok: true }; },
     email_open_gmail: async (id) => { emit({ type: 'email_status', id, status: 'opened' }); return { ok: true }; },
     email_discard: async (id) => { emit({ type: 'email_status', id, status: 'discarded' }); },

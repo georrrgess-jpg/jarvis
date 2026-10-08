@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 
+from .browsers import open_in_browser, with_account
 from .google_bridge import BridgeError, GoogleBridge
 
 log = logging.getLogger("jarvis.tools")
@@ -66,6 +67,19 @@ KNOWN_SITES = {
     "chatgpt": "https://chatgpt.com", "maps": "https://maps.google.com", "google maps": "https://maps.google.com",
     "outlook": "https://outlook.live.com", "linkedin": "https://www.linkedin.com", "twitch": "https://www.twitch.tv",
     "weather": "https://weather.com", "news": "https://news.google.com", "translate": "https://translate.google.com",
+    "google docs": "https://docs.google.com/document/", "docs": "https://docs.google.com/document/",
+    "google sheets": "https://docs.google.com/spreadsheets/", "sheets": "https://docs.google.com/spreadsheets/",
+    "google slides": "https://docs.google.com/presentation/", "slides": "https://docs.google.com/presentation/",
+    "google drive": "https://drive.google.com/drive/", "drive": "https://drive.google.com/drive/",
+    "google calendar": "https://calendar.google.com/", "calendar": "https://calendar.google.com/",
+    "google meet": "https://meet.google.com/", "meet": "https://meet.google.com/", "google keep": "https://keep.google.com/",
+    "google photos": "https://photos.google.com/", "photos online": "https://photos.google.com/",
+    "google forms": "https://docs.google.com/forms/", "google contacts": "https://contacts.google.com/",
+    "google translate": "https://translate.google.com", "google news": "https://news.google.com",
+    "spotify web": "https://open.spotify.com", "youtube music": "https://music.youtube.com",
+    "disney plus": "https://www.disneyplus.com", "hulu": "https://www.hulu.com", "pinterest": "https://www.pinterest.com",
+    "tiktok": "https://www.tiktok.com", "whatsapp web": "https://web.whatsapp.com", "paypal": "https://www.paypal.com",
+    "stack overflow": "https://stackoverflow.com", "bbc": "https://www.bbc.com", "espn": "https://www.espn.com",
 }
 BINARY_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".heic", ".ico", ".mp3", ".wav", ".flac", ".m4a", ".ogg",
@@ -802,7 +816,7 @@ class Toolbox:
     """The tools exposed to the language model, plus helpers the assistant calls directly."""
 
     def __init__(self, config, index: FileIndex | None = None, http: httpx.Client | None = None,
-                 launcher: Callable[[Path], None] = _launch, url_launcher: Callable[[str], None] = _launch_url,
+                 launcher: Callable[[Path], None] = _launch, url_launcher: Callable[[str], None] | None = None,
                  host_check: Callable[[str], bool] = _is_public_host,
                  app_launcher: Callable[[str], None] | None = None,
                  system_launcher: Callable[[str], None] | None = None) -> None:
@@ -813,7 +827,7 @@ class Toolbox:
         self.index = index or FileIndex()
         self._http = http
         self._launch = launcher
-        self._launch_url = url_launcher
+        self._launch_url = url_launcher or (lambda url: open_in_browser(url, str(config.get("link_browser") or "default")))
         self._host_ok = host_check
 
     # ---------------------------------------------------------------- availability
@@ -1072,10 +1086,12 @@ class Toolbox:
             log.info("Web research failed: %s", exc)
         return "\n\n".join(notes)[: limit + 2000]
 
-    def open_link(self, url: str) -> None:
-        """Open a link JARVIS created itself (a Google Doc, a Gmail draft...) in the browser."""
-        if re.match(r"^https://(?:docs|mail)\.google\.com/", url or ""):
-            self._launch_url(url)
+    def open_link(self, url: str) -> bool:
+        """Open a link JARVIS created itself (a Google Doc, a Gmail draft...) in the browser, as the linked account."""
+        if re.match(r"^https://(?:docs|drive|mail|calendar|script)\.google\.com/", url or ""):
+            self._launch_url(with_account(url, self._config.get("google_user_email")))
+            return True
+        return False
 
     def read_webpage(self, url: str, limit: int = 6000) -> dict:
         url = url.strip()
@@ -1105,7 +1121,7 @@ class Toolbox:
                 target = f"https://duckduckgo.com/?q={quote_plus(target)}"
         if urlparse(target).scheme not in ("http", "https"):
             raise ToolError("only web addresses can be opened")
-        self._launch_url(target)
+        self._launch_url(with_account(target, self._config.get("google_user_email")))
         return {"opened": target}
 
     # ---------------------------------------------------------------- direct commands

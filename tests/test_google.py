@@ -356,3 +356,26 @@ def test_script_sends_mail_finds_contacts_and_shares_files():
     shared = run_gas([{"token": t, "action": "doc_create", "title": "Bio"},
                       {"token": t, "action": "share_file", "file": "id" + "x" * 29 + "1", "email": "tom@example.com"}])
     assert shared["results"][1]["shared"] and shared["shares"] == [{"id": "id" + "x" * 29 + "1", "e": "tom@example.com", "role": "view"}]
+
+
+def test_script_v4_finds_files_by_loose_names_and_reads_markdown():
+    t = "T0K3N"
+    data = run_gas([
+        {"token": t, "action": "doc_create", "title": "Lionel Messi: The Little Genius",
+         "text": "# Lionel Messi\n## Early life\nBorn in Rosario.\n- Barcelona\n1. First\n| A | B |\n|---|---|\n| 1 | 2 |"},
+        {"token": t, "action": "doc_create", "title": "Shopping list"},
+        {"token": t, "action": "slides_create", "title": "Messi highlights"},
+        {"token": t, "action": "list", "kind": "docs", "query": "messi bio"},
+        {"token": t, "action": "list", "kind": "docs", "query": "little genius"},
+        {"token": t, "action": "list", "kind": "docs", "query": "nothing matches"},
+        {"token": t, "action": "doc_read", "document": "messi genius"},
+        {"token": t, "action": "recent_files", "limit": 5},
+    ])
+    r = data["results"]
+    assert [f["title"] for f in r[3]["files"]] == ["Lionel Messi: The Little Genius"], "ranks by how many words match"
+    assert [f["title"] for f in r[4]["files"]] == ["Lionel Messi: The Little Genius"]
+    assert r[5]["files"] == []
+    assert r[6]["markdown"] == ("# Lionel Messi\n\n## Early life\n\nBorn in Rosario.\n\n- Barcelona\n\n1. First\n\n"
+                                "| A | B |\n|---|---|\n| 1 | 2 |")
+    assert {(f["kind"], f["title"]) for f in r[7]["files"]} == {("doc", "Lionel Messi: The Little Genius"), ("doc", "Shopping list"),
+                                                                ("slides", "Messi highlights")}

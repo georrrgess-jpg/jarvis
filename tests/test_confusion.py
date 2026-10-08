@@ -185,3 +185,35 @@ def test_google_app_names_are_not_web_searches():
     assert _SEARCH_COMMAND.match("google the weather in Rome")["query"] == "the weather in Rome"
     for text in ("Google Sheets, make a budget", "google docs write a memo", "Jarvis, google slides for my pitch"):
         assert not _SEARCH_COMMAND.match(text), text
+
+
+def test_plain_knowledge_questions_skip_tools_for_a_faster_answer(router):
+    assistant, events, ask, searches, mock = router
+    assistant.submit_text("what is the capital of France")
+    events.wait_for(events.finished)
+    assert not chats(mock)[0].get("tools") and not searches, "no tool round-trips for things the model already knows"
+
+
+def test_chained_open_commands_run_in_order(config, mock_ollama):
+    from core.assistant import Assistant
+    from core.tools import FileIndex, Toolbox
+    from tests.test_assistant import Events, FakeTTS
+    from tests.test_tools import Launches
+
+    config.update({"ollama_host": mock_ollama.url, "voice_enabled": False})
+    launched = Launches()
+    index = FileIndex(lambda: [], apps_provider=lambda: [("Spotify", "Spotify.App"), ("Notepad", "Notepad.App"), ("Calculator", "Calc.App")])
+    tools = Toolbox(config, index=index, app_launcher=lambda app: launched.paths.append(app), launcher=launched.paths.append,
+                    url_launcher=launched.urls.append)
+    events = Events()
+    assistant = Assistant(config, events, tts=FakeTTS(), tools=tools)
+    assistant.start()
+    try:
+        assistant.submit_text("open Spotify and then launch Notepad, open calculator")
+        events.wait_for(events.finished)
+        said = "".join(t["text"] for t in events.of("assistant_token"))
+        assert launched.paths == ["Spotify.App", "Notepad.App", "Calc.App"]
+        assert said == "Opening Spotify. Opening Notepad. Opening Calculator, sir."
+        assert not [1 for p, _ in mock_ollama.requests if p == "/api/chat"]
+    finally:
+        assistant.shutdown()

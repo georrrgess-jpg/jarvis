@@ -50,6 +50,7 @@ class Capture:
     pcm: bytes
     rate: int
     width: int = 2
+    text: str | None = None  # already recognised while waiting for the speaker to finish (saves a round trip)
 
     @property
     def duration(self) -> float:
@@ -102,6 +103,7 @@ def _rms(chunk: np.ndarray) -> float:
 
 class SpeechInput:
     CALIBRATE_S = 0.3
+    PROBE_AFTER_S = 0.55  # silence after which we peek at what was said to decide whether the speaker is done
     PRE_ROLL_S = 0.45
     MIN_THRESHOLD = 260.0
     MAX_THRESHOLD = 3500.0
@@ -169,19 +171,31 @@ class SpeechInput:
         hold: threading.Event | None = None,
         on_frame: Callable[[list[int], int], None] | None = None,
         on_phase: Callable[[str], None] | None = None,
+        probe: Callable[[bytes, int], tuple[str, bool]] | None = None,
     ) -> Capture | None:
         """Record one utterance.
 
         Ends on trailing silence, when ``stop`` is set (button released / clicked again)
         or at the phrase limit. While ``hold`` is set (push-to-talk held down) silence
         never ends the capture. Returns None on cancel or if nobody spoke.
+
+        With a ``probe`` the end of speech is patient: after a short silence the audio so far is
+        recognised in the background while we keep listening. ``probe(pcm, rate)`` returns
+        ``(text, finished)``. A finished sentence ends the capture as soon as the pause is over; an
+        unfinished one ("open the...", "and...") keeps us waiting for up to ``patience`` more seconds,
+        and anything said in the meantime simply continues the same capture.
         """
         hold = hold or threading.Event()
         on_frame = on_frame or (lambda bands, level: None)
         on_phase = on_phase or (lambda phase: None)
-        pause_s = float(self._config.get("pause_threshold", 0.9))
-        timeout_s = float(self._config.get("listen_timeout", 8))
-        max_s = float(self._config.get("max_phrase_seconds", 25))
+        pause_s = float(self._config.get("pause_threshold", 1.0))
+        patience_s = float(self._config.get("patience", 3.0)) if probe else 0.0
+        timeout_s = float(self._config.get("listen_timeout", 10))
+        max_s = float(self._config.get("max_phrase_seconds", 45))
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="probe") if probe else None
+        pending = None  # (future, silence at which it started) for the probe of the current pause
+        verdict: tuple[str, bool] | None = None  # the finished probe of the current pause
+        waiting_politely = False
 
         source = self._source_factory()
         rate = source.rate
@@ -253,12 +267,39 @@ class SpeechInput:
                 else:
                     frames.append(data)
                     spoken += chunk_s
-                    silence = 0.0 if energy > threshold * 0.75 else silence + chunk_s
+                    if energy > threshold * 0.75:
+                        silence = 0.0
+                        pending = verdict = None  # still talking: whatever the probe concluded is out of date
+                        if waiting_politely:
+                            waiting_politely = False
+                            on_phase("capturing")
+                    else:
+                        silence += chunk_s
                     if stop.is_set() or spoken >= max_s:
                         break
-                    if silence >= pause_s and not hold.is_set():
-                        break
+                    if hold.is_set():
+                        continue
+                    if probe is None:
+                        if silence >= pause_s:
+                            break
+                        continue
+                    if pending is None and verdict is None and silence >= self.PROBE_AFTER_S:
+                        snapshot = b"".join(frames)
+                        pending = pool.submit(self._safe_probe, probe, snapshot, rate)
+                    if pending is not None and pending.done():
+                        verdict, pending = pending.result(), None
+                        if not verdict[1] and verdict[0].strip() and not waiting_politely:
+                            waiting_politely = True
+                            on_phase("patient")  # "take your time": the sentence sounded unfinished
+                    if verdict is not None and verdict[1] and silence >= pause_s:
+                        break  # a finished sentence followed by a full pause: answer now
+                    if verdict is not None and not verdict[0].strip() and silence >= pause_s:
+                        break  # heard nothing intelligible: don't wait around
+                    if silence >= pause_s + patience_s:
+                        break  # waited as long as we promised
         finally:
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
             try:
                 source.close()
             except Exception:
@@ -269,7 +310,18 @@ class SpeechInput:
         tail = int(silence / chunk_s) if speaking else 0
         if tail > keep_tail:
             frames = frames[: len(frames) - (tail - keep_tail)]
-        return Capture(b"".join(frames), rate) if frames else None
+        if not frames:
+            return None
+        text = verdict[0] if verdict is not None and verdict[0].strip() else None
+        return Capture(b"".join(frames), rate, text=text)
+
+    @staticmethod
+    def _safe_probe(probe, pcm: bytes, rate: int) -> tuple[str, bool]:
+        try:
+            return probe(pcm, rate)
+        except Exception:  # a failed peek must never break listening: fall back to the normal path
+            log.debug("end-of-speech probe failed", exc_info=True)
+            return "", True
 
     # ------------------------------------------------------------------ recognition
     def transcribe(self, capture: Capture, on_status: Callable[[str], None] | None = None) -> str:

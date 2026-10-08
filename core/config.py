@@ -47,23 +47,28 @@ DEFAULTS: dict[str, Any] = {
     # Speech input
     "stt_engine": "auto",  # auto | google | whisper | vosk
     "stt_language": "en-US",
+    "link_browser": "default",  # default | chrome | edge | firefox | brave: where Google links and websites open
     "auto_language": True,  # detect the language spoken/typed, reply in it and switch to a matching voice
     "stt_extra_languages": "",  # other languages to listen for, e.g. "es-ES, fr-FR" (empty = the PC's language)
     "whisper_model": "base.en",
     "vosk_model_path": "",
-    "pause_threshold": 0.9,  # seconds of silence that end an utterance
-    "listen_timeout": 8,  # seconds to wait for speech to begin
-    "max_phrase_seconds": 25,
+    "pause_threshold": 1.0,  # seconds of silence after which JARVIS checks whether you've finished
+    "patience": 3.0,  # extra seconds it keeps waiting when your sentence sounds unfinished ("open the...")
+    "listen_timeout": 10,  # seconds to wait for speech to begin
+    "max_phrase_seconds": 45,
     "auto_listen": False,  # keep the conversation going hands-free
     "wake_word": True,  # say "Hey Jarvis" to start listening
     "wake_sensitivity": 0.5,  # 0 = strict, 1 = very sensitive
     # Personality / window
     "user_title": "sir",
+    "theme": "arc",  # arc | mark3 | stealth | violet
     "frameless": True,
 }
 
 _CHOICES: dict[str, tuple[str, ...]] = {
     "stt_engine": ("auto", "google", "whisper", "vosk"),
+    "link_browser": ("default", "chrome", "edge", "firefox", "brave"),
+    "theme": ("arc", "mark3", "stealth", "violet"),
 }
 
 _RANGES: dict[str, tuple[float, float]] = {
@@ -74,7 +79,8 @@ _RANGES: dict[str, tuple[float, float]] = {
     "sfx_volume": (0.0, 1.0),
     "pause_threshold": (0.4, 3.0),
     "listen_timeout": (2, 30),
-    "max_phrase_seconds": (5, 60),
+    "max_phrase_seconds": (5, 120),
+    "patience": (0.0, 8.0),
     "wake_sensitivity": (0.0, 1.0),
 }
 

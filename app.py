@@ -434,7 +434,17 @@ class JarvisAPI:
         url = str(url or "")
         if not url.startswith(ALLOWED_EXTERNAL_URLS):
             return False
+        if self._assistant is not None and self._assistant.open_google_link(url):
+            return True  # a Google link: opened in the chosen browser, as the linked account
         return webbrowser.open(url)
+
+    def google_view(self, kind: str, ref: str) -> dict:
+        return self._assistant.view_google(str(kind or "doc"), str(ref or ""))
+
+    def installed_browsers(self) -> dict:
+        from core.browsers import installed_browsers
+
+        return installed_browsers()
 
     def window_minimize(self) -> None:
         if self._window:
@@ -609,14 +619,21 @@ def run_selftest(report_path: str | None) -> int:
         """The bundled request understanding: writing, email, language detection and the Google script."""
         from core.compose import parse_write_request
         from core.google_bridge import script_version
+        from core.gdrive import parse_google_request
         from core.language import detect
         from core.mail import parse_email_request
+        from core.patience import looks_unfinished
+        from core.quick import calculate, parse_quick
 
         bio = parse_write_request("write a bio on Lionel Messi", google_ready=True)
         mail = parse_email_request("email Sarah saying I'm running late")
         lang = detect("¿Qué hora es?").code
+        opened = parse_google_request("open my Messi doc")
         if not (bio and bio.topic == "Lionel Messi" and mail and mail.who == "Sarah" and lang == "es"):
             raise RuntimeError(f"unexpected parse: {bio} {mail} {lang}")
+        if not (opened and opened.name == "Messi" and looks_unfinished("open the") and not looks_unfinished("open spotify")
+                and calculate("what is 12 times 7") == "84" and parse_quick("thanks").kind == "talk"):
+            raise RuntimeError("quick skills / patience / google-file parsing misbehaved")
         return {"script_version": script_version(), "language": lang}
 
     def ollama_probe():

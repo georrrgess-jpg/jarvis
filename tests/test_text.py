@@ -68,3 +68,22 @@ def test_rate_and_pitch_format():
     assert format_rate(0) == "+0%"
     assert format_rate(-12.4) == "-12%"
     assert format_pitch(5) == "+5Hz"
+
+
+def test_the_first_long_sentence_starts_speaking_at_a_comma():
+    from core.tts import SentenceSplitter
+
+    splitter = SentenceSplitter()
+    out = []
+    reply = ("Lionel Messi is widely regarded as one of the greatest footballers of all time, having won eight Ballon d'Or "
+             "awards and the 2022 World Cup with Argentina. He began his career at Barcelona.")
+    for i in range(0, len(reply), 7):  # streamed in small pieces, like model tokens
+        out += splitter.feed(reply[i:i + 7])
+    out += splitter.flush()
+    assert out[0] == "Lionel Messi is widely regarded as one of the greatest footballers of all time,", out
+    assert out[1].startswith("having won eight") and out[-1] == "He began his career at Barcelona."
+    assert "".join(out).replace(" ", "") == reply.replace(" ", "")
+    # short sentences are untouched, and only the first chunk of a reply is cut early
+    short = SentenceSplitter()
+    assert short.feed("Certainly, sir. All systems are online, and the coffee is warm. ") == [
+        "Certainly, sir.", "All systems are online, and the coffee is warm."]

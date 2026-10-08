@@ -135,6 +135,7 @@
           <div id="state-sub">Initialising…</div>
         </div>
       </div>
+      <div id="timer-strip" aria-live="polite"></div>
       <canvas id="wave"></canvas>
 
       <div id="console">
@@ -271,6 +272,24 @@
     </div>
   </div>
 
+  <!-- ======================================================= document reader -->
+  <div id="reader" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="rd-title">
+    <div class="modal-card cyan reader-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker" id="rd-kicker">GOOGLE DOC</div><h2 id="rd-title">Document</h2></div>
+        <button class="wb" id="rd-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div id="rd-body" class="rd-body"></div>
+      <div class="mc-actions">
+        <button class="btn primary" id="rd-open"><span>OPEN IN BROWSER</span></button>
+        <button class="btn ghost" id="rd-copy">COPY TEXT</button>
+        <button class="btn ghost" id="rd-done">CLOSE</button>
+      </div>
+      <div class="mc-foot" id="rd-foot">Shown straight from your Google account: no browser or sign-in needed.</div>
+    </div>
+  </div>
+
   <!-- ======================================================= settings drawer -->
   <aside id="settings" class="drawer" aria-hidden="true">
     <header class="drawer-head">
@@ -296,6 +315,13 @@
       <fieldset>
         <legend>Google: Docs, Slides, Sheets &amp; Gmail</legend>
         <p class="field-note" id="g-status">Not connected. JARVIS can create and edit your Docs, Slides and Sheets once you link your Google account (free, about 3 minutes).</p>
+        <label class="field"><span>Open links in</span>
+          <select data-key="link_browser" id="set-browser">
+            <option value="default">My default browser</option><option value="chrome">Google Chrome</option>
+            <option value="edge">Microsoft Edge</option><option value="firefox">Firefox</option><option value="brave">Brave</option>
+          </select>
+        </label>
+        <p class="field-note">Pick the browser you're signed in to Google with. Or say “show it here” and JARVIS displays your file itself.</p>
         <div class="row"><button class="btn ghost sm" id="g-setup">SET UP</button><button class="btn ghost sm hidden" id="g-update">UPDATE SCRIPT</button><button class="btn ghost sm hidden" id="g-disconnect">DISCONNECT</button></div>
       </fieldset>
       <fieldset>
@@ -329,13 +355,21 @@
           <option value="hi-IN">Hindi</option><option value="zh-CN">Chinese (Mandarin)</option><option value="ja-JP">Japanese</option>
           <option value="ko-KR">Korean</option><option value="sv-SE">Swedish</option><option value="el-GR">Greek</option>
         </datalist>
-        <label class="field"><span>End of speech pause <output id="out-pause"></output></span><input id="set-pause" data-key="pause_threshold" type="range" min="0.4" max="3" step="0.1"></label>
+        <label class="field"><span>Pause before I check you're done <output id="out-pause"></output></span><input id="set-pause" data-key="pause_threshold" type="range" min="0.4" max="3" step="0.1"></label>
+        <label class="field"><span>Patience for unfinished sentences <output id="out-patience"></output></span><input id="set-patience" data-key="patience" type="range" min="0" max="8" step="0.5"></label>
+        <p class="field-note">If you trail off (“open the…”, “and…”, “um…”) JARVIS keeps listening that much longer instead of answering over you. A finished sentence is still answered right away.</p>
         <label class="toggle"><input type="checkbox" data-key="wake_word"><i></i><span>Wake word: say “Hey Jarvis” to start listening</span></label>
         <label class="field"><span>Wake word sensitivity <output id="out-wake"></output></span><input id="set-wake" data-key="wake_sensitivity" type="range" min="0" max="1" step="0.05"></label>
         <label class="toggle"><input type="checkbox" data-key="auto_listen"><i></i><span>Conversation mode (listen again after replying)</span></label>
       </fieldset>
       <fieldset>
         <legend>Interface</legend>
+        <label class="field"><span>HUD colour scheme</span>
+          <select data-key="theme">
+            <option value="arc">Arc reactor (cyan)</option><option value="mark3">Mark III (red &amp; gold)</option>
+            <option value="stealth">Stealth (green)</option><option value="violet">Violet</option>
+          </select>
+        </label>
         <label class="toggle"><input type="checkbox" data-key="sfx_enabled"><i></i><span>Interface sounds</span></label>
         <label class="field"><span>Sound volume <output id="out-sfx"></output></span><input id="set-sfx" data-key="sfx_volume" type="range" min="0" max="1" step="0.05"></label>
         <label class="field"><span>Address me as</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>

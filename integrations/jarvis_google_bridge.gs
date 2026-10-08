@@ -12,7 +12,7 @@
  *   3. Authorize access when Google asks, then copy the Web app URL into JARVIS.
  */
 var JARVIS_TOKEN = '__JARVIS_TOKEN__';
-var BRIDGE_VERSION = 3;
+var BRIDGE_VERSION = 4;
 var MIME = {
   docs: 'application/vnd.google-apps.document',
   slides: 'application/vnd.google-apps.presentation',
@@ -55,6 +55,17 @@ var ACTIONS = {
     return { files: findFiles_(MIME[req.kind] || MIME.docs, req.query || '', 10) };
   },
 
+  /** The most recently edited documents, presentations and spreadsheets, for "what docs do I have?". */
+  recent_files: function (req) {
+    var per = Math.max(1, Math.min(10, parseInt(req.limit, 10) || 5));
+    var out = [];
+    [['doc', MIME.docs], ['slides', MIME.slides], ['sheet', MIME.sheets]].forEach(function (k) {
+      findFiles_(k[1], '', per).forEach(function (f) { f.kind = k[0]; out.push(f); });
+    });
+    out.sort(function (a, b) { return a.updated < b.updated ? 1 : -1; });
+    return { files: out };
+  },
+
   // ---------------------------------------------------------------- Docs
   doc_create: function (req) {
     var doc = DocumentApp.create(req.title || 'Untitled document');
@@ -65,8 +76,11 @@ var ACTIONS = {
 
   doc_read: function (req) {
     var doc = openDoc_(req.document);
-    var text = doc.getBody().getText();
-    return { title: doc.getName(), url: doc.getUrl(), text: text.slice(0, MAX_TEXT), truncated: text.length > MAX_TEXT };
+    var body = doc.getBody();
+    var text = body.getText();
+    var md = markdown_(body);
+    return { title: doc.getName(), url: doc.getUrl(), text: text.slice(0, MAX_TEXT), truncated: text.length > MAX_TEXT,
+             markdown: md.slice(0, MAX_TEXT) };
   },
 
   doc_append: function (req) {
@@ -293,19 +307,66 @@ function resolveId_(ref, mime) {
   return found[0].id;
 }
 
-function findFiles_(mime, query, limit) {
-  var q = "mimeType = '" + mime + "' and trashed = false";
-  if (query) q += " and title contains '" + String(query).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
-  var it = DriveApp.searchFiles(q);
+function esc_(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+function search_(mime, clause) {
+  var it = DriveApp.searchFiles("mimeType = '" + mime + "' and trashed = false" + clause);
   var files = [];
   while (it.hasNext() && files.length < 200) {
     var f = it.next();
     files.push({ id: f.getId(), title: f.getName(), url: f.getUrl(), updated: f.getLastUpdated().getTime() });
   }
-  files.sort(function (a, b) { return b.updated - a.updated; });
+  return files;
+}
+
+/**
+ * Finds files by name. Every word must appear in the title ("messi bio" finds "Lionel Messi: Bio");
+ * when nothing matches all the words, files matching the most words win. Most recently edited first.
+ */
+function findFiles_(mime, query, limit) {
+  var words = String(query || '').toLowerCase().split(/\s+/).filter(function (w) { return w; }).slice(0, 6);
+  var files = search_(mime, words.map(function (w) { return " and title contains '" + esc_(w) + "'"; }).join(''));
+  if (!files.length && words.length > 1) {
+    var any = words.map(function (w) { return "title contains '" + esc_(w) + "'"; }).join(' or ');
+    files = search_(mime, ' and (' + any + ')');
+    files.forEach(function (f) {
+      var t = f.title.toLowerCase();
+      f.hits = words.filter(function (w) { return t.indexOf(w) >= 0; }).length;
+    });
+    files.sort(function (a, b) { return b.hits - a.hits || b.updated - a.updated; });
+  } else {
+    files.sort(function (a, b) { return b.updated - a.updated; });
+  }
   return files.slice(0, limit).map(function (f) {
     return { id: f.id, title: f.title, url: f.url, updated: new Date(f.updated).toISOString() };
   });
+}
+
+/** A document as Markdown (headings, bullets, numbered items, tables) for JARVIS's own reader. */
+function markdown_(body) {
+  var out = [], T = DocumentApp.ElementType, H = DocumentApp.ParagraphHeading, n = body.getNumChildren();
+  for (var i = 0; i < n; i++) {
+    var el = body.getChild(i), type = el.getType();
+    if (type === T.PARAGRAPH) {
+      var p = el.asParagraph(), text = p.getText(), h = p.getHeading();
+      if (!text.trim()) continue;
+      out.push(h === H.HEADING1 || h === H.TITLE ? '# ' + text : h === H.HEADING2 || h === H.SUBTITLE ? '## ' + text
+        : h === H.HEADING3 ? '### ' + text : text);
+    } else if (type === T.LIST_ITEM) {
+      var li = el.asListItem(), numbered = String(li.getGlyphType()).indexOf('NUMBER') >= 0;
+      out.push((numbered ? '1. ' : '- ') + li.getText());
+    } else if (type === T.TABLE) {
+      var table = el.asTable(), rows = [];
+      for (var r = 0; r < table.getNumRows(); r++) {
+        var row = table.getRow(r), cells = [];
+        for (var c = 0; c < row.getNumCells(); c++) cells.push(row.getCell(c).getText().replace(/\|/g, '/'));
+        rows.push('| ' + cells.join(' | ') + ' |');
+        if (r === 0) rows.push('|' + cells.map(function () { return '---'; }).join('|') + '|');
+      }
+      out.push(rows.join('\n'));
+    }
+  }
+  return out.join('\n\n');
 }
 
 function openDoc_(ref) { return DocumentApp.openById(resolveId_(ref, MIME.docs)); }

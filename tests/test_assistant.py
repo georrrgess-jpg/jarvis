@@ -118,12 +118,12 @@ def make(config, mock_ollama):
 def test_text_turn_full_cycle(make):
     assistant, events = make()
     tts = assistant.tts
-    assert assistant.submit_text("status report")
+    assert assistant.submit_text("explain the arc reactor")
     events.wait_for(events.finished)
 
     assert events.states() == ["THINKING", "SPEAKING", "IDLE"]
     user = events.of("user_message")[0]
-    assert user["text"] == "status report" and user["source"] == "text"
+    assert user["text"] == "explain the arc reactor" and user["source"] == "text"
     reply = "".join(p["text"] for p in events.of("assistant_token"))
     assert reply == DEFAULT_REPLY
     assert len(tts.spoken) == 3 and tts.spoken[0] == "Certainly, sir."
@@ -186,7 +186,7 @@ def test_barge_in_while_speaking(make):
 
 def test_voice_failure_falls_back_to_text(make):
     assistant, events = make(tts=FakeTTS(fail=True))
-    assistant.submit_text("hello")
+    assistant.submit_text("explain the arc reactor")
     events.wait_for(events.finished)
     assert "SPEAKING" not in events.states()
     assert events.of("voice_status")[0]["ok"] is False
@@ -200,7 +200,7 @@ def test_offline_ollama_gives_guidance(make):
         port = s.getsockname()[1]
     assistant, events = make(host=f"http://127.0.0.1:{port}", voice_enabled=False)
     assert assistant.boot_payload()["ollama"]["online"] is False
-    assistant.submit_text("are you there?")
+    assistant.submit_text("explain the arc reactor")
     events.wait_for(events.finished)
     reply = "".join(p["text"] for p in events.of("assistant_token"))
     assert "neural core is offline" in reply

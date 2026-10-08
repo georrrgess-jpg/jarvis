@@ -20,6 +20,28 @@
     SPEAKING: [128, 234, 255],
   };
 
+  // HUD colour schemes: the CSS colours, plus the reactor's per-state colours (cyan/ice/green/amber are the roles)
+  const THEMES = {
+    arc: { css: { cyan: '42 212 255', ice: '128 234 255', green: '54 255 205', amber: '255 182 72' },
+      state: { IDLE: [42, 212, 255], LISTENING: [54, 255, 205], THINKING: [255, 182, 72], SPEAKING: [128, 234, 255] } },
+    mark3: { css: { cyan: '255 112 64', ice: '255 205 130', green: '255 222 110', amber: '255 168 60' },
+      state: { IDLE: [255, 112, 64], LISTENING: [255, 222, 110], THINKING: [255, 236, 200], SPEAKING: [255, 205, 130] } },
+    stealth: { css: { cyan: '72 255 150', ice: '172 255 212', green: '205 255 120', amber: '255 200 80' },
+      state: { IDLE: [72, 255, 150], LISTENING: [205, 255, 120], THINKING: [255, 200, 80], SPEAKING: [172, 255, 212] } },
+    violet: { css: { cyan: '172 122 255', ice: '218 192 255', green: '122 232 255', amber: '255 150 214' },
+      state: { IDLE: [172, 122, 255], LISTENING: [122, 232, 255], THINKING: [255, 150, 214], SPEAKING: [218, 192, 255] } },
+  };
+  let themeRGB = '42,212,255';
+  function applyTheme(name) {
+    const t = THEMES[name] || THEMES.arc;
+    const root = document.documentElement;
+    Object.entries(t.css).forEach(([k, v]) => root.style.setProperty(`--${k}`, v));
+    Object.assign(STATE_RGB, Object.fromEntries(Object.entries(t.state).map(([k, v]) => [k, v.slice()])));
+    themeRGB = t.state.IDLE.join(',');
+    document.body.dataset.theme = THEMES[name] ? name : 'arc';
+    if (typeof Col !== 'undefined') Col.tgt = (STATE_RGB[S.state] || STATE_RGB.IDLE).slice();
+  }
+
   const S = {
     state: 'IDLE', listenPhase: null, settings: {}, ollama: null, mic: null, audio: null,
     core: null, voiceOk: true, voices: null, booted: false, system: null, activity: null, wake: null,
@@ -545,6 +567,25 @@
       this.scroll(stick || true);
       return el;
     },
+    files(ev) {
+      const kinds = { doc: ['DOC', 'cyan'], slides: ['SLIDES', 'amber'], sheet: ['SHEET', 'green'] };
+      const el = this.card('files-card', '<div class="sg-kicker">YOUR RECENT GOOGLE FILES</div><div class="fl-list"></div>');
+      const ago = (iso) => {
+        const mins = Math.max(0, (Date.now() - Date.parse(iso)) / 60000);
+        return mins < 60 ? `${Math.round(mins) || 1} min ago` : mins < 1440 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
+      };
+      (ev.files || []).forEach((f) => {
+        const [label, tone] = kinds[f.kind] || ['FILE', 'cyan'];
+        const row = document.createElement('div');
+        row.className = 'fl-row';
+        row.innerHTML = `<span class="fl-kind ${tone}">${label}</span><span class="fl-title"></span><span class="fl-ago">${f.updated ? ago(f.updated) : ''}</span>
+          <button class="btn ghost sm fl-view">VIEW</button><button class="btn ghost sm fl-open">OPEN ↗</button>`;
+        $('.fl-title', row).textContent = f.title;
+        $('.fl-view', row).onclick = () => call('google_view', f.kind, f.id);
+        $('.fl-open', row).onclick = () => call('open_url', f.url);
+        $('.fl-list', el).append(row);
+      });
+    },
     document(ev) {
       const slides = ev.doc_kind === 'slides';
       const icon = slides
@@ -553,9 +594,11 @@
       const el = this.card(`doc-card ${slides ? 'slides' : 'doc'}`, `
         <div class="dc-icon">${icon}</div>
         <div class="dc-main"><div class="dc-kicker">${slides ? 'GOOGLE SLIDES' : 'GOOGLE DOC'} · SAVED</div><div class="dc-title"></div></div>
-        <button class="btn ghost sm dc-open">OPEN ↗</button>`);
+        <div class="dc-btns"><button class="btn ghost sm dc-view" title="Read it here, no browser or sign-in needed">VIEW</button>
+        <button class="btn ghost sm dc-open">OPEN ↗</button></div>`);
       $('.dc-title', el).textContent = ev.title || 'Untitled';
       $('.dc-open', el).onclick = () => call('open_url', ev.url);
+      $('.dc-view', el).onclick = () => call('google_view', ev.doc_kind || 'doc', ev.id || ev.title);
       if (!ev.url) $('.dc-open', el).remove();
     },
     email(ev) {
@@ -604,6 +647,13 @@
         'Open Spotify', 'Play GTA 5', 'What\'s the weather in London?', '¿Qué hora es en Tokio?',
       ];
       const el = this.card('suggest-card', '<div class="sg-kicker">TRY ASKING</div><div class="sg-list"></div>');
+      call('google_status').then((g) => {
+        if (g && g.configured) return;
+        const b = document.createElement('button');
+        b.className = 'sg-chip accent'; b.type = 'button'; b.textContent = '★ Link my Google account (docs, slides, email)';
+        b.onclick = () => Google.open();
+        $('.sg-list', el).prepend(b);
+      });
       ideas.forEach((idea) => {
         const b = document.createElement('button');
         b.className = 'sg-chip'; b.type = 'button'; b.textContent = idea;
@@ -677,6 +727,7 @@
       }
       else if (st === 'LISTENING') {
         sub = ph === 'calibrating' ? 'Calibrating to ambient noise…'
+          : ph === 'patient' ? `Take your time, ${title()} — I'm still listening`
           : ph === 'capturing' ? (Ptt.holding ? 'Receiving · release to transmit' : 'Receiving audio…')
             : `Go ahead, ${title()} — I'm listening`;
       } else if (st === 'THINKING') {
@@ -735,6 +786,7 @@
       this.setDD('#am-stt', mic.engine || '—');
     },
     applySettings() {
+      if (document.body.dataset.theme !== (S.settings.theme || 'arc')) applyTheme(S.settings.theme || 'arc');
       $('#cmd').placeholder = `Type a command, ${title()}…`;
       this.updateAudio();
       this.updateSub();
@@ -796,7 +848,7 @@
       const ctx = c.getContext('2d');
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
-      ctx.strokeStyle = 'rgba(42,212,255,0.07)';
+      ctx.strokeStyle = `rgba(${themeRGB},0.07)`;
       for (let y = h / 4; y < h; y += h / 4) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
       const draw = (data, rgb) => {
         if (data.length < 2) return;
@@ -810,7 +862,7 @@
         ctx.fillStyle = g; ctx.fill();
       };
       draw(this.hist.ram, '255,182,72');
-      draw(this.hist.cpu, '42,212,255');
+      draw(this.hist.cpu, themeRGB);
     },
   };
 
@@ -978,6 +1030,7 @@
       const map = { 'set-temp': ['#out-temp', (v) => (+v).toFixed(2)], 'set-rate': ['#out-rate', (v) => `${v > 0 ? '+' : ''}${v}%`],
         'set-pitch': ['#out-pitch', (v) => `${v > 0 ? '+' : ''}${v} Hz`], 'set-pause': ['#out-pause', (v) => `${(+v).toFixed(1)} s`],
         'set-sfx': ['#out-sfx', (v) => `${Math.round(v * 100)}%`],
+        'set-patience': ['#out-patience', (v) => (+v === 0 ? 'off' : `+${(+v).toFixed(1)} s`)],
         'set-wake': ['#out-wake', (v) => (v < 0.34 ? 'strict' : v < 0.67 ? 'balanced' : 'sensitive')] };
       const m = map[input.id];
       if (m) $(m[0]).textContent = m[1](input.value);
@@ -1023,9 +1076,108 @@
       if (key === 'frameless') toast('Window style changes on next launch.', 'info');
       if (key === 'voice') toast(`Voice set to ${voiceShort(r.settings.voice)}.`, 'ok', 2500);
     },
-    open() { this.fill(); this.fillVoices(); Google.refresh(); this.el.classList.add('open'); this.el.setAttribute('aria-hidden', 'false'); },
+    async browsers() {
+      const found = await call('installed_browsers');
+      if (!found) return;
+      [...$('#set-browser').options].forEach((o) => {
+        if (o.value === 'default') return;
+        if (!o.dataset.label) o.dataset.label = o.textContent;
+        o.textContent = found[o.value] ? o.dataset.label : `${o.dataset.label} (not found)`;
+        o.disabled = !found[o.value];
+      });
+    },
+    open() { this.fill(); this.fillVoices(); this.browsers(); Google.refresh(); this.el.classList.add('open'); this.el.setAttribute('aria-hidden', 'false'); },
     close() { this.el.classList.remove('open'); this.el.setAttribute('aria-hidden', 'true'); },
     toggle() { this.el.classList.contains('open') ? this.close() : this.open(); },
+  };
+
+  // ========================================================================= timers
+  const Timers = {
+    list: [],
+    set(timers) {
+      const now = Date.now();
+      this.list = (timers || []).map((t) => ({ ...t, due: now + t.left * 1000 }));
+      this.render();
+    },
+    fmt(sec) {
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+    },
+    render() {
+      const strip = $('#timer-strip');
+      if (!this.list.length) { strip.textContent = ''; return; }
+      const have = new Map($$('.timer-pill', strip).map((el) => [el.dataset.id, el]));
+      this.list.forEach((t) => {
+        let el = have.get(String(t.id));
+        if (!el) {
+          el = document.createElement('div');
+          el.className = 'timer-pill'; el.dataset.id = t.id;
+          el.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 3h6"/></svg><b></b><span></span><i></i>';
+          $('span', el).textContent = t.label || 'timer';
+          strip.append(el);
+        }
+        have.delete(String(t.id));
+      });
+      have.forEach((el) => el.remove());
+      this.tick();
+    },
+    tick() {
+      const now = Date.now();
+      this.list.forEach((t) => {
+        const el = $(`.timer-pill[data-id="${t.id}"]`);
+        if (!el) return;
+        const left = Math.max(0, Math.round((t.due - now) / 1000));
+        $('b', el).textContent = this.fmt(left);
+        $('i', el).style.width = `${t.total ? Math.max(0, Math.min(100, (left / t.total) * 100)) : 0}%`;
+        el.classList.toggle('soon', left <= 10);
+      });
+    },
+  };
+
+  // ========================================================================= document reader
+  const Reader = {
+    data: null,
+    open(ev) {
+      this.data = ev;
+      const names = { doc: 'GOOGLE DOC', slides: 'GOOGLE SLIDES', sheet: 'GOOGLE SHEET' };
+      $('#rd-kicker').textContent = names[ev.doc_kind] || 'GOOGLE FILE';
+      $('#rd-title').textContent = ev.title || 'Untitled';
+      const body = $('#rd-body');
+      body.textContent = '';
+      body.scrollTop = 0;
+      if (ev.doc_kind === 'sheet') {
+        const table = document.createElement('table');
+        (ev.rows || []).forEach((row, i) => {
+          const tr = document.createElement('tr');
+          row.forEach((cell) => { const td = document.createElement(i === 0 ? 'th' : 'td'); td.textContent = cell; tr.append(td); });
+          table.append(tr);
+        });
+        body.append(table);
+        if (ev.truncated) { const p = document.createElement('p'); p.className = 'rd-note'; p.textContent = 'Showing the first rows only.'; body.append(p); }
+        if (!(ev.rows || []).length) body.textContent = 'This sheet is empty.';
+      } else {
+        const md = String(ev.markdown || '').trim();
+        if (md) body.innerHTML = renderMarkdown(md); else body.textContent = 'This file is empty.';
+        if (ev.truncated) { const p = document.createElement('p'); p.className = 'rd-note'; p.textContent = 'Showing the beginning of a long document.'; body.append(p); }
+      }
+      $('#rd-open').style.display = ev.url ? '' : 'none';
+      $('#reader').classList.remove('hidden');
+      call('play_sfx', 'notify');
+    },
+    close() { $('#reader').classList.add('hidden'); },
+    text() {
+      const d = this.data || {};
+      return d.doc_kind === 'sheet' ? (d.rows || []).map((r) => r.join('\t')).join('\n') : String(d.markdown || '');
+    },
+    init() {
+      $('#rd-close').onclick = $('#rd-done').onclick = () => this.close();
+      $('#rd-open').onclick = () => this.data && call('open_url', this.data.url);
+      $('#rd-copy').onclick = async () => {
+        try { await navigator.clipboard.writeText(this.text()); toast('Copied.', 'ok', 1800); }
+        catch { toast('Could not copy.', 'error'); }
+      };
+      $('#reader').addEventListener('click', (e) => { if (e.target.id === 'reader') this.close(); });
+    },
   };
 
   // ========================================================================= google docs setup
@@ -1113,6 +1265,9 @@
       case 'tool_activity': S.activity = ev.label; Chat.system(ev.label, 'tool'); Hud.updateSub(); break;
       case 'activity': S.activity = ev.label; Hud.updateSub(); break;
       case 'document': Chat.document(ev); break;
+      case 'document_view': Reader.open(ev); break;
+      case 'timers': Timers.set(ev.timers); break;
+      case 'file_list': Chat.files(ev); break;
       case 'email_draft': Chat.email(ev); break;
       case 'email_status': Chat.emailStatus(ev); break;
       case 'notice': toast(ev.text, ev.level); break;
@@ -1265,9 +1420,11 @@
     const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
     window.addEventListener('keydown', (e) => {
       if (!S.booted) return;
-      if (e.code === 'Space' && !typing()) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
+      const modalOpen = !$('#reader').classList.contains('hidden') || !$('#google').classList.contains('hidden');
+      if (e.code === 'Space' && !typing() && !modalOpen) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
-        if (!$('#google').classList.contains('hidden')) Google.close();
+        if (!$('#reader').classList.contains('hidden')) Reader.close();
+        else if (!$('#google').classList.contains('hidden')) Google.close();
         else if ($('#settings').classList.contains('open')) Settings.close();
         else if (document.activeElement === $('#cmd') && $('#cmd').value) $('#cmd').value = '';
         else call('interrupt');
@@ -1285,9 +1442,11 @@
   async function main() {
     Chat.init();
     Settings.init();
+    Reader.init();
     bindControls();
     Hud.clock();
     setInterval(() => Hud.clock(), 1000);
+    setInterval(() => Timers.tick(), 500);
 
     const reactor = new Reactor($('#reactor'));
     reactorRef = reactor;

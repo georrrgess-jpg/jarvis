@@ -24,7 +24,7 @@ from .audio import VIS_FPS, AudioEngine, spectrum_frames
 from .compose import (EditRequest, WriteRequest, clean_document, document_prompt, extra_slide_prompt, parse_deck,
                       parse_edit_request, parse_write_request, revise_prompt, section_prompt, slides_prompt)
 from .config import Config, app_data_dir
-from .gdrive import GoogleRequest, parse_google_request
+from .gdrive import GoogleRequest, NewFileRequest, parse_google_request, parse_new_file
 from .google_bridge import BridgeError
 from .mail import (Draft, EmailRequest, email_prompt, first_name, gmail_compose_url, is_cancellation, is_confirmation,
                    parse_email, parse_email_request)
@@ -34,7 +34,7 @@ from .state import State, StateMachine
 from .stt import ENGINE_LABELS, Capture, SpeechInput, STTError
 from .system import SystemMonitor
 from .tools import Toolbox, ToolError, describe_call
-from . import osctl, wakeword
+from . import osctl, tabs, wakeword
 from .quick import Quick, describe_duration, parse_quick, pick
 from .ocr import default_ocr
 from .screen import ForegroundTracker, ScreenError, default_desktop, is_private
@@ -43,6 +43,8 @@ from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
+from .weather import Weather, WeatherError, asks_pc_temperature, parse_weather
+from .monitors import MonitorCommand, describe as describe_monitor, parse_monitor_command, resolve as resolve_monitor, split_screen_phrase
 from .memory import Memory, MemoryCommand, MemoryEngine, first_person_echo, parse_memory_command, spoken, today_routines
 from .personas import (PERSONAS, Persona, address_for, asks_who, get_persona, is_custom, load_custom, names_pattern, parse_switch,
                        theme_for, validate_custom)
@@ -80,10 +82,11 @@ _CLOCK = re.compile(
     r"|what\s+day\s+is\s+(?:it|today)|what(?:'s| is)\s+today'?s\s+date)[\s?.!]*$", re.IGNORECASE)
 # Only offer tools when the request plausibly needs one: small models otherwise call them for small talk.
 _TOOL_CUES = re.compile(
-    r"\b(open|launch|start|run|play|close|file|files|folder|document|doc|docs|docx|pdf|read|find|desktop|downloads|"
+    r"\b(open|launch|start|run|play|file|files|folder|document|doc|docs|docx|pdf|read|find|desktop|downloads|"
     r"spreadsheet|sheet|sheets|slides?|presentation|deck|app|game|search|look up|google|internet|online|web|website|"
     r"news|weather|latest|current|price|summari[sz]e|"
     r"write|create|make|add|edit|update|replace|list|delete|remove|move|reorder|rearrange|rename|table|row|rows|column|cell)\b", re.IGNORECASE)
+_CLOSING = re.compile(r"^\W*(?:please\s+)?(?:close|quit|exit|shut|kill|end)\b", re.I)  # never answer these by opening things
 _CHAIN_SPLIT = re.compile(r"\s*(?:,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+)(?=(?:open|launch|start|play|fire up|boot up)\b)", re.IGNORECASE)
 _OPEN_COMMAND = re.compile(
     r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you )*(?:open|launch|start|run|load|pull up|bring up|show me)"
@@ -318,7 +321,7 @@ class Assistant:
         self._pull_thread: threading.Thread | None = None
         self.wake: wakeword.WakeListener | None = None
         self._wake_error: str | None = None
-        self._last_doc: dict | None = None  # the Google Doc / deck JARVIS made or edited last ("add a section to it")
+        self.__dict__["_last_doc_value"] = None  # see the _last_doc property (loaded from settings when first needed)
         self._timers: dict[int, dict] = {}
         self._timer_ids = itertools.count(1)
         self._prewarm_stop = threading.Event()
@@ -328,12 +331,34 @@ class Assistant:
         self._pending_forget = 0.0  # when JARVIS asked "forget everything?"
         self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
         self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
+        self.weather = Weather(config, self.memory)
         load_custom(config.get("custom_personas"))
         self.wakewords = WakeWords(app_data_dir() / "wakewords", self.tts, self.audio, self.emit)
         self.wakewords.on_ready = self._wake_learned
         self.llm.persona_provider = lambda: (self.persona, self.title)
 
     # ================================================================== plumbing
+    @property
+    def _last_doc(self) -> dict | None:
+        """The Google file JARVIS made or opened last ("open it", "add a section to it"); survives restarts."""
+        value = self.__dict__.get("_last_doc_value")
+        if value is None and not self.__dict__.get("_last_doc_loaded"):
+            self.__dict__["_last_doc_loaded"] = True
+            saved = self.config.get("last_document") or {}
+            value = saved if saved.get("kind") in ("doc", "slides", "sheet") and (saved.get("id") or saved.get("url")) else None
+            self.__dict__["_last_doc_value"] = value
+        return value
+
+    @_last_doc.setter
+    def _last_doc(self, value: dict | None) -> None:
+        self.__dict__["_last_doc_value"] = value
+        self.__dict__["_last_doc_loaded"] = True
+        if value:
+            try:
+                self.config.update({"last_document": {k: value.get(k) or "" for k in ("kind", "id", "title", "url")}})
+            except Exception:
+                log.debug("couldn't remember the last document", exc_info=True)
+
     @property
     def persona(self) -> Persona:
         return get_persona(self.config.get("persona"))
@@ -640,6 +665,10 @@ class Assistant:
         except STTError as exc:
             self._fail_turn(turn, str(exc))
             return
+        except Exception:
+            log.exception("Listening failed")
+            self._fail_turn(turn, f"Something went wrong with the microphone, {self.title}. Please try again.")
+            return
         if not self._is_current(turn):
             return
         self.sfx.play("listen_end")
@@ -657,12 +686,15 @@ class Assistant:
         except STTError as exc:
             self._fail_turn(turn, str(exc))
             return
+        except Exception:
+            log.exception("Transcription failed")
+            self._fail_turn(turn, f"I couldn't make out what you said, {self.title}. Please try again.")
+            return
         if not self._is_current(turn):
             return
         text = _strip_wake(text).strip()
         if not text:
-            self.emit("notice", level="info", text=f"I didn't quite catch that, {self.title}.")
-            self._finish_turn(turn)
+            self._missed(turn)
             return
         if re.sub(r"[^\w' ]+", "", text.lower()).strip() in _STOP_PHRASES and self._awaiting is None:
             self.sfx.play("interrupt")
@@ -670,6 +702,25 @@ class Assistant:
             self._finish_turn(turn)
             return
         self._converse(turn, text, "voice")
+
+    def _missed(self, turn: Turn) -> None:
+        """Nothing intelligible was heard: say so, and (once) listen again so the user can just repeat it."""
+        retry = not getattr(turn, "retried", False) and turn.kind == "listen"
+        line = f"Sorry, {self.title}, I didn't catch that." + (" Could you say it again?" if retry else "")
+        self.emit("notice", level="info", text=line)
+        if self.config.get("voice_enabled", True) and self.audio.available:
+            try:
+                self.audio.play_voice(self.audio.decode(self.tts.synthesize(line)))
+                deadline = time.monotonic() + 6
+                while self.audio.voice_busy() and time.monotonic() < deadline and not turn.cancel.is_set():
+                    time.sleep(0.05)
+            except Exception:
+                log.debug("couldn't say the 'didn't catch that' line", exc_info=True)
+        if not self._finish_turn(turn) or turn.cancel.is_set() or not retry:
+            return
+        again = self._new_turn("listen")
+        again.retried = True
+        self._spawn(self._listen_turn, again, name=f"listen-{again.id}")
 
     def _probe(self, pcm: bytes, rate: int) -> tuple[str, bool]:
         """Recognise the speech so far, in the background, to decide whether the speaker has finished."""
@@ -733,6 +784,9 @@ class Assistant:
         """Returns what to say (a list or a token stream) when ``text`` is about the screen, else None."""
         if wants_vision_install(text):
             return [self._install_vision()]
+        screens = parse_monitor_command(text)
+        if screens is not None:
+            return [self._monitor_command(screens)]
         watch = parse_watch(text)
         if watch is not None:
             return [self._watch(turn, watch)]
@@ -743,6 +797,78 @@ class Assistant:
         if look is not None:
             return self._look(turn, look, lang)
         return None
+
+    # ================================================================== monitors
+    def _monitors(self) -> list:
+        try:
+            return list(self.desktop.monitors())
+        except Exception:
+            log.debug("couldn't list monitors", exc_info=True)
+            return []
+
+    def _monitor_command(self, cmd: MonitorCommand) -> str:
+        title = self.title
+        monitors = self._monitors()
+        if cmd.action == "info":
+            if len(monitors) <= 1:
+                return f"You have one monitor connected, {title}."
+            main = next(m for m in monitors if m.primary)
+            others = ", ".join(describe_monitor(m, monitors).replace("your ", "") for m in monitors if not m.primary)
+            return (f"You have {len(monitors)} monitors, {title}. Your main one is the {main.width} by {main.height} display "
+                    f"(Windows calls it display {main.number or 1}); the others: {others}. You can change which is main in Windows' Display settings.")
+        if not self.config.get("allow_control", True):
+            return f"Screen control is switched off in Settings, {title}."
+        target = resolve_monitor(cmd.which, monitors)
+        if target is None:
+            return (f"You only have one monitor connected, {title}." if len(monitors) <= 1
+                    else f"I'm not sure which monitor you mean, {title}. Try \"main monitor\" or \"other monitor\".")
+        if cmd.app.lower() in ("yourself", "you", "jarvis", "the hud", "your window", self.persona.name.lower()):
+            own = [w for w in self.desktop.windows(include_own=True) if self.desktop.is_own(w.hwnd)] if hasattr(self.desktop, "is_own") else []
+            if not own:
+                return f"I couldn't find my own window, {title}."
+            try:
+                self.desktop.move_to_monitor(own[0], target)
+            except ScreenError as exc:
+                return f"I couldn't move, {title}: {exc}"
+            return f"Moving over to {describe_monitor(target, monitors)}, {title}."
+        if cmd.app:
+            windows = self._app_windows(cmd.app)
+            if not windows:
+                return f"I can't see {cmd.app} open, {title}."
+            window = windows[0]
+        else:
+            window = self.tracker.current()
+            if window is None:
+                return f"I'm not sure which window you mean, {title}. Click on it once, then ask me again."
+        try:
+            self.desktop.move_to_monitor(window, target)
+        except ScreenError as exc:
+            return f"I couldn't move it, {title}: {exc}"
+        return f"Moved {cmd.app or window.label} to {describe_monitor(target, monitors)}, {title}."
+
+    def _open_on_monitor(self, which: str, name: str, before: set[int]) -> None:
+        """After launching something, wait for its window and move it to the monitor the user asked for."""
+        monitors = self._monitors()
+        target = resolve_monitor(which, monitors)
+        if target is None:
+            return
+        want = re.sub(r"[^a-z0-9]", "", name.lower())
+        deadline = time.monotonic() + 15
+        fallback_at = time.monotonic() + 4
+        while time.monotonic() < deadline and not self._prewarm_stop.is_set():
+            fresh = [w for w in self.desktop.windows() if w.hwnd not in before]
+            match = next((w for w in fresh if want and (want in re.sub(r"[^a-z0-9]", "", (w.app or "").lower())
+                                                       or want in re.sub(r"[^a-z0-9]", "", (w.title or "").lower()))), None)
+            if match is None and fresh and time.monotonic() > fallback_at:
+                match = fresh[0]
+            if match is not None:
+                time.sleep(0.4)  # let it finish drawing before we move it
+                try:
+                    self.desktop.move_to_monitor(match, target)
+                except Exception as exc:
+                    log.info("Couldn't move %s to the monitor: %s", name, exc)
+                return
+            time.sleep(0.3)
 
     def _install_vision(self) -> str:
         if self.vision.model:
@@ -764,11 +890,19 @@ class Assistant:
         return window
 
     def _look(self, turn: Turn, req: LookRequest, lang: Detection | None):
+        monitor = None
+        if req.monitor:
+            monitors = self._monitors()
+            monitor = resolve_monitor(req.monitor, monitors)
+            if monitor is None:
+                yield (f"You only have one monitor connected, {self.title}." if len(monitors) <= 1
+                       else f"I'm not sure which monitor you mean, {self.title}. Try \"main monitor\" or \"other monitor\".")
+                return
         window = None if req.full_screen else self._target_window()
-        label = window.label if window else "your screen"
+        label = describe_monitor(monitor, self._monitors()) if monitor else window.label if window else "your screen"
         self._emit_turn(turn, "tool_activity", tool="vision", label=f"Looking at {label}")
         try:
-            obs = self.vision.observe(window)
+            obs = self.vision.observe(window, monitor=monitor)
         except ScreenError as exc:
             yield f"I'm afraid {exc}"
             return
@@ -866,6 +1000,9 @@ class Assistant:
         if not self.config.get("allow_control", True):
             yield f"Screen control is switched off in Settings, {title}."
             return
+        if act.action in ("close_tab", "reopen_tab", "close_browser", "close_app"):
+            yield self._window_command(act)
+            return
         try:
             window = self._target_window()
         except ScreenError as exc:
@@ -912,6 +1049,64 @@ class Assistant:
                 yield f"Shall I {what} on {window.label if window else 'the screen'}, {title}?"
             return
         yield self._run_act(act, window, target)
+
+    def _window_command(self, act: ActRequest) -> str:
+        """Tabs and whole apps the user named ("close the YouTube tab", "close Spotify"): no looking needed."""
+        title = self.title
+        current = self.tracker.current()
+        try:
+            if act.action == "close_tab" and act.tab:
+                closed = tabs.close_named_tab(self.desktop, act.tab, act.app or "browser", current)
+                done = f"Closed the {closed or act.tab} tab, {title}."
+            elif act.action == "close_tab":
+                if not act.app or act.app == "browser":
+                    if current is not None and tabs.is_browser(current):
+                        self.desktop.press([0x11, ord("W")], window=current)
+                    else:
+                        tabs.close_current_tab(self.desktop, "browser", current)
+                else:
+                    tabs.close_current_tab(self.desktop, act.app, current)
+                done = f"Tab closed, {title}."
+            elif act.action == "reopen_tab":
+                tabs.reopen_tab(self.desktop, act.app or "browser", current)
+                return f"Brought it back, {title}."
+            elif act.action == "close_browser":
+                count = tabs.close_browser(self.desktop, act.app, current)
+                return f"Closing {tabs.BROWSER_NAMES.get(act.app, act.app)}{'' if count == 1 else f' ({count} windows)'}, {title}."
+            else:
+                windows = self._app_windows(act.target)
+                if not windows:
+                    return f"I can't see {act.target} open, {title}."
+                if any(is_private(w, self.config.get("vision_exclusions") or "") for w in windows):
+                    return f"{act.target} is on your privacy list, {title}, so I'll leave it alone."
+                for w in windows:
+                    self.desktop.close(w)
+                return f"Closing {act.target}, {title}."
+        except ScreenError as exc:
+            return f"I couldn't do that, {title}: {exc}"
+        self.emit("act_done", label=act.label, x=None, y=None)
+        return done + " Say \"reopen the tab\" if you need it back."
+
+    def _safe_windows(self) -> list:
+        try:
+            return list(self.desktop.windows())
+        except Exception:
+            return []
+
+    def _app_windows(self, name: str) -> list:
+        """Open windows that belong to the app the user named ("Spotify", "Word", "file explorer")."""
+        want = re.sub(r"[^a-z0-9]", "", name.lower())
+        if len(want) < 2:
+            return []
+        found = []
+        for w in self.desktop.windows():
+            exe = re.sub(r"[^a-z0-9]", "", re.sub(r"\.exe$", "", (w.app or "").lower()))
+            title = (w.title or "").lower()
+            app_part = re.sub(r"[^a-z0-9]", "", title.rsplit(" - ", 1)[-1]) if " - " in title else ""
+            if (exe and (want in exe or (len(exe) >= 4 and exe in want))) or (app_part and want == app_part) \
+                    or re.sub(r"[^a-z0-9]", "", title) == want:
+                found.append(w)
+        return found
 
     def _run_act(self, act: ActRequest, window, target=None, act_id: str | None = None) -> str:
         title = self.title
@@ -1161,6 +1356,20 @@ class Assistant:
 
     def _direct_command(self, turn: Turn, text: str) -> str | None:
         """Handle plain "open X" / "play X" requests without the model: instant, and reliable even with small models."""
+        rest, which = split_screen_phrase(text)
+        if which and (_OPEN_COMMAND.match(rest.strip()) or _PLAY_COMMAND.match(rest.strip())) and len(self._monitors()) > 1:
+            before = {w.hwnd for w in self._safe_windows()}
+            reply = self._direct_command(turn, rest)
+            if reply:
+                target = (_OPEN_COMMAND.match(rest.strip()) or _PLAY_COMMAND.match(rest.strip())).group("target")
+                self._spawn(self._open_on_monitor, which, target, before, name="open-on-monitor")
+                monitors = self._monitors()
+                chosen = resolve_monitor(which, monitors)
+                where = describe_monitor(chosen, monitors) if chosen else ""
+                if where and f", {self.title}." in reply:
+                    return reply.replace(f", {self.title}.", f" on {where}, {self.title}.", 1)
+                return reply.rstrip(".") + (f" on {where}." if where else ".")
+            return None
         play = _PLAY_COMMAND.match(text.strip())
         if play and self.tools.files_enabled:
             target = play.group("target").strip(" \"'")
@@ -1170,6 +1379,9 @@ class Assistant:
                 return f"Launching {result['name']}. Enjoy, {self.title}."
             except ToolError:
                 return None  # "play some jazz" etc. goes to the model
+        new = parse_new_file(text) if self.tools.web_enabled else None
+        if new is not None:
+            return self._new_file(turn, new)
         google = parse_google_request(text, have_last=self._last_doc is not None) if self.tools.web_enabled else None
         ready = self.tools.google.configured
         if google and (google.action != "open" or google.google or not google.name or google.recent):
@@ -1199,6 +1411,32 @@ class Assistant:
             return f"Opening {target}, {self.title}."
         return None
 
+    def _weather_answer(self, turn: Turn, req) -> str | None:
+        if not self.tools.web_enabled:
+            return f"Internet access is switched off in Settings, {self.title}, so I can't check the weather."
+        self._emit_turn(turn, "tool_activity", tool="weather", label=f"Checking the weather{' in ' + req.place if req.place else ''}")
+        try:
+            reply = self.weather.answer(req, self.title)
+        except WeatherError as exc:
+            if exc.offline and self.llm.online and self.llm.model:
+                log.info("Weather service unavailable (%s); falling back to a web search", exc)
+                return None
+            return f"I'm afraid {exc}"
+        except Exception:
+            log.exception("Weather lookup failed")
+            return f"I couldn't get the weather just now, {self.title}. Please try again in a moment."
+        self.llm.remember(f"weather ({req.kind}, {req.place or 'here'})", reply)
+        return reply
+
+    def _pc_temperature(self) -> str:
+        temp = osctl.cpu_temperature()
+        load = round(self.monitor.snapshot().get("cpu") or 0)
+        if temp is None:
+            return (f"Your PC doesn't report its processor temperature to me, {self.title}; many Windows PCs only share it with "
+                    f"admin rights or a monitor like LibreHardwareMonitor running. The processor is at {load} percent load right now.")
+        verdict = "which is running hot" if temp >= 85 else "which is warm but fine" if temp >= 70 else "which is perfectly healthy"
+        return f"Your processor is at {temp:g} degrees Celsius, {verdict}, {self.title}. It's at {load} percent load."
+
     def _user_language(self, text: str) -> Detection | None:
         """The language of the user's message when it's clearly not the one JARVIS was set up in."""
         if not self.config.get("auto_language", True):
@@ -1217,6 +1455,7 @@ class Assistant:
         self._emit_turn(turn, "user_message", id=f"u{next(self._ids)}", text=text, source=source, **extra)
         if not self._set_state(State.THINKING, turn, "thinking"):
             return
+        text = _strip_wake(text).strip(" ,") or text  # "Harper, close the tab" -> "close the tab"
         self.sfx.play("process")
 
         pending, self._pending_act = self._pending_act, None
@@ -1284,6 +1523,12 @@ class Assistant:
         if clock:
             self._deliver(turn, [clock])
             return
+        forecast = parse_weather(text)
+        if forecast is not None or asks_pc_temperature(text):
+            answer = self._weather_answer(turn, forecast) if forecast else self._pc_temperature()
+            if answer:  # None: the weather service is unreachable, so try a web search with the model instead
+                self._deliver(turn, [answer], language=lang.code if lang else None)
+                return
         lang_code = lang.code if lang else None
         try:
             seeing = self._vision_request(turn, text, lang)
@@ -1337,7 +1582,7 @@ class Assistant:
                 prefetch.append(("web_search", {"query": query}, self.tools.run("web_search", {"query": query})))
         self._deliver(turn, self.llm.stream_reply(
             text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args),
-            offer_tools=bool(_TOOL_CUES.search(text)), prefetch=prefetch,
+            offer_tools=bool(_TOOL_CUES.search(text)) and not _CLOSING.match(text), prefetch=prefetch,
             language=lang.name if lang else None, memory=self._memory_context(text)), language=lang.code if lang else None)
 
     def _deliver(self, turn: Turn, tokens: Iterable[str], voice: str | None = None, language: str | None = None,
@@ -1513,6 +1758,45 @@ class Assistant:
         except BridgeError as exc:
             self._emit_turn(turn, "system_message", level="error", text=f"Google: {exc}")
             return f"I'm afraid I couldn't reach your Google files, {self.title}: {exc}."
+
+    _NEW_URLS = {"doc": "https://docs.google.com/document/create", "slides": "https://docs.google.com/presentation/create",
+                 "sheet": "https://docs.google.com/spreadsheets/create"}  # Google's own "new blank file" links (like docs.new)
+
+    def _new_file(self, turn: Turn, req: NewFileRequest) -> str:
+        """A new, blank Google Doc / Slides / Sheet, opened straight away (and remembered as "it")."""
+        what = {"doc": "document", "slides": "presentation", "sheet": "spreadsheet"}[req.kind]
+        google = self.tools.google
+        if not google.configured:
+            # Google's own shortcut makes a blank file in whichever account the browser is signed in to
+            self.tools.open_link(self._NEW_URLS[req.kind])
+            self._tool_used(turn, "open_website", {"url": self._NEW_URLS[req.kind]})
+            named = f" You can name it {req.title} at the top left." if req.title else ""
+            return (f"Opening a new Google {what}, {self.title}.{named} Link Google in Settings and I'll be able to "
+                    "write in it and open it again by name.")
+        title = req.title or {"doc": "Untitled document", "slides": "Untitled presentation", "sheet": "Untitled spreadsheet"}[req.kind]
+        self._emit_turn(turn, "tool_activity", tool="google_doc", label=f"Creating a new Google {what}")
+        try:
+            if req.kind == "doc":
+                result = google.doc("create", title=title, text="")
+            elif req.kind == "slides":
+                result = google.create_deck(title, "", [])
+            else:
+                result = google.sheets("create", title=title, text="")
+        except BridgeError as exc:
+            self._emit_turn(turn, "system_message", level="error", text=f"Google: {exc}")
+            return f"I couldn't create the {what}, {self.title}: {exc}."
+        url = result.get("url") or ""
+        name = result.get("title") or title
+        self._last_doc = {"kind": req.kind, "id": result.get("id") or "", "title": name, "url": url}
+        self._emit_turn(turn, "document", doc_kind=req.kind, id=result.get("id"), title=name, url=url)
+        if url:
+            self.tools.open_link(url)
+        self.llm.remember(f"create a new {what}" + (f" called {req.title}" if req.title else ""),
+                          f'I created a new blank Google {what} "{name}" ({url}) and opened it.')
+        follow = {"doc": "Tell me what to write in it, like \"add a paragraph about our trip\".",
+                  "slides": "Tell me what to add, like \"add a slide about our goals\".",
+                  "sheet": "Tell me what to put in it, like \"add rent 1200 and food 300\"."}[req.kind]
+        return f"Done, {self.title}. I've created {name} and opened it. {follow}"
 
     def _show_file(self, turn: Turn, file: dict, req: GoogleRequest) -> str:
         title = file.get("title") or "that file"

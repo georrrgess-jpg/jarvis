@@ -103,12 +103,12 @@ def main() -> int:
         stream_audio = np.clip(stream_audio + rng.normal(0, 40, stream_audio.size), -32000, 32000).astype(np.int16)
         fired = []
 
-        class Stream:
-            pos = 0
+        position = [0]  # shared with the loop below (an attribute set in read() would only live on the instance)
 
+        class Stream:
             def read(self, n):
-                seg = stream_audio[self.pos: self.pos + n]
-                self.pos += n
+                seg = stream_audio[position[0]: position[0] + n]
+                position[0] += n
                 time.sleep(0.002)
                 return np.pad(seg, (0, n - seg.size)).astype(np.int16).tobytes()
 
@@ -120,7 +120,7 @@ def main() -> int:
         listener.COOLDOWN_S = 0.3
         listener.start()
         deadline = time.time() + 600
-        while listener.running and Stream.pos < stream_audio.size and time.time() < deadline:
+        while listener.running and position[0] < stream_audio.size and time.time() < deadline:
             time.sleep(0.2)
         listener.stop()
 

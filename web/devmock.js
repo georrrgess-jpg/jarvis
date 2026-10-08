@@ -21,7 +21,7 @@ window.createJarvisMock = function createJarvisMock() {
     link_browser: 'default', theme: params.get('theme') || 'arc', vision_model: '', allow_control: true, act_confirm: 'auto', watch_interval: 2,
     vision_exclusions: 'password, 1password, bitwarden, lastpass, keepass, dashlane, bank, banking, paypal', allow_files: true, allow_internet: true, auto_language: true, stt_extra_languages: '', user_name: '', wake_word: true, wake_sensitivity: 0.5, stt_engine: 'auto', stt_language: 'en-US', whisper_model: 'base.en', vosk_model_path: '', pause_threshold: 1.0, patience: 3,
     listen_timeout: 10, max_phrase_seconds: 45, auto_listen: false, user_title: 'sir', frameless: true,
-    persona: params.get('persona') || 'jarvis', persona_theme: true, memory_enabled: true, memory_auto_learn: true, memory_resume: true, routine_reminders: true,
+    persona: params.get('persona') || 'jarvis', weather_location: '', temperature_unit: 'auto', persona_theme: true, memory_enabled: true, memory_auto_learn: true, memory_resume: true, routine_reminders: true,
   };
   const PERSONAS = [
     { id: 'jarvis', name: 'Jarvis', display: 'J.A.R.V.I.S.', tagline: 'The impeccable butler', description: 'Calm, precise and quietly witty. Short, polished answers with a dry British sense of humour.', voice: 'en-GB-RyanNeural', gender: 'male', theme: 'arc', address: 'sir' },

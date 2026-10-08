@@ -26,6 +26,9 @@ _NAME_BEFORE = re.compile(r"^(?:the|my|our|that|this|a|an)?\s*(?:(?P<recent>" + 
 _NAME_AFTER = re.compile(r"^(?:the|my|our|a|an)?\s*" + _KIND + r"s?\s+(?:called|named|titled|about|on|for|with)\s+(?P<name>.+)$",
                          re.IGNORECASE)
 _PRONOUN = re.compile(r"^(?:it|that|this|the\s+last\s+one|the\s+one\s+(?:you|we)\s+(?:just\s+)?(?:made|wrote|created))$", re.IGNORECASE)
+_JUST_MADE = re.compile(r"^(?:the|my|our|that|this)?\s*(?:new(?:est)?\s+|brand\s+new\s+)?(?:google\s+)?" + _KIND
+                        + r"s?(?:\s+(?:that\s+|which\s+)?(?:you|we|i)\s+(?:just\s+|recently\s+)?(?:made|wrote|created|started|opened|did))?$"
+                        r"|^(?:the|my|our)\s+new(?:est)?\s+(?:google\s+)?" + _KIND.replace("?P<kind>", "?:") + r"s?$", re.IGNORECASE)
 _LISTING = re.compile(
     _LEAD + r"(?:(?:what|which)\s+(?:google\s+)?(?:docs?|documents|files|sheets|spreadsheets|slides|presentations|decks)\s+do\s+i\s+have"
     r"|(?:show|list|open|get|find)(?:\s+me)?\s+(?:all\s+)?(?:of\s+)?my\s+(?:recent|latest|newest|last)\s+(?:google\s+)?"
@@ -83,6 +86,9 @@ def parse_google_request(text: str, have_last: bool = False) -> GoogleRequest | 
         return None  # "open google docs" is the website: the normal open-a-site path handles it
     if _PRONOUN.match(rest):
         return GoogleRequest(action, None, "", recent=True, aloud=aloud) if have_last else None
+    made = _JUST_MADE.match(rest)
+    if made:  # "the document you just made", "my new doc", "the presentation we created"
+        return GoogleRequest(action, _kind(made.group("kind")), "", recent=True, aloud=aloud)
     after = _NAME_AFTER.match(rest)
     if after:
         name = after.group("name").strip(" \"'")
@@ -98,3 +104,37 @@ def parse_google_request(text: str, have_last: bool = False) -> GoogleRequest | 
             name = ""  # "my latest doc"
         return GoogleRequest(action, _kind(before.group("kind")), name, recent=recent, google=google, aloud=aloud)
     return None
+
+
+# ----------------------------------------------------------------------------- new, blank files
+@dataclass
+class NewFileRequest:
+    kind: str  # "doc" | "slides" | "sheet"
+    title: str = ""
+
+
+_NEW_FILE = re.compile(
+    _LEAD + r"(?:create|make|start|open|begin|set\s+up|give\s+me|new)(?:\s+(?:me|up))?\s+(?:a\s+|an\s+|another\s+)?"
+    r"(?:(?:new|blank|empty|fresh)\s+)+(?P<kind>google\s+docs?|google\s+documents?|docs?|documents?|google\s+sheets?|sheets?|spreadsheets?|"
+    r"google\s+slides?|slides?|slideshows?|slide\s+decks?|presentations?|decks?)"
+    r"(?:\s+(?:called|named|titled|with\s+the\s+(?:title|name))\s+(?P<title>.+?))?[\s.!?]*$", re.IGNORECASE)
+_NEW_FILE_PLAIN = re.compile(  # "create a document called Shopping list" (no "new", but a name)
+    _LEAD + r"(?:create|make|start|set\s+up)\s+(?:me\s+)?(?:a|an)\s+(?P<kind>google\s+docs?|google\s+documents?|docs?|documents?|"
+    r"google\s+sheets?|sheets?|spreadsheets?|google\s+slides?|slides?|presentations?|decks?)"
+    r"(?:\s+(?:called|named|titled)\s+(?P<title>.+?))?[\s.!?]*$", re.IGNORECASE)
+_NEW_BARE = re.compile(r"^(?:a\s+)?new\s+(?P<kind>google\s+docs?|google\s+sheets?|google\s+slides?|docs?|documents?|spreadsheets?|presentations?)[\s.!?]*$", re.I)
+
+
+def parse_new_file(text: str) -> NewFileRequest | None:
+    """'create a new document', 'make a blank presentation called Pitch', 'new google sheet' -> NewFileRequest."""
+    t = re.sub(r"(?:[\s,]+(?:for\s+me|please|now|right\s+now|real\s+quick|quickly))+[\s.!?]*$", "", (text or "").strip(), flags=re.I)
+    if _NOT_GOOGLE.search(t) and not re.search(r"\bgoogle\b", t, re.I):
+        return None  # "create a new Word document", "make a new folder"
+    m = _NEW_FILE.match(t) or _NEW_FILE_PLAIN.match(t) or _NEW_BARE.match(t)
+    if not m:
+        return None
+    title = (m.groupdict().get("title") or "").strip(" \"'.")
+    if re.match(r"^(?:about|on|for)\b", title, re.I):
+        return None  # that's a writing request
+    title = title[:1].upper() + title[1:] if title else ""
+    return NewFileRequest(_kind(m.group("kind")) or "doc", title[:100])

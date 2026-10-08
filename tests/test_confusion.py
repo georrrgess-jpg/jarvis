@@ -136,11 +136,19 @@ def test_clock_questions_skip_the_model(router):
 
 
 def test_live_questions_are_searched_first(router):
+    import httpx
+
     assistant, events, ask, searches, mock = router
+
+    def offline(request):
+        raise httpx.ConnectError("offline", request=request)
+
+    # the weather skill answers weather directly; when its service can't be reached, a web search takes over
+    assistant.weather._client_factory = lambda: httpx.Client(transport=httpx.MockTransport(offline))
     assistant.submit_text("what's the weather in London tomorrow?")
     events.wait_for(events.finished)
     assert searches == ["what's the weather in London tomorrow?"]
-    assert events.of("tool_activity")[0]["label"].startswith("Searching the web")
+    assert events.of("tool_activity")[-1]["label"].startswith("Searching the web")
     sent = chats(mock)[0]
     assert sent["messages"][-1]["role"] == "tool" and "Rain later" in sent["messages"][-1]["content"]
 

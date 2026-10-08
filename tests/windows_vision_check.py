@@ -171,6 +171,25 @@ def main() -> int:
 
         desk.scroll(-3, window=window)  # must not raise
         check("scrolling works", True)
+
+        # monitors: list them, capture one, move a real window onto it
+        mons = desk.monitors()
+        primary = [m for m in mons if m.primary]
+        check("monitors listed (one main display)", len(mons) >= 1 and len(primary) == 1,
+              [{"rect": m.rect, "work": m.work, "primary": m.primary, "number": m.number} for m in mons])
+        shot = desk.capture_monitor(primary[0])
+        check("captured the main monitor", shot.size == (primary[0].width, primary[0].height), shot.size)
+        user32 = ctypes.windll.user32
+        user32.MoveWindow.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_bool)
+        user32.MoveWindow(ctypes.c_void_p(window.hwnd), primary[0].work[0] + 5, primary[0].work[1] + 5, 760, 420, True)
+        time.sleep(0.3)
+        desk.move_to_monitor(desk.window_info(window.hwnd), primary[0])
+        time.sleep(0.3)
+        moved = desk.window_info(window.hwnd).rect
+        w = primary[0].work
+        check("moved a window onto a monitor (inside its work area, same size)",
+              w[0] <= moved[0] and moved[2] <= w[2] and w[1] <= moved[1] and moved[3] <= w[3] and abs((moved[2] - moved[0]) - 760) <= 2, moved)
+        check("window list includes the test app", any(x.hwnd == window.hwnd for x in desk.windows()))
     except Exception as exc:  # noqa: BLE001
         import traceback
 

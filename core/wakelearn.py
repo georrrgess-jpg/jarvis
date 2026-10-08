@@ -19,6 +19,7 @@ as "Hey Jarvis" at no extra cost (the expensive embedding step is shared).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -106,14 +107,14 @@ def sound_alikes(name: str) -> list[str]:
     """Pieces and near-misses of the name: things it must NOT wake up for."""
     n = re.sub(r"[^A-Za-z ]", "", name).strip() or name
     low = n.lower()
-    out = {f"hey {low[: max(2, len(low) // 2)]}", low[: max(2, (len(low) + 1) // 2)], low[len(low) // 2:]}
+    out = [f"hey {low[: max(2, len(low) // 2)]}", low[: max(2, (len(low) + 1) // 2)], low[len(low) // 2:]]
     vowels = "aeiou"
     first = next((i for i, c in enumerate(low) if c in vowels), 0)
     for repl in ("b", "p", "t", "m"):
         if first > 0 and low[0] != repl:
-            out.add(repl + low[first:])
-    out.add(f"hey {low}s and")  # embedded in a longer word stream
-    return [o for o in out if o and o != low][:8]
+            out.append(repl + low[first:])
+    out.append(f"hey {low}s and")  # embedded in a longer word stream
+    return [o for o in dict.fromkeys(out) if o and o != low][:8]  # ordered, so training is the same every run
 
 
 # ----------------------------------------------------------------------------- audio helpers
@@ -476,7 +477,7 @@ class Trainer:
     def train(self, name: str, user_samples: Sequence[np.ndarray] = ()) -> WakeModel:
         started = time.time()
         rng = random.Random(f"{self.seed}-{name}")
-        nrng = np.random.default_rng(abs(hash(name)) % (2 ** 32))
+        nrng = np.random.default_rng(int(hashlib.md5(f"{self.seed}-{name}".encode()).hexdigest()[:8], 16))  # same every run
         neg_seqs, babble, neg_texts = self.negatives()
         word = re.compile(rf"\b{re.escape(name.lower())}\b")
         neg_seqs = [q for q, t in zip(neg_seqs, neg_texts) if not word.search(t.lower())]  # "Hey Harper!" is not a negative for Harper

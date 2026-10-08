@@ -239,3 +239,36 @@ def test_settings_update_validates(make):
     assert events.of("settings")[-1]["stt_engine"] == "google"
     with pytest.raises(ValueError):
         assistant.update_settings({"stt_engine": "nope"})
+
+
+def test_unintelligible_speech_asks_again_instead_of_crashing(make):
+    assistant, events = make()
+    calls = []
+
+    def nothing(capture, on_status=None):
+        calls.append(1)
+        return ""
+
+    assistant.stt._recognize_google = nothing
+    assistant.start_listening()
+    events.wait_for(lambda: events.states().count("LISTENING") >= 2, 20)  # it listened a second time by itself
+    events.wait_for(lambda: events.states()[-1:] == ["IDLE"] and assistant._turn is None, 20)
+    time.sleep(1.0)
+    notices = [p["text"] for p in events.of("notice")]
+    assert any("didn't catch that" in n and "say it again" in n for n in notices)
+    assert events.states().count("LISTENING") == 2  # only one retry, no endless loop
+    assert not any("Internal error" in n for n in notices)
+    assert any("didn't catch that" in s for s in assistant.tts.spoken)
+
+
+def test_recogniser_crash_is_a_friendly_message(make):
+    assistant, events = make()
+
+    def explode(capture, on_status=None):
+        raise RuntimeError("boom")
+
+    assistant.stt._recognize_google = explode
+    assistant.start_listening()
+    events.wait_for(lambda: events.of("system_message"), 20)
+    assert "Internal error" not in " ".join(p["text"] for p in events.of("notice"))
+    assert events.states()[-1] == "IDLE"

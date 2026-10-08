@@ -139,9 +139,25 @@ if sys.platform == "win32":  # pragma: no cover - exercised on the Windows CI ru
         "BringWindowToTop": (wintypes.HWND,), "SetForegroundWindow": (wintypes.HWND,),
         "PostMessageW": (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM),
         "AttachThreadInput": (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL), "SetCursorPos": (ctypes.c_int, ctypes.c_int),
+        "IsWindowVisible": (wintypes.HWND,), "GetWindow": (wintypes.HWND, wintypes.UINT),
     }.items():
         getattr(user32, _name).argtypes = _args
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindow.restype = wintypes.HWND
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD), ("szDevice", wintypes.WCHAR * 32)]
+
+    _MONITOR_PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+    user32.EnumDisplayMonitors.argtypes = (wintypes.HDC, ctypes.POINTER(wintypes.RECT), _MONITOR_PROC, wintypes.LPARAM)
+    user32.GetMonitorInfoW.argtypes = (wintypes.HMONITOR, ctypes.POINTER(MONITORINFOEXW))
+    user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+    user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    user32.IsZoomed.argtypes = (wintypes.HWND,)
+    user32.MoveWindow.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.BOOL)
+    _ENUM_PROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = (_ENUM_PROC, wintypes.LPARAM)
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
@@ -207,6 +223,80 @@ class WindowsDesktop:
         rect = wintypes.RECT()
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
         return Window(int(hwnd), buf.value, app, (rect.left, rect.top, rect.right, rect.bottom))
+
+    def windows(self, include_own: bool = False) -> list[Window]:
+        """Visible top-level app windows with a title, front to back (not the shell; not JARVIS unless asked)."""
+        found: list[int] = []
+
+        def collect(hwnd, _lparam):
+            if hwnd and user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd) > 0 and not user32.GetWindow(hwnd, 4):  # GW_OWNER
+                found.append(int(hwnd))
+            return True
+
+        callback = _ENUM_PROC(collect)  # keep a reference while Windows calls it
+        user32.EnumWindows(callback, 0)
+        out = []
+        for hwnd in found:
+            if (self.is_own(hwnd) and not include_own) or self._class(hwnd) in _SHELL_CLASSES:
+                continue
+            info = self.window_info(hwnd)
+            if info is not None and info.rect[2] - info.rect[0] > 1:
+                out.append(info)
+        return out
+
+    # -- monitors ----------------------------------------------------------------
+    def monitors(self) -> list:
+        """Every display: where it is, its taskbar-free area, whether it's the main one, and Windows' number for it."""
+        from .monitors import Monitor
+
+        found = []
+
+        def collect(hmon, _hdc, _rect, _lparam):
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                r, w = info.rcMonitor, info.rcWork
+                digits = re.findall(r"\d+", info.szDevice or "")
+                found.append(Monitor((r.left, r.top, r.right, r.bottom), (w.left, w.top, w.right, w.bottom), bool(info.dwFlags & 1),
+                                     int(digits[-1]) if digits else 0, info.szDevice))
+            return True
+
+        callback = _MONITOR_PROC(collect)
+        user32.EnumDisplayMonitors(None, None, callback, 0)
+        return found
+
+    def monitor_of(self, window: Window):
+        """The display a window is (mostly) on."""
+        info = self.window_info(window.hwnd) or window
+        l, t, r, b = info.rect
+        cx, cy = (l + r) // 2, (t + b) // 2
+        mons = self.monitors()
+        return next((m for m in mons if m.contains(cx, cy)), next((m for m in mons if m.primary), mons[0] if mons else None))
+
+    def capture_monitor(self, monitor) -> "Shot":
+        from PIL import ImageGrab
+
+        l, t, r, b = monitor.rect
+        return Shot(ImageGrab.grab(bbox=(l, t, r, b), all_screens=True), l, t, 1.0, None)
+
+    def move_to_monitor(self, window: Window, monitor) -> None:
+        """Move a window onto ``monitor`` keeping its size and relative position (maximised stays maximised)."""
+        from .monitors import place_on
+
+        hwnd = window.hwnd
+        if not user32.IsWindow(hwnd):
+            raise ScreenError(f"{window.label} has been closed.")
+        maximised = bool(user32.IsZoomed(hwnd))
+        if user32.IsIconic(hwnd) or maximised:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE: a maximised window can't be moved
+            time.sleep(0.08)
+        info = self.window_info(hwnd) or window
+        x, y, w, h = place_on(info.rect, self.monitor_of(info), monitor)
+        user32.MoveWindow(hwnd, x, y, w, h, True)
+        if maximised:
+            time.sleep(0.05)
+            user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE, now on the new screen
+        self.bring_to_front(window)
 
     def is_own(self, hwnd: int) -> bool:
         pid = wintypes.DWORD()
@@ -447,4 +537,21 @@ class BasicDesktop:
     def _unsupported(self, *args, **kwargs):
         raise ScreenError("controlling the mouse and keyboard is only supported on Windows.")
 
-    click = type_text = press = scroll = close = bring_to_front = _unsupported
+    def windows(self, include_own: bool = False) -> list[Window]:
+        return []
+
+    def monitors(self) -> list:
+        from .monitors import Monitor
+
+        try:
+            from PIL import ImageGrab
+
+            w, h = ImageGrab.grab().size
+        except Exception:
+            w, h = 1920, 1080
+        return [Monitor((0, 0, w, h), (0, 0, w, h), True, 1, "screen")]
+
+    def capture_monitor(self, monitor):
+        return self.capture(None)
+
+    click = type_text = press = scroll = close = bring_to_front = move_to_monitor = _unsupported

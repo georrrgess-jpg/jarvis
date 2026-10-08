@@ -177,11 +177,11 @@ class VisionEngine:
                 "suggested": [{"name": n, "label": label} for n, label in SUGGESTED_MODELS]}
 
     # ------------------------------------------------------------------ seeing
-    def observe(self, window: Window | None, read_text: bool = True) -> Observation:
+    def observe(self, window: Window | None, read_text: bool = True, monitor=None) -> Observation:
         exclusions = self._config.get("vision_exclusions") or ""
         if is_private(window, exclusions):
             raise ScreenError(f"{window.label} looks private (it matches your privacy list), so I won't look at it.")
-        shot = self.desktop.capture(window)
+        shot = self.desktop.capture_monitor(monitor) if monitor is not None else self.desktop.capture(window)
         obs = Observation(shot)
         if read_text and self.ocr_ready:
             try:
@@ -538,6 +538,7 @@ _SCREENISH = (r"(?:screen|monitor|display|window|page|tab|website|site|article|e
 class LookRequest:
     question: str
     full_screen: bool = False
+    monitor: str = ""  # "main", "second", "left"... when the user named a screen
 
 
 @dataclass
@@ -548,12 +549,14 @@ class WatchRequest:
 
 @dataclass
 class ActRequest:
-    action: str  # "click" | "double" | "right" | "type" | "keys" | "scroll" | "close"
+    action: str  # "click" | "double" | "right" | "type" | "keys" | "scroll" | "close" | "close_tab" | "reopen_tab" | "close_browser"
     target: str = ""
     text: str = ""
     keys: list[int] | None = None
     amount: int = 0
     label: str = ""
+    app: str = ""  # a browser the user named: "chrome", "edge"... ("browser" = any)
+    tab: str = ""  # a tab the user named: "YouTube", "Google Docs"
 
 
 _LOOK_PATTERNS = [
@@ -622,10 +625,22 @@ def parse_look(text: str) -> LookRequest | None:
     t = (text or "").strip()
     if not t or len(t) > 300:
         return None
-    for pattern in _LOOK_PATTERNS:
+    from .monitors import SCREEN_WORD, WHICH
+
+    named = re.search(r"\b(?:my\s+|the\s+)?" + WHICH + r"\s+" + SCREEN_WORD + r"s?\b|\b" + SCREEN_WORD + r"\s+(?:number\s+)?(?P<num>\d)\b", t, re.I)
+    for pattern in _LOOK_PATTERNS + _MONITOR_LOOKS:
         if pattern.match(t):
-            return LookRequest(t, full_screen=bool(_FULL_SCREEN.search(t)))
+            monitor = (named.group("which") or named.group("num")) if named else ""
+            return LookRequest(t, full_screen=bool(_FULL_SCREEN.search(t)) or bool(monitor), monitor=monitor or "")
     return None
+
+
+_MONITOR_LOOKS = [re.compile(_LEAD + r"(?:what(?:'s| is)|what do you see|what can you see|look|take a look|have a look)\s+(?:on|at|in)\s+(?:my|the)\s+"
+                             r"(?:main|primary|other|second(?:ary)?|left|right|top|bottom|third|middle|laptop|external)\s+(?:monitor|screen|display)"
+                             r"(?:\s+(?:right now|now))?" + _END, re.I),
+                  re.compile(_LEAD + r"(?:what(?:'s| is)|look)\s+(?:on|at)\s+(?:monitor|screen|display)\s+(?:number\s+)?\d" + _END, re.I),
+                  re.compile(_LEAD + r"(?:summari[sz]e|describe|explain|read(?: out)?|translate|tell me about)\s+(?:what(?:'s| is)\s+on\s+|everything\s+on\s+)?"
+                             r"(?:my|the)\s+(?:main|primary|other|second(?:ary)?|left|right|top|bottom|third|middle|laptop|external)\s+(?:monitor|screen|display)" + _END, re.I)]
 
 
 def wants_vision_install(text: str) -> bool:
@@ -650,10 +665,60 @@ def parse_watch(text: str) -> WatchRequest | None:
     return None
 
 
+_BROWSER = r"(?:google\s+)?chrome|(?:microsoft\s+)?edge|(?:mozilla\s+)?firefox|brave|opera|vivaldi|(?:the\s+|my\s+|web\s+|internet\s+)?browser"
+_TAB_LEAD = r"close\s+(?:out\s+)?(?:of\s+)?"
+_TABS = [
+    # "close the chrome tab", "close this google chrome tab", "close my current edge tab"
+    ("app", re.compile(_LEAD + _TAB_LEAD + r"(?:the\s+|this\s+|that\s+|my\s+)?(?:current\s+|active\s+|open\s+)?(?P<app>" + _BROWSER + r")\s+tab" + _END, re.I)),
+    # "close the tab in chrome", "close the current tab on edge"
+    ("app", re.compile(_LEAD + _TAB_LEAD + r"(?:the\s+|this\s+|that\s+|my\s+)?(?:current\s+|active\s+|open\s+)?tab\s+(?:in|on)\s+(?P<app>" + _BROWSER + r")" + _END, re.I)),
+    # "reopen the tab", "bring back that tab", "undo closing the tab"
+    ("reopen", re.compile(_LEAD + r"(?:re-?open|bring\s+back|restore|undo\s+clos(?:e|ing))\s+(?:the\s+|that\s+|my\s+)?(?:last\s+|closed\s+)?tabs?"
+                          r"(?:\s+(?:i|you)\s+(?:just\s+)?closed)?(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    # "close the YouTube tab", "close my Google Docs tab in Edge"
+    ("named", re.compile(_LEAD + _TAB_LEAD + r"(?:the\s+|my\s+|that\s+)?(?P<tab>[\w'&.:\- ]{2,50}?)\s+tab(?:\s+(?:in|on)\s+(?P<app>" + _BROWSER + r"))?" + _END, re.I)),
+    # "close chrome", "close the edge window", "close google chrome"
+    ("browser", re.compile(_LEAD + r"(?:close|quit|exit|shut\s+down)\s+(?:the\s+|my\s+)?(?:whole\s+)?(?P<app>(?:google\s+)?chrome|(?:microsoft\s+)?edge|(?:mozilla\s+)?firefox|brave|opera|vivaldi)"
+                           r"(?:\s+(?:window|windows|browser|app))?" + _END, re.I)),
+]
+_CLOSE_APP = re.compile(_LEAD + r"(?:close|quit|exit|shut\s+down)\s+(?:the\s+|my\s+)?(?P<name>[\w .'+&-]{2,30}?)"
+                        r"(?:\s+(?:app|application|program|window|windows))?" + _END, re.I)
+_NOT_AN_APP = re.compile(r"^(?:it|this|that|everything|all|all of (?:them|it)|them|the door|your eyes|my eyes|down|up|out|"
+                         r"the deal|enough|in|now|.*\b(?:account|door|eyes|deal|gap|distance)\b.*)$", re.I)
+_NOT_A_TAB_NAME = re.compile(r"^(?:this|that|the|current|active|open|last|new|other|it|a|an)$", re.I)
+
+
+def _tab_request(t: str) -> ActRequest | None:
+    from .tabs import browser_key
+
+    for kind, pattern in _TABS:
+        m = pattern.match(t)
+        if not m:
+            continue
+        app = browser_key(m.groupdict().get("app") or "")
+        if kind == "app":
+            return ActRequest("close_tab", app=app, label=f"close the {'' if app == 'browser' else app.title() + ' '}tab".replace("  ", " "))
+        if kind == "reopen":
+            return ActRequest("reopen_tab", app=app, label="reopen the tab")
+        if kind == "browser":
+            return ActRequest("close_browser", app=app, label=f"close {app.title()}")
+        tab = re.sub(r"^(?:current|active|open)\s+", "", m.group("tab").strip(), flags=re.I)
+        if _NOT_A_TAB_NAME.match(tab):
+            return ActRequest("close_tab", app=app, label="close the tab")
+        if re.fullmatch(_BROWSER, tab, re.I):
+            return ActRequest("close_tab", app=browser_key(tab), label=f"close the {browser_key(tab).title()} tab")
+        return ActRequest("close_tab", app=app, tab=tab, label=f"close the {tab} tab")
+    return None
+
+
 def parse_act(text: str) -> ActRequest | None:
     t = (text or "").strip()
     if not t or len(t) > 200:
         return None
+    if _CLOSE.match(t) is None or re.search(r"\btab\b", t, re.I) is None:
+        tab = _tab_request(t)
+        if tab is not None:
+            return tab
     for pattern, keys, label in _SHORTCUTS:
         if pattern.match(t):
             return ActRequest("keys", keys=keys, label=label)
@@ -663,6 +728,10 @@ def parse_act(text: str) -> ActRequest | None:
         if what == "tab":
             return ActRequest("keys", keys=[0x11, ord("W")], label="close the tab")
         return ActRequest("close", label=f"close the {what}")
+    app = _CLOSE_APP.match(t)
+    if app and not _NOT_AN_APP.match(app.group("name").strip()):
+        name = app.group("name").strip()
+        return ActRequest("close_app", target=name, label=f"close {name}")
     scroll = _SCROLL.match(t)
     if scroll:
         if scroll.group("edge"):
@@ -696,7 +765,10 @@ def parse_act(text: str) -> ActRequest | None:
 
 
 def is_risky(act: ActRequest) -> bool:
-    return act.action == "close" or bool(_RISKY.search(act.target or "")) or (act.action == "keys" and act.label in ("close the tab",))
+    # closing one tab is undoable ("reopen the tab"), so it just happens; closing a whole window or browser asks first
+    if act.action in ("close_app", "close_browser"):
+        return False  # named by the user, and apps still ask before discarding unsaved work
+    return act.action == "close" or bool(_RISKY.search(act.target or ""))
 
 
 def _unquote(text: str) -> str:

@@ -1630,7 +1630,7 @@
       $('#wt-reset').onclick = async () => { await call('wake_clear_voice', this.persona.id); this.count = 0; this.paint(); this.note('Cleared. Start again whenever you like.'); };
       $('#wt-train').onclick = async () => {
         const r = await call('wake_train_voice', this.persona.id);
-        if (r && r.ok) this.note('Training with your voice… this takes about a minute.'); else this.note((r && r.error) || 'Could not start.', 'warn');
+        if (r && r.ok) this.note('Training with your voice… this takes a few minutes.'); else this.note((r && r.error) || 'Could not start.', 'warn');
       };
     },
   };

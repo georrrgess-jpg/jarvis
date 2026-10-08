@@ -132,3 +132,40 @@ def lock_screen(platform: str | None = None, runner=subprocess.run, user32=None)
         runner(["loginctl", "lock-session"], check=False)
     else:
         raise OsControlError("I can't lock the screen on this system.")
+
+
+_PS_TEMPS = r"""
+$out = @()
+foreach ($ns in 'root/LibreHardwareMonitor','root/OpenHardwareMonitor') {
+  try { Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop |
+        Where-Object { $_.SensorType -eq 'Temperature' -and ($_.Name -match 'CPU|Package|Core') } |
+        ForEach-Object { $out += [math]::Round($_.Value, 1) } } catch {}
+}
+if ($out.Count -eq 0) {
+  try { Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop |
+        ForEach-Object { $out += [math]::Round($_.CurrentTemperature / 10 - 273.15, 1) } } catch {}
+}
+$out -join ','
+"""
+
+
+def cpu_temperature(platform: str | None = None, runner=subprocess.run) -> float | None:
+    """The processor temperature in °C when the PC reports one (many Windows PCs only do with admin rights
+    or a monitor such as LibreHardwareMonitor running); None if it can't be read."""
+    platform = platform or sys.platform
+    readings: list[float] = []
+    try:
+        if platform == "win32":
+            done = runner(["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_TEMPS], capture_output=True, text=True,
+                          timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            readings = [float(v) for v in (done.stdout or "").strip().split(",") if v.strip()]
+        else:
+            import psutil
+
+            for entries in (getattr(psutil, "sensors_temperatures", lambda: {})() or {}).values():
+                readings += [e.current for e in entries if e.current]
+    except Exception as exc:
+        log.info("Couldn't read the CPU temperature: %s", exc)
+        return None
+    readings = [r for r in readings if 5 < r < 120]  # ignore nonsense sensors
+    return round(max(readings), 1) if readings else None

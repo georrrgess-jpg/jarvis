@@ -370,7 +370,7 @@
           <button class="btn ghost danger hidden" type="button" id="pe-delete">DELETE</button>
         </div>
       </form>
-      <div class="mc-foot">They'll learn to answer to “Hey <span id="pe-wake-name">…</span>” in the background (about a minute, needs internet once).</div>
+      <div class="mc-foot">They'll learn to answer to “Hey <span id="pe-wake-name">…</span>” in the background (a few minutes, needs internet once).</div>
     </div>
   </div>
 
@@ -524,6 +524,13 @@
         <label class="toggle"><input type="checkbox" data-key="memory_resume"><i></i><span>Carry on our last conversation after a restart</span></label>
         <label class="toggle"><input type="checkbox" data-key="routine_reminders"><i></i><span>Mention today's routines when I start up</span></label>
         <button class="btn sm" id="set-open-memory"><span>OPEN MEMORY CORE</span></button>
+      </fieldset>
+      <fieldset>
+        <legend>Weather</legend>
+        <label class="field"><span>My town</span><input data-key="weather_location" type="text" maxlength="80" placeholder="automatic (from your internet connection)"></label>
+        <label class="field"><span>Temperatures in</span>
+          <select data-key="temperature_unit"><option value="auto">Automatic (from your language)</option><option value="celsius">Celsius (°C)</option><option value="fahrenheit">Fahrenheit (°F)</option></select>
+        </label>
       </fieldset>
       <fieldset>
         <legend>Interface</legend>

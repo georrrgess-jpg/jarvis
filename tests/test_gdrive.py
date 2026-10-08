@@ -63,6 +63,9 @@ def google(p):
     if p["action"] == "slides_read":
         return {"ok": True, "title": "Solar System", "url": FILES["slides"][0]["url"],
                 "slides": [{"number": 1, "text": "Solar System\nA tour"}, {"number": 2, "text": "The Sun\nA star\nVery hot"}]}
+    if p["action"] in ("doc_create", "slides_create", "sheet_create"):
+        kind = {"doc_create": ("document", "n1"), "slides_create": ("presentation", "n2"), "sheet_create": ("spreadsheets", "n3")}[p["action"]]
+        return {"ok": True, "id": kind[1] + "x" * 20, "title": p.get("title"), "url": f"https://docs.google.com/{kind[0]}/d/{kind[1]}/edit"}
     return {"ok": False, "error": "unexpected " + p["action"]}
 
 
@@ -185,3 +188,70 @@ def test_the_browser_choice_is_used(config, monkeypatch):
     tb.open_website("gmail")
     assert used == [("https://docs.google.com/document/d/abc/edit?authuser=tony%40example.com", "edge"),
                     ("https://mail.google.com/mail/?authuser=tony%40example.com", "edge")]
+
+
+# ------------------------------------------------------------------ new, blank files
+@pytest.mark.parametrize("text, kind, title", [
+    ("create a new document", "doc", ""), ("make a new doc called shopping list", "doc", "Shopping list"),
+    ("open a new document", "doc", ""), ("create a blank presentation", "slides", ""), ("new google sheet", "sheet", ""),
+    ("make a new spreadsheet called Budget 2027", "sheet", "Budget 2027"), ("create a document called Trip plans for me", "doc", "Trip plans"),
+])
+def test_recognises_new_file_requests(text, kind, title):
+    from core.gdrive import parse_new_file
+
+    req = parse_new_file(text)
+    assert req is not None and (req.kind, req.title) == (kind, title)
+
+
+@pytest.mark.parametrize("text", ["create a new document about dogs", "make a new folder", "create a new word document", "open my new doc"])
+def test_not_new_file_requests(text):
+    from core.gdrive import parse_new_file
+
+    assert parse_new_file(text) is None
+
+
+def test_create_a_new_document_then_open_it(drive):
+    assistant, events, server, opened, say, mock = drive
+    said = say("create a new document called Shopping list")
+    assert "I've created Shopping list and opened it" in said
+    created = [p for p in server.posts if p["action"] == "doc_create"]
+    assert created and created[0]["title"] == "Shopping list" and created[0].get("text", "") == ""
+    assert opened[-1].startswith("https://docs.google.com/document/d/n1/edit")
+    assert events.of("document")[-1]["title"] == "Shopping list"
+    assert not chat_calls(mock)
+    opened.clear()
+    for phrase in ("open it", "open the document", "open the document you just made", "open my new doc"):
+        said = say(phrase)
+        assert "Opening Shopping list" in said, phrase
+        assert opened[-1].startswith("https://docs.google.com/document/d/n1/edit")
+    assert not [p for p in server.posts if p["action"] == "list"], "no searching: it knows which document"
+
+
+def test_new_presentation_and_spreadsheet(drive):
+    assistant, events, server, opened, say, mock = drive
+    say("create a new presentation")
+    assert [p for p in server.posts if p["action"] == "slides_create"][0]["title"] == "Untitled presentation"
+    assert opened[-1].startswith("https://docs.google.com/presentation/d/n2/edit")
+    say("make a new spreadsheet called Budget")
+    assert opened[-1].startswith("https://docs.google.com/spreadsheets/d/n3/edit")
+
+
+def test_new_document_without_the_google_link_uses_docs_new(drive, config):
+    assistant, events, server, opened, say, mock = drive
+    config.update({"google_script_url": ""})
+    said = say("create a new document")
+    assert opened[-1].startswith("https://docs.google.com/document/create") and "Link Google in Settings" in said
+
+
+def test_the_last_document_is_remembered_after_a_restart(drive, config, mock_ollama):
+    from core.assistant import Assistant
+    from core.config import Config
+    from tests.test_assistant import Events, FakeTTS
+
+    assistant, events, server, opened, say, mock = drive
+    say("create a new document called Trip plans")
+    again = Assistant(Config(config.path), Events(), tts=FakeTTS(), tools=assistant.tools)
+    try:
+        assert again._last_doc["title"] == "Trip plans" and again._last_doc["kind"] == "doc"
+    finally:
+        again.shutdown()

@@ -741,6 +741,15 @@ def run_selftest(report_path: str | None) -> int:
         if not (opened and opened.name == "Messi" and looks_unfinished("open the") and not looks_unfinished("open spotify")
                 and calculate("what is 12 times 7") == "84" and parse_quick("thanks").kind == "talk"):
             raise RuntimeError("quick skills / patience / google-file parsing misbehaved")
+        from core.gdrive import parse_new_file
+        from core.monitors import parse_monitor_command
+        from core.vision import parse_act
+        from core.weather import parse_weather
+
+        tab = parse_act("close the google chrome tab")
+        if not (tab and tab.action == "close_tab" and tab.app == "chrome" and parse_weather("what's the temperature")
+                and parse_new_file("create a new document") and parse_monitor_command("move this window to my other monitor")):
+            raise RuntimeError("tab / weather / new-document / monitor understanding misbehaved")
         return {"script_version": script_version(), "language": lang}
 
     def vision():

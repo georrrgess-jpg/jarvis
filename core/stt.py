@@ -97,6 +97,18 @@ class _PyAudioSource:
             self._pa.terminate()
 
 
+def normalise_level(pcm: bytes, target_peak: float = 20000.0, max_gain: float = 8.0) -> bytes:
+    """Bring a quiet recording up to a healthy level (recognisers miss words that are too soft)."""
+    samples = np.frombuffer(pcm, dtype=np.int16)
+    if samples.size == 0:
+        return pcm
+    peak = float(np.percentile(np.abs(samples.astype(np.float32)), 99.9))
+    if peak < 1 or peak >= target_peak * 0.7:
+        return pcm
+    gain = min(max_gain, target_peak / peak)
+    return np.clip(samples.astype(np.float32) * gain, -32767, 32767).astype(np.int16).tobytes()
+
+
 def _rms(chunk: np.ndarray) -> float:
     return float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) if chunk.size else 0.0
 
@@ -105,6 +117,7 @@ class SpeechInput:
     CALIBRATE_S = 0.3
     PROBE_AFTER_S = 0.55  # silence after which we peek at what was said to decide whether the speaker is done
     PRE_ROLL_S = 0.45
+    GOOGLE_TIMEOUT_S = 12
     MIN_THRESHOLD = 260.0
     MAX_THRESHOLD = 3500.0
 
@@ -197,7 +210,13 @@ class SpeechInput:
         verdict: tuple[str, bool] | None = None  # the finished probe of the current pause
         waiting_politely = False
 
-        source = self._source_factory()
+        try:
+            source = self._source_factory()
+        except STTError:
+            raise
+        except Exception as exc:
+            log.warning("Opening the microphone failed: %s", exc)
+            raise STTError(f"I couldn't open the microphone ({exc.__class__.__name__}). Is another app using it?") from exc
         rate = source.rate
         chunk = getattr(source, "chunk", max(256, int(rate * 0.032)))
         chunk_s = chunk / rate
@@ -207,7 +226,10 @@ class SpeechInput:
         frames: list[bytes] = []
 
         def read() -> tuple[bytes, float]:
-            data = source.read(chunk)
+            try:
+                data = source.read(chunk)
+            except Exception as exc:
+                raise STTError(f"The microphone stopped responding ({exc.__class__.__name__}).") from exc
             samples = np.frombuffer(data, dtype=np.int16)
             bands, level = spectrum.process(samples)
             on_frame(bands, level)
@@ -336,6 +358,10 @@ class SpeechInput:
             except STTError as exc:
                 last_error = exc
                 continue
+            except Exception as exc:  # a bug or a broken engine must not take the whole turn down
+                log.exception("STT engine %s failed", engine)
+                last_error = STTError(f"Speech recognition hit a problem ({exc.__class__.__name__}).")
+                continue
         raise last_error or STTError("No speech recognition engine is available.")
 
     def _recognize_google(self, capture: Capture, on_status=None) -> str:
@@ -343,13 +369,20 @@ class SpeechInput:
             import speech_recognition as sr
         except ImportError as exc:
             raise _EngineUnavailable("SpeechRecognition is not installed") from exc
-        audio = sr.AudioData(capture.pcm, capture.rate, capture.width)
+        audio = sr.AudioData(normalise_level(capture.pcm), capture.rate, capture.width)
         languages = self.languages()
 
         def ask(language: str):
+            recognizer = sr.Recognizer()
+            recognizer.operation_timeout = self.GOOGLE_TIMEOUT_S  # never hang on a stalled connection
             try:
-                return sr.Recognizer().recognize_google(audio, language=language, show_all=True)
+                return recognizer.recognize_google(audio, language=language, show_all=True)
+            except sr.UnknownValueError:
+                return []  # nothing intelligible (SpeechRecognition 3.11+ raises instead of returning [])
             except sr.RequestError as exc:
+                return exc
+            except Exception as exc:  # timeouts, dropped connections, odd replies: a failure, never a crash
+                log.info("Google recognition (%s) failed: %s: %s", language, exc.__class__.__name__, exc)
                 return exc
 
         if len(languages) == 1:

@@ -35,7 +35,8 @@ DEFAULTS: dict[str, Any] = {
     "google_script_url": "",
     "google_bridge_token": "",
     "google_bridge_version": 0,
-    "google_user_email": "",  # the linked Google account ("email it to me")
+    "google_user_email": "",
+    "last_document": {},  # the Google file made or opened last, so "open it" works after a restart  # the linked Google account ("email it to me")
     "user_name": "",  # for email sign-offs  # version of the script the user deployed (see BRIDGE_VERSION in the .gs)
     # Voice output (edge-tts)
     "voice": "en-GB-RyanNeural",
@@ -69,6 +70,8 @@ DEFAULTS: dict[str, Any] = {
     "wake_jarvis_always": True,  # "Hey Jarvis" works whichever personality is active
     "wake_learn_auto": True,  # learn a personality's name as a wake word the first time it's used
     "theme": "arc",  # arc | mark3 | stealth | violet | rose
+    "weather_location": "",  # town for weather ("London"); empty = what you've told me, else your connection's location
+    "temperature_unit": "auto",  # auto (from your language) | celsius | fahrenheit
     # Long-term memory (memory.db next to the settings file; never leaves this computer)
     "memory_enabled": True,  # remember facts, preferences, routines and projects across sessions
     "memory_auto_learn": True,  # pick things up from conversation by itself (otherwise only "remember that ...")
@@ -88,6 +91,7 @@ _CHOICES: dict[str, tuple[str, ...]] = {
     "link_browser": ("default", "chrome", "edge", "firefox", "brave"),
     "theme": ("arc", "mark3", "stealth", "violet", "rose"),
     "persona": ("jarvis", "harper", "friday", "sage"),
+    "temperature_unit": ("auto", "celsius", "fahrenheit"),
     "act_confirm": ("auto", "always"),
 }
 
@@ -105,7 +109,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "wake_sensitivity": (0.0, 1.0),
 }
 
-_MAX_TEXT = {"vision_exclusions": 1000, "custom_instructions": 2000, "user_title": 40}
+_MAX_TEXT = {"weather_location": 80, "vision_exclusions": 1000, "custom_instructions": 2000, "user_title": 40}
 
 
 def app_data_dir() -> Path:

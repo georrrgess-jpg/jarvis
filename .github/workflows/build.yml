@@ -96,6 +96,18 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python tests/windows_vision_check.py vision-check.json vision-check.png
+      - name: Browser tab check (real Chrome - close a tab by name, reopen, close the active tab, close Chrome)
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_tabs_check.py tabs-check.json
+      - name: Online services check (real weather from Open-Meteo, Google speech with no words)
+        shell: pwsh
+        timeout-minutes: 5
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_online_check.py online-check.json
       - name: Wake-word check (learn "Hey Harper" / "Hey Sage" from real neural voices, test on unseen voices)
         shell: pwsh
         timeout-minutes: 25
@@ -111,6 +123,8 @@ jobs:
             smoke.json
             smoke.png
             wake-check.json
+            tabs-check.json
+            online-check.json
             vision-check.json
             vision-check.png
             ${{ runner.temp }}/jarvis-home/jarvis.log

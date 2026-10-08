@@ -96,6 +96,12 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python tests/windows_vision_check.py vision-check.json vision-check.png
+      - name: Wake-word check (learn "Hey Harper" / "Hey Sage" from real neural voices, test on unseen voices)
+        shell: pwsh
+        timeout-minutes: 25
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_wake_check.py wake-check.json
       - name: Upload smoke-test evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,6 +110,7 @@ jobs:
           path: |
             smoke.json
             smoke.png
+            wake-check.json
             vision-check.json
             vision-check.png
             ${{ runner.temp }}/jarvis-home/jarvis.log

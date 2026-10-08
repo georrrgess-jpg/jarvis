@@ -33,14 +33,44 @@
     rose: { css: { cyan: '255 128 170', ice: '255 206 222', green: '255 196 140', amber: '196 160 255' },
       state: { IDLE: [255, 128, 170], LISTENING: [255, 196, 140], THINKING: [196, 160, 255], SPEAKING: [255, 206, 222] } },
   };
+  function hexRGB(hex) { const n = parseInt(String(hex).slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+  function toHex(theme) {
+    if (/^#[0-9a-f]{6}$/i.test(theme || '')) return theme.toLowerCase();
+    return '#' + themeOf(theme).state.IDLE.map((v) => v.toString(16).padStart(2, '0')).join('');
+  }
+  function hsl2rgb(h, s, l) {
+    const f = (n) => { const k = (n + h / 30) % 12; const a = s * Math.min(l, 1 - l); return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); };
+    return [f(0), f(8), f(4)];
+  }
+  function rgb2hsl([r, g, b]) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
+    if (!d) return [0, 0, l];
+    const s = d / (1 - Math.abs(2 * l - 1));
+    const h = max === r ? 60 * (((g - b) / d) % 6) : max === g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+    return [(h + 360) % 360, s, l];
+  }
+  /** A full HUD palette from one colour: the colour itself, a pale tint, and two companion hues for listening/thinking. */
+  function themeOf(name) {
+    if (THEMES[name]) return THEMES[name];
+    if (!/^#[0-9a-f]{6}$/i.test(name || '')) return THEMES.arc;
+    const base = hexRGB(name);
+    let [h, s, l] = rgb2hsl(base);
+    s = Math.max(s, 0.55); l = Math.min(Math.max(l, 0.55), 0.72);
+    const main = hsl2rgb(h, s, l), ice = hsl2rgb(h, s * 0.8, Math.min(0.88, l + 0.2));
+    const listen = hsl2rgb((h + 40) % 360, s, 0.66), think = hsl2rgb((h + 180) % 360, Math.max(s, 0.7), 0.66);
+    const css = (c) => c.join(' ');
+    return { css: { cyan: css(main), ice: css(ice), green: css(listen), amber: css(think) },
+      state: { IDLE: main, LISTENING: listen, THINKING: think, SPEAKING: ice } };
+  }
   let themeRGB = '42,212,255';
   function applyTheme(name) {
-    const t = THEMES[name] || THEMES.arc;
+    const t = themeOf(name);
     const root = document.documentElement;
     Object.entries(t.css).forEach(([k, v]) => root.style.setProperty(`--${k}`, v));
     Object.assign(STATE_RGB, Object.fromEntries(Object.entries(t.state).map(([k, v]) => [k, v.slice()])));
     themeRGB = t.state.IDLE.join(',');
-    document.body.dataset.theme = THEMES[name] ? name : 'arc';
+    document.body.dataset.theme = THEMES[name] ? name : /^#/.test(name || '') ? 'custom' : 'arc';
     if (typeof Col !== 'undefined') Col.tgt = (STATE_RGB[S.state] || STATE_RGB.IDLE).slice();
   }
 
@@ -761,7 +791,7 @@
       if (st === 'IDLE') {
         const wake = S.wake && S.wake.active;
         sub = !(o && o.online && o.model) ? 'Neural core offline · limited functionality'
-          : wake ? `Awaiting your command, ${title()} · say “Hey Jarvis”` : `Awaiting your command, ${title()}`;
+          : wake ? `Awaiting your command, ${title()} · say “${S.wake.phrase || 'Hey Jarvis'}”` : `Awaiting your command, ${title()}`;
       }
       else if (st === 'LISTENING') {
         sub = ph === 'calibrating' ? 'Calibrating to ambient noise…'
@@ -811,11 +841,14 @@
       else this.chip('#chip-voice', 'ok', voiceShort(set.voice).toUpperCase());
       const engine = (mic.engine || '').replace(/ \(.*\)/, '').toUpperCase();
       const wake = S.wake || {};
-      if (mic.available && wake.active) this.chip('#chip-mic', 'ok', 'HEY JARVIS');
+      if (mic.available && wake.active) this.chip('#chip-mic', 'ok', (wake.phrase || 'Hey Jarvis').toUpperCase());
       else if (mic.available) this.chip('#chip-mic', 'ok', engine || 'READY');
       else this.chip('#chip-mic', 'bad', 'NO DEVICE');
       $('#wake-hint').classList.toggle('hidden', !(mic.available && wake.active));
-      $('#chip-mic').title = wake.active ? 'Listening for “Hey Jarvis”' : `Wake word off${wake.reason ? `: ${wake.reason}` : ''}`;
+      const phrases = (wake.phrases && wake.phrases.length ? wake.phrases : [wake.phrase || 'Hey Jarvis']).map((x) => `“${x}”`).join(' or ');
+      $('#chip-mic').title = wake.active ? `Listening for ${phrases}${wake.learning ? ` · learning “Hey ${wake.learning.name}” (${Math.round(wake.learning.progress * 100)}%)` : ''}`
+        : `Wake word off${wake.reason ? `: ${wake.reason}` : ''}`;
+      $('#wake-hint-phrase').textContent = `“${wake.phrase || 'Hey Jarvis'}”`;
       $('#mic-btn').classList.toggle('disabled', !mic.available);
 
       this.setDD('#am-voice', `${voiceShort(set.voice)} · ${(set.voice || '').split('-').slice(0, 2).join('-')}`, voiceOn && S.voiceOk ? '' : 'warn');
@@ -824,7 +857,7 @@
       this.setDD('#am-stt', mic.engine || '—');
     },
     applySettings() {
-      if (document.body.dataset.theme !== (S.settings.theme || 'arc')) applyTheme(S.settings.theme || 'arc');
+      if (this.appliedTheme !== (S.settings.theme || 'arc')) { this.appliedTheme = S.settings.theme || 'arc'; applyTheme(this.appliedTheme); }
       $('#cmd').placeholder = `Type a command, ${title()}…`;
       this.updateAudio();
       this.updateSub();
@@ -1052,6 +1085,7 @@
         const live = () => this.output(input);
         input.addEventListener('input', live);
         input.addEventListener('change', () => {
+          if (key === 'theme') { this.saveTheme(input.value); return; }
           let value;
           if (input.type === 'checkbox') value = input.checked;
           else if (input.type === 'range') value = parseFloat(input.value);
@@ -1060,6 +1094,7 @@
         });
       });
       $('#settings-close').onclick = () => this.close();
+      $('#set-theme-color').onchange = (e) => this.saveTheme(e.target.value.toUpperCase());
       $('#set-model-refresh').onclick = async () => { const st = await call('check_ollama'); if (st) Ollama.update(st); toast('Model list refreshed.', 'info'); };
       $('#set-voice-preview').onclick = () => call('preview_voice', $('#set-voice').value);
       $('#set-clear-memory').onclick = async () => { await call('clear_memory'); toast('Conversation cleared. Long-term memories are kept.', 'ok'); Chat.system('Conversation cleared (long-term memory is untouched).'); };
@@ -1074,6 +1109,16 @@
       const m = map[input.id];
       if (m) $(m[0]).textContent = m[1](input.value);
     },
+    async saveTheme(value) {
+      if (value === 'custom') value = $('#set-theme-color').value.toUpperCase();
+      $('#set-theme-custom-row').classList.toggle('hidden', !/^#/.test(value));
+      if (S.settings.persona_theme !== false && S.persona) {  // colours follow the personality: this becomes its colour
+        const r = await call('persona_color', S.persona.id, value);
+        if (r && r.ok) { Personas.patch(r.persona); toast(`${S.persona.name}'s colours updated.`, 'ok', 2000); }
+        return;
+      }
+      this.save({ theme: value }, 'theme');
+    },
     fill() {
       const set = S.settings;
       $$('[data-key]', this.el).forEach((input) => {
@@ -1083,6 +1128,14 @@
         else if (input.tagName !== 'SELECT' || [...input.options].some((o) => o.value === String(v))) input.value = v;
         this.output(input);
       });
+      const pick = $('#set-persona');
+      if (S.personas && S.personas.length) {
+        pick.innerHTML = S.personas.map((p) => `<option value="${esc(p.id)}">${esc(p.name === 'Jarvis' ? 'J.A.R.V.I.S.' : p.name)}: ${esc(p.tagline)}</option>`).join('');
+        pick.value = set.persona;
+      }
+      const custom = /^#/.test(set.theme || '');
+      if (custom) { $('[data-key=theme]', this.el).value = 'custom'; $('#set-theme-color').value = set.theme.toLowerCase(); }
+      $('#set-theme-custom-row').classList.toggle('hidden', !custom);
       this.fillModels();
     },
     fillModels() {
@@ -1313,44 +1366,111 @@
     apply(p) {
       if (!p) return;
       S.persona = p;
-      if (Array.isArray(S.personas)) S.personas = S.personas.map((x) => ({ ...x, active: x.id === p.id }));
+      if (Array.isArray(S.personas)) S.personas = S.personas.map((x) => (x.id === p.id ? { ...x, ...p, active: true } : { ...x, active: false }));
       $('#brand-name').textContent = p.display;
       $('#brand-tag').textContent = p.id === 'jarvis' ? 'Just A Rather Very Intelligent System' : p.tagline;
       document.body.dataset.persona = p.id;
       document.title = p.display;
       if (this.el && !this.el.classList.contains('hidden')) this.render();
     },
-    swatch(theme) {
-      const t = THEMES[theme] || THEMES.arc;
-      return `rgb(${t.state.IDLE.join(',')})`;
+    setList(list) {
+      if (!Array.isArray(list)) return;
+      S.personas = list;
+      const active = list.find((p) => p.active);
+      if (active) this.apply(active);
+      else if (this.el && !this.el.classList.contains('hidden')) this.render();
+    },
+    swatch(theme) { return `rgb(${themeOf(theme).state.IDLE.join(',')})`; },
+    wakeLine(p) {
+      const w = p.wake || {};
+      const phrase = esc(w.phrase || `Hey ${p.name}`);
+      if (p.id === 'jarvis') return `<span class="ok">“${phrase}” · built in</span>`;
+      if (w.state === 'learning' || w.state === 'queued') {
+        const pct = Math.round((w.progress || 0) * 100);
+        return `<span>Learning “${phrase}”… ${pct}%</span><i class="ps-bar"><b style="width:${pct}%"></b></i><small>${esc(w.label || 'Waiting')}</small>`;
+      }
+      if (w.state === 'ready') {
+        const m = w.metrics || {};
+        const pct = m.held_out_recall != null ? ` · caught ${Math.round(m.held_out_recall * 100)}% of new voices` : '';
+        return `<span class="ok">“${phrase}” ready${w.user_samples ? ' · tuned to your voice' : pct}</span>`;
+      }
+      if (w.state === 'error') return `<span class="bad" title="${esc(w.error || '')}">Couldn't learn “${phrase}”</span>`;
+      return `<span>“${phrase}” not learned yet</span>`;
     },
     render() {
       const grid = $('#ps-grid');
       grid.innerHTML = '';
       (S.personas || []).forEach((p) => {
         const active = S.persona && S.persona.id === p.id;
+        const w = p.wake || {};
         const card = document.createElement('div');
-        card.className = `ps-item${active ? ' active' : ''}`;
-        card.style.setProperty('--ps', this.swatch(p.theme));
-        card.innerHTML = `<div class="ps-face"><i></i><i></i><i></i></div>
+        card.className = `ps-item${active ? ' active' : ''}${p.custom ? ' custom' : ''}`;
+        card.dataset.id = p.id;
+        card.style.setProperty('--ps', this.swatch(p.color || p.theme));
+        const learnLabel = w.state === 'ready' ? 'RELEARN' : w.state === 'error' ? 'TRY AGAIN' : 'LEARN NAME';
+        card.innerHTML = `<div class="ps-top"><div class="ps-face"><i></i><i></i><i></i></div>
+            <label class="ps-color" title="Change ${esc(p.name)}'s colours"><input type="color"><span>COLOUR</span></label></div>
           <div class="ps-name"></div><div class="ps-tag"></div><p class="ps-desc"></p>
           <div class="ps-meta"><span class="ps-voice"></span><span class="ps-addr"></span></div>
+          <div class="ps-wake">${this.wakeLine(p)}</div>
+          ${p.id === 'jarvis' ? '' : `<div class="ps-wake-acts">
+            ${w.state === 'learning' || w.state === 'queued' ? '' : `<button class="ps-link" data-act="learn">${learnLabel}</button>`}
+            <button class="ps-link" data-act="teach">TEACH MY VOICE</button></div>`}
           <div class="ps-actions"><button class="btn sm ghost" data-act="hear">HEAR</button>
-          <button class="btn sm ${active ? '' : 'primary'}" data-act="pick"${active ? ' disabled' : ''}><span>${active ? 'ACTIVE' : 'SWITCH'}</span></button></div>`;
+            ${p.custom ? '<button class="btn sm ghost" data-act="edit">EDIT</button>' : ''}
+            <button class="btn sm ${active ? '' : 'primary'}" data-act="pick"${active ? ' disabled' : ''}><span>${active ? 'ACTIVE' : 'SWITCH'}</span></button></div>`;
         $('.ps-name', card).textContent = p.display;
         $('.ps-tag', card).textContent = p.tagline;
         $('.ps-desc', card).textContent = p.description;
         $('.ps-voice', card).textContent = `Voice · ${voiceShort(p.voice)}`;
         $('.ps-addr', card).textContent = `Calls you “${p.address}”`;
+        const color = $('.ps-color input', card);
+        color.value = toHex(p.color || p.theme);
+        color.oninput = () => card.style.setProperty('--ps', color.value);
+        color.onchange = async () => {
+          const r = await call('persona_color', p.id, color.value);
+          if (r && r.ok) { this.patch(r.persona); toast(`${p.name}'s colours updated.`, 'ok', 2000); }
+        };
         $('[data-act=hear]', card).onclick = () => call('persona_preview', p.id);
         $('[data-act=pick]', card).onclick = async () => {
           const r = await call('persona_set', p.id);
           if (r && r.ok) { this.apply(r.persona); call('play_sfx', 'activate'); setTimeout(() => this.close(), 450); }
           else toast((r && r.error) || 'Could not switch.', 'error');
         };
+        const edit = $('[data-act=edit]', card);
+        if (edit) edit.onclick = () => PersonaEditor.open(p);
+        const learn = $('[data-act=learn]', card);
+        if (learn) learn.onclick = async () => { const r = await call('wake_learn', p.id); if (r && !r.ok) toast(r.error, 'warn'); };
+        const teach = $('[data-act=teach]', card);
+        if (teach) teach.onclick = () => WakeTeach.open(p);
         grid.append(card);
       });
+      const add = document.createElement('button');
+      add.className = 'ps-item ps-new';
+      add.innerHTML = '<b>+</b><span>CREATE YOUR OWN</span><small>Name, personality, voice and colour</small>';
+      add.onclick = () => PersonaEditor.open(null);
+      grid.append(add);
       $('#ps-theme').checked = S.settings.persona_theme !== false;
+    },
+    patch(p) {
+      S.personas = (S.personas || []).map((x) => (x.id === p.id ? { ...x, ...p } : x));
+      if (S.persona && S.persona.id === p.id) S.persona = { ...S.persona, ...p };
+      if (this.el && !this.el.classList.contains('hidden')) this.render();
+    },
+    wake(ev) {
+      const p = (S.personas || []).find((x) => x.name.toLowerCase() === String(ev.name || '').toLowerCase());
+      if (!p) return;
+      const before = (p.wake || {}).state;
+      const { type, ...w } = ev;
+      p.wake = w;
+      if (this.el && !this.el.classList.contains('hidden')) {
+        const line = $(`.ps-item[data-id="${p.id}"] .ps-wake`, this.el);
+        if (line && before === w.state && w.state === 'learning') line.innerHTML = this.wakeLine(p);
+        else this.render();
+      }
+      if (before !== 'ready' && w.state === 'ready') toast(`Learned “${w.phrase}”${w.user_samples ? ' with your voice' : ''}. Try saying it!`, 'ok', 5000);
+      if (w.state === 'error' && before !== 'error') toast(`Couldn't learn “${w.phrase}”: ${w.error}`, 'warn', 7000);
+      WakeTeach.update(p);
     },
     async open() {
       const list = await call('persona_list');
@@ -1368,6 +1488,150 @@
       $('#btn-persona').onclick = () => this.open();
       $('#brand').onclick = () => S.booted && this.open();
       $('#set-open-personas').onclick = () => { Settings.close(); this.open(); };
+    },
+  };
+
+  // ========================================================================= create / edit a personality
+  const PRESET_COLORS = ['#2AD4FF', '#FF8AAA', '#FF7040', '#48FF96', '#AC7AFF', '#FFD24A', '#4A7BFF', '#FF4A5C', '#E0E6F0'];
+  const PERSONA_IDEAS = [
+    ['Pirate', 'A swashbuckling pirate captain who speaks in pirate slang, loves treasure hunts and turns every task into an adventure.'],
+    ['Coach', 'An energetic fitness coach who motivates me, keeps me accountable and celebrates every small win.'],
+    ['Scientist', 'A curious, precise scientist who explains how things work with fun facts and simple experiments.'],
+    ['Grandma', 'A warm, wise grandmother who gives gentle advice, tells little stories and always asks if I have eaten.'],
+  ];
+  const PersonaEditor = {
+    el: null, editing: null, color: PRESET_COLORS[0],
+    async fillVoices(selected) {
+      if (!S.voices) S.voices = (await call('list_voices')) || [];
+      const list = S.voices.length ? S.voices : [{ id: 'en-US-AvaNeural', label: 'Ava · en-US · Female', gender: 'Female' }, { id: 'en-GB-RyanNeural', label: 'Ryan · en-GB · Male', gender: 'Male' }];
+      $('#pe-voice').innerHTML = list.map((v) => `<option value="${esc(v.id)}" data-gender="${esc(v.gender || '')}">${esc(v.label)}</option>`).join('');
+      $('#pe-voice').value = selected && list.some((v) => v.id === selected) ? selected : list[0].id;
+    },
+    swatches() {
+      const box = $('#pe-colors');
+      box.innerHTML = '';
+      PRESET_COLORS.forEach((c) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = `pe-sw${c.toUpperCase() === this.color.toUpperCase() ? ' on' : ''}`;
+        b.style.background = c; b.title = c;
+        b.onclick = () => { this.color = c; this.swatches(); };
+        box.append(b);
+      });
+      const custom = document.createElement('label');
+      custom.className = `pe-sw pe-custom${PRESET_COLORS.includes(this.color.toUpperCase()) ? '' : ' on'}`;
+      custom.title = 'Any colour';
+      custom.innerHTML = '<input type="color">';
+      $('input', custom).value = this.color.toLowerCase();
+      $('input', custom).onchange = (e) => { this.color = e.target.value.toUpperCase(); this.swatches(); };
+      box.append(custom);
+    },
+    async open(p) {
+      this.editing = p;
+      $('#pe-title').textContent = p ? `Edit ${p.name}` : 'Create a personality';
+      const saved = (p && p.saved) || {};
+      $('#pe-name').value = saved.name || '';
+      $('#pe-desc').value = saved.description || '';
+      $('#pe-address').value = saved.address || '';
+      this.color = (saved.color || PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)]).toUpperCase();
+      $('#pe-delete').classList.toggle('hidden', !p);
+      $('#pe-error').textContent = '';
+      this.count(); this.swatches(); this.wakeName();
+      $('#pe-ideas').innerHTML = p ? '' : '<span>Ideas:</span>' + PERSONA_IDEAS.map(([n], i) => `<button type="button" data-i="${i}">${n}</button>`).join('');
+      $$('#pe-ideas button').forEach((b) => (b.onclick = () => {
+        const [n, d] = PERSONA_IDEAS[+b.dataset.i];
+        if (!$('#pe-name').value.trim()) $('#pe-name').value = n;
+        $('#pe-desc').value = d; this.count(); this.wakeName();
+      }));
+      await this.fillVoices(saved.voice);
+      Personas.close();
+      this.el.classList.remove('hidden');
+      setTimeout(() => $('#pe-name').focus(), 50);
+    },
+    close(back = true) { this.el.classList.add('hidden'); if (back) Personas.open(); },
+    count() { $('#pe-count').textContent = `${$('#pe-desc').value.length} / 600`; },
+    wakeName() { $('#pe-wake-name').textContent = $('#pe-name').value.trim() || '…'; },
+    async save(andSwitch) {
+      const opt = $('#pe-voice').selectedOptions[0];
+      const data = { id: this.editing ? this.editing.id : '', name: $('#pe-name').value, description: $('#pe-desc').value,
+        voice: $('#pe-voice').value, gender: opt ? opt.dataset.gender : '', color: this.color, address: $('#pe-address').value };
+      const r = await call('persona_save', data);
+      if (!r || !r.ok) { $('#pe-error').textContent = (r && r.error) || 'Could not save.'; $('#pe-error').className = 'field-note warn'; return; }
+      toast(this.editing ? `${r.persona.name} updated.` : `${r.persona.name} is ready to talk!`, 'ok');
+      if (andSwitch && !r.persona.active) {
+        const s = await call('persona_set', r.persona.id);
+        if (s && s.ok) Personas.apply(s.persona);
+        this.close(false);
+        return;
+      }
+      this.close(true);
+    },
+    init() {
+      this.el = $('#persona-edit');
+      $('#pe-close').onclick = () => this.close();
+      this.el.addEventListener('click', (e) => { if (e.target === this.el) this.close(); });
+      $('#pe-desc').oninput = () => this.count();
+      $('#pe-name').oninput = () => this.wakeName();
+      $('#pe-hear').onclick = () => call('preview_voice', $('#pe-voice').value);
+      $('#pe-form').onsubmit = (e) => { e.preventDefault(); this.save(true); };
+      $('#pe-save').onclick = () => this.save(false);
+      let armed = 0;
+      $('#pe-delete').onclick = async () => {
+        const b = $('#pe-delete');
+        if (!armed) { armed = setTimeout(() => { armed = 0; b.textContent = 'DELETE'; b.classList.remove('armed'); }, 4000); b.textContent = 'CLICK AGAIN TO DELETE'; b.classList.add('armed'); return; }
+        clearTimeout(armed); armed = 0; b.textContent = 'DELETE'; b.classList.remove('armed');
+        const r = await call('persona_delete', this.editing.id);
+        if (r && r.ok) { toast(`${this.editing.name} deleted.`, 'ok'); this.close(true); } else toast((r && r.error) || 'Could not delete.', 'error');
+      };
+    },
+  };
+
+  // ========================================================================= teach the wake word my voice
+  const WakeTeach = {
+    el: null, persona: null, count: 0, busy: false,
+    open(p) {
+      this.persona = p;
+      this.count = (p.wake && p.wake.recordings) || 0;
+      $('#wt-phrase').textContent = `“Hey ${p.name}”`;
+      $('#wt-title').textContent = `Teach ${p.name} your voice`;
+      this.note('Speak at your usual distance from the microphone.');
+      this.paint();
+      Personas.close();
+      this.el.classList.remove('hidden');
+    },
+    close(back = true) { this.el.classList.add('hidden'); if (back) Personas.open(); },
+    note(text, cls = '') { const n = $('#wt-note'); n.textContent = text; n.className = `field-note ${cls}`; },
+    paint() {
+      $('#wt-takes').innerHTML = Array.from({ length: 5 }, (_, i) => `<i class="${i < this.count ? 'on' : ''}${i === this.count ? ' next' : ''}"></i>`).join('');
+      $('#wt-train').disabled = this.count < 3;
+      $('#wt-rec-label').textContent = this.busy ? 'LISTENING…' : this.count >= 5 ? 'RECORD AGAIN' : `RECORD ${Math.min(this.count + 1, 5)} OF ${this.count < 3 ? 3 : 5}`;
+      $('#wt-rec').classList.toggle('rec', this.busy);
+    },
+    update(p) {
+      if (!this.persona || this.persona.id !== p.id || this.el.classList.contains('hidden')) return;
+      const w = p.wake || {};
+      if (w.state === 'learning' || w.state === 'queued') this.note(`Training with your voice… ${Math.round((w.progress || 0) * 100)}%`);
+      if (w.state === 'ready' && w.user_samples) this.note(`Done! Say “Hey ${p.name}” to try it.`, 'ok');
+    },
+    async record() {
+      if (this.busy) return;
+      this.busy = true; this.paint(); this.note(`Now say “Hey ${this.persona.name}”…`);
+      call('play_sfx', 'listen');
+      const r = await call('wake_record', this.persona.id);
+      this.busy = false;
+      if (r && r.ok) { this.count = r.count; this.note(this.count >= 3 ? 'Great. Record a couple more, or train now.' : 'Got it. Again, please.', 'ok'); }
+      else this.note((r && r.error) || 'Recording failed.', 'warn');
+      this.paint();
+    },
+    init() {
+      this.el = $('#wake-teach');
+      $('#wt-close').onclick = $('#wt-done').onclick = () => this.close();
+      this.el.addEventListener('click', (e) => { if (e.target === this.el) this.close(); });
+      $('#wt-rec').onclick = () => this.record();
+      $('#wt-reset').onclick = async () => { await call('wake_clear_voice', this.persona.id); this.count = 0; this.paint(); this.note('Cleared. Start again whenever you like.'); };
+      $('#wt-train').onclick = async () => {
+        const r = await call('wake_train_voice', this.persona.id);
+        if (r && r.ok) this.note('Training with your voice… this takes about a minute.'); else this.note((r && r.error) || 'Could not start.', 'warn');
+      };
     },
   };
 
@@ -1663,6 +1927,8 @@
       case 'mic_status': { const { type, ...m } = ev; S.mic = { ...S.mic, ...m }; Hud.updateAudio(); break; }
       case 'settings': { const { type, ...s } = ev; S.settings = s; Hud.applySettings(); if ($('#settings').classList.contains('open')) Settings.fill(); break; }
       case 'persona': { const { type, ...p } = ev; Personas.apply(p); break; }
+      case 'personas': Personas.setList(ev.personas); break;
+      case 'wake_learn': Personas.wake(ev); break;
       case 'memory_learned': Chat.memoryNote(ev); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
       case 'memory_forgotten': Chat.memoryNote(ev, true); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
       case 'memory_changed': MemoryCore.stats(ev.stats); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
@@ -1818,10 +2084,12 @@
     const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
     window.addEventListener('keydown', (e) => {
       if (!S.booted) return;
-      const modalOpen = ['#reader', '#google', '#memory', '#personas'].some((id) => !$(id).classList.contains('hidden'));
+      const modalOpen = ['#reader', '#google', '#memory', '#personas', '#persona-edit', '#wake-teach'].some((id) => !$(id).classList.contains('hidden'));
       if (e.code === 'Space' && !typing() && !modalOpen) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
-        if (!$('#memory').classList.contains('hidden')) MemoryCore.close();
+        if (!$('#persona-edit').classList.contains('hidden')) PersonaEditor.close();
+        else if (!$('#wake-teach').classList.contains('hidden')) WakeTeach.close();
+        else if (!$('#memory').classList.contains('hidden')) MemoryCore.close();
         else if (!$('#personas').classList.contains('hidden')) Personas.close();
         else if (!$('#reader').classList.contains('hidden')) Reader.close();
         else if (!$('#google').classList.contains('hidden')) Google.close();
@@ -1847,6 +2115,8 @@
     Settings.init();
     Reader.init();
     Personas.init();
+    PersonaEditor.init();
+    WakeTeach.init();
     MemoryCore.init();
     bindControls();
     Hud.clock();

@@ -451,6 +451,38 @@ class JarvisAPI:
     def persona_preview(self, pid: str) -> None:
         self._assistant.preview_persona(str(pid or ""))
 
+    def persona_save(self, data: dict) -> dict:
+        try:
+            return {"ok": True, "persona": self._assistant.save_persona(dict(data or {}))}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def persona_delete(self, pid: str) -> dict:
+        try:
+            self._assistant.delete_persona(str(pid or ""))
+            return {"ok": True}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def persona_color(self, pid: str, color: str = "") -> dict:
+        try:
+            return {"ok": True, "persona": self._assistant.set_persona_color(str(pid or ""), str(color or "") or None)}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+    # -- wake words ----------------------------------------------------------
+    def wake_learn(self, pid: str) -> dict:
+        return self._assistant.wake_learn(str(pid or ""))
+
+    def wake_record(self, pid: str) -> dict:
+        return self._assistant.wake_record(str(pid or ""))
+
+    def wake_train_voice(self, pid: str) -> dict:
+        return self._assistant.wake_train_voice(str(pid or ""))
+
+    def wake_clear_voice(self, pid: str) -> dict:
+        return self._assistant.wake_clear_voice(str(pid or ""))
+
     # -- long-term memory --------------------------------------------------
     def memory_list(self) -> dict:
         return self._assistant.memory_overview()
@@ -729,6 +761,8 @@ def run_selftest(report_path: str | None) -> int:
         """Long-term memory (SQLite) and the personalities are bundled and work."""
         import tempfile as _tf
 
+        import numpy as np
+
         from core.memory import MemoryStore, parse_memory_command, second_person
         from core.personas import PERSONAS, parse_switch
 
@@ -740,7 +774,14 @@ def run_selftest(report_path: str | None) -> int:
         if not (found and found[0].text == "You love jazz." and parse_switch("switch to Harper") == "harper"
                 and parse_memory_command("remember that my dog is called Max").action == "remember"):
             raise RuntimeError("memory or personality parsing misbehaved")
-        return {"personalities": list(PERSONAS), "sqlite": __import__("sqlite3").sqlite_version}
+        from core.wakelearn import FeatureExtractor, TinyNet
+
+        feats = FeatureExtractor()(np.random.default_rng(0).normal(0, 300, 16000 * 3).astype(np.float32))
+        net = TinyNet(hidden=4)
+        net.fit(np.ones((8, 16, 96), np.float32), np.zeros((8, 16, 96), np.float32), epochs=2)
+        if feats.shape[1] != 96 or len(feats) < 20:
+            raise RuntimeError(f"wake-word features misbehaved: {feats.shape}")
+        return {"personalities": list(PERSONAS), "sqlite": __import__("sqlite3").sqlite_version, "wake_features": list(feats.shape)}
 
     def ollama_probe():
         from core.llm import LLMEngine

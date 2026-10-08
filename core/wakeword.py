@@ -60,6 +60,7 @@ class WakeWordDetector:
 
         self._mel_model, self._emb_model, self._wake_model = (load(f) for f in MODEL_FILES)
         self._wake_input = self._wake_model.get_inputs()[0].name
+        self.learned: dict[str, object] = {}  # name -> wakelearn.WakeModel, sharing the same embeddings
         self.reset()
 
     # -- model steps -----------------------------------------------------
@@ -82,15 +83,37 @@ class WakeWordDetector:
         self._frames = 0
 
     def process(self, chunk: np.ndarray) -> float:
-        """Feed exactly one 1280-sample int16 chunk; returns the wake-word score (0..1)."""
+        """Feed exactly one 1280-sample int16 chunk; returns the "Hey Jarvis" score (0..1)."""
+        return self.process_all(chunk, jarvis=True)["jarvis"]
+
+    def process_all(self, chunk: np.ndarray, jarvis: bool = True, learned: tuple[str, ...] | None = None) -> dict[str, float]:
+        """Feed one chunk; returns a score per wake word: "jarvis" and each learned name (e.g. "Harper")."""
         audio = np.asarray(chunk, dtype=np.float32).ravel()
         mel = self._melspec(np.concatenate([self._tail, audio]))
         self._tail = audio[-480:]
         self._mel = np.vstack([self._mel, mel])[-970:]
         self._feats = np.vstack([self._feats, self._embed(self._mel[-76:][None])])[-120:]
-        score = float(self._wake_model.run(None, {self._wake_input: self._feats[-16:][None].astype(np.float32)})[0].ravel()[0])
         self._frames += 1
-        return score if self._frames >= 5 else 0.0  # the first few frames are unreliable
+        ready = self._frames >= 5  # the first few frames are unreliable
+        window = self._feats[-16:]
+        scores: dict[str, float] = {}
+        if jarvis:
+            score = float(self._wake_model.run(None, {self._wake_input: window[None].astype(np.float32)})[0].ravel()[0])
+            scores["jarvis"] = score if ready else 0.0
+        for name, model in self.learned.items():
+            if learned is None or name in learned:
+                scores[name] = model.score(window) if ready else 0.0
+        return scores
+
+
+LEARNED_PERSISTENCE = 3  # learned names need one more confident frame than the professionally trained "Hey Jarvis"
+
+
+def learned_threshold(calibrated: float, sensitivity: float) -> float:
+    """Sensitivity 0.5 uses the threshold set during training; higher wakes more easily, lower is stricter."""
+    if sensitivity >= 0.5:
+        return max(0.3, calibrated - (sensitivity - 0.5) * 2 * max(0.0, calibrated - 0.35))
+    return min(0.995, calibrated + (0.5 - sensitivity) * 2 * (0.995 - calibrated))
 
 
 class _BorrowedSource:
@@ -137,7 +160,9 @@ class WakeListener:
 
     def __init__(self, on_wake: Callable[[float], None], sensitivity: Callable[[], float],
                  stream_factory: Callable[[], object] | None = None,
-                 detector_factory: Callable[[], WakeWordDetector] = WakeWordDetector) -> None:
+                 detector_factory: Callable[[], WakeWordDetector] = WakeWordDetector,
+                 words: Callable[[], tuple[bool, list]] | None = None) -> None:
+        """``words`` says what to listen for: (listen for "Hey Jarvis"?, [learned WakeModels])."""
         self._on_wake = on_wake
         self._sensitivity = sensitivity
         self._stream_factory = stream_factory or self._open_pyaudio
@@ -150,8 +175,15 @@ class WakeListener:
         self._recent: deque[bytes] = deque(maxlen=4)
         self._energy: deque[float] = deque(maxlen=int(5 * RATE / CHUNK))
         self._backlog: list[bytes] | None = None
+        self._words = words or (lambda: (True, []))
+        self._words_dirty = True
+        self.last_word = "jarvis"  # which wake word fired last ("jarvis" or a learned name)
         self.running = False
         self.error: str | None = None
+
+    def refresh_words(self) -> None:
+        """Pick up a new active wake word (personality switched, or a name was just learned)."""
+        self._words_dirty = True
 
     # -- control ---------------------------------------------------------
     def start(self) -> bool:
@@ -224,7 +256,8 @@ class WakeListener:
         self._reset_pending = False
         ready.set()
         log.info("Listening for the wake word")
-        hits = 0
+        hits: dict[str, int] = {}
+        use_jarvis, learned_thresholds = True, {}
         try:
             while not self._stop.is_set():
                 data = stream.read(CHUNK)
@@ -236,21 +269,45 @@ class WakeListener:
                             self._backlog = None  # nobody borrowed the stream: stop buffering
                 if borrower is not None:
                     borrower.feed(data)
-                    hits = 0
+                    hits.clear()
                     continue
                 if self._reset_pending:
                     detector.reset()
                     self._reset_pending = False
+                if self._words_dirty:
+                    self._words_dirty = False
+                    try:
+                        use_jarvis, models = self._words()
+                    except Exception:
+                        log.exception("Couldn't read the active wake words")
+                        use_jarvis, models = True, []
+                    if hasattr(detector, "learned"):
+                        detector.learned = {m.name: m for m in models}
+                    learned_thresholds = {m.name: m.threshold for m in models}
+                    hits.clear()
                 samples = np.frombuffer(data, dtype=np.int16)
                 self._energy.append(float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))))
-                score = detector.process(samples)
+                if hasattr(detector, "process_all"):
+                    scores = detector.process_all(samples, jarvis=use_jarvis)
+                else:  # a bare detector (tests): "Hey Jarvis" only
+                    scores = {"jarvis": detector.process(samples)}
                 self._recent.append(data)
-                threshold = 0.85 - 0.6 * float(self._sensitivity())  # sensitivity 0..1 -> 0.85..0.25
-                hits = hits + 1 if score >= threshold else 0
-                if hits >= self.PERSISTENCE and time.monotonic() - self._last_wake > self.COOLDOWN_S:
-                    hits = 0
+                sens = float(self._sensitivity())
+                fired = None
+                for word, score in scores.items():
+                    if word == "jarvis":
+                        threshold, need = 0.85 - 0.6 * sens, self.PERSISTENCE  # sensitivity 0..1 -> 0.85..0.25
+                    else:
+                        threshold, need = learned_threshold(learned_thresholds.get(word, 0.9), sens), LEARNED_PERSISTENCE
+                    hits[word] = hits.get(word, 0) + 1 if score >= threshold else 0
+                    if hits[word] >= need and fired is None:
+                        fired = (word, score)
+                if fired and time.monotonic() - self._last_wake > self.COOLDOWN_S:
+                    word, score = fired
+                    hits.clear()
                     self._last_wake = time.monotonic()
-                    log.info("Wake word detected (score %.2f)", score)
+                    self.last_word = word
+                    log.info("Wake word %r detected (score %.2f)", word, score)
                     with self._lock:
                         self._backlog = list(self._recent)[len(self._recent) - self.LOOKBACK_CHUNKS:] if self.LOOKBACK_CHUNKS else []
                     try:

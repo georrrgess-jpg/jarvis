@@ -29,7 +29,22 @@ window.createJarvisMock = function createJarvisMock() {
     { id: 'friday', name: 'Friday', display: 'F.R.I.D.A.Y.', tagline: 'Quick, upbeat and a little cheeky', description: 'Fast and casual with an Irish lilt. Gets straight to the point, keeps things light and calls you boss.', voice: 'en-IE-EmilyNeural', gender: 'female', theme: 'mark3', address: 'boss' },
     { id: 'sage', name: 'Sage', display: 'SAGE', tagline: 'The patient mentor', description: 'A calm, encouraging tutor who explains step by step, checks you have understood, and loves a good analogy.', voice: 'en-US-AndrewNeural', gender: 'male', theme: 'stealth', address: 'Tony' },
   ];
+  const wakeOf = (p) => (p.id === 'jarvis' ? { name: 'Jarvis', phrase: 'Hey Jarvis', state: 'ready', progress: 1, builtin: true }
+    : p.id === 'harper' ? { name: p.name, phrase: 'Hey Harper', state: 'ready', progress: 1, metrics: { held_out_recall: 0.94 }, user_samples: 0, recordings: 0 }
+      : { name: p.name, phrase: `Hey ${p.name}`, state: 'missing', progress: 0, recordings: 0 });
+  PERSONAS.forEach((p) => { p.wake = wakeOf(p); p.color = p.theme; });
+  const listPersonas = () => PERSONAS.map((p) => ({ ...p, active: p.id === settings.persona }));
   const personaInfo = () => ({ ...PERSONAS.find((p) => p.id === settings.persona), active: true });
+  const fakeLearn = (p) => {
+    let k = 0;
+    const tick = () => {
+      k += 0.1;
+      p.wake = { ...p.wake, state: k >= 1 ? 'ready' : 'learning', progress: Math.min(1, k), label: k < 0.3 ? 'Learning what everyday speech sounds like' : k < 0.75 ? `Learning to hear “Hey ${p.name}”` : 'Training the listener', metrics: { held_out_recall: 0.92 } };
+      emit({ type: 'wake_learn', ...p.wake });
+      if (k < 1) setTimeout(tick, 500);
+    };
+    tick();
+  };
   const now = Date.now() / 1000;
   let memId = 10;
   const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -127,8 +142,8 @@ window.createJarvisMock = function createJarvisMock() {
       system: { hostname: 'stark-tower', os: 'Windows 11', cpu_name: 'Preview CPU @ 4.20GHz', cores_physical: 8, cores_logical: 16, ram_total_gb: 32, python: '3.12' },
       core: { online, model: models[0] || null, host: settings.ollama_host, first_token_ms: null, tokens_per_sec: null, memory_turns: 0 },
       window: { frameless: true },
-      wake: { enabled: true, active: true, phrase: 'Hey Jarvis', reason: null }, vision: mockVision,
-      persona: personaInfo(), personas: PERSONAS.map((p) => ({ ...p, active: p.id === settings.persona })), memory: memStats(),
+      wake: { enabled: true, active: true, phrase: settings.persona === 'harper' ? 'Hey Harper' : 'Hey Jarvis', phrases: ['Hey Jarvis'], reason: null }, vision: mockVision,
+      persona: personaInfo(), personas: listPersonas(), memory: memStats(),
       restored: params.has('restored') ? [{ role: 'user', text: 'Any ideas for the bakery website homepage?', ts: now - 3000 },
         { role: 'assistant', text: 'Lead with a big photo of the bread, the opening hours and a "call to order" button. Want me to sketch a layout?', ts: now - 2990 }] : [],
     }),
@@ -142,7 +157,7 @@ window.createJarvisMock = function createJarvisMock() {
       if (sw) {
         emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text' });
         settings.persona = sw[1].toLowerCase();
-        settings.theme = PERSONAS.find((p) => p.id === settings.persona).theme;
+        settings.theme = PERSONAS.find((p) => p.id === settings.persona).color;
         settings.voice = PERSONAS.find((p) => p.id === settings.persona).voice;
         emit([{ type: 'persona', ...personaInfo() }, { type: 'settings', ...settings }]);
         reply({ harper: "Hi Tony, Harper here! It's so nice to talk with you. What's on your mind?", jarvis: 'At your service, sir. J.A.R.V.I.S. is back online.',
@@ -251,10 +266,33 @@ window.createJarvisMock = function createJarvisMock() {
     stop_listening: async () => {},
     interrupt: async () => { cancelAll(); emit({ type: 'speech_stop' }); const was = state !== 'IDLE'; setState('IDLE'); return was; },
     clear_memory: async () => { memory = 0; },
-    persona_list: async () => PERSONAS.map((p) => ({ ...p, active: p.id === settings.persona })),
+    persona_list: async () => listPersonas(),
+    persona_save: async (d) => {
+      if (!d.name || !d.name.trim()) return { ok: false, error: 'Give your personality a name (letters only, up to 24 characters).' };
+      if ((d.description || '').trim().length < 10) return { ok: false, error: 'Describe the personality in a sentence or two.' };
+      const id = d.id || `my-${d.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+      const p = { id, name: d.name.trim(), display: d.name.trim().toUpperCase(), tagline: d.description.split(/[.!?]/)[0].slice(0, 48), description: d.description,
+        voice: d.voice, gender: d.gender, theme: d.color, color: d.color, address: d.address || 'Tony', custom: true, saved: { ...d, id } };
+      p.wake = { name: p.name, phrase: `Hey ${p.name}`, state: 'queued', progress: 0, recordings: 0 };
+      const i = PERSONAS.findIndex((x) => x.id === id);
+      if (i >= 0) PERSONAS[i] = p; else PERSONAS.push(p);
+      setTimeout(() => { emit({ type: 'personas', personas: listPersonas() }); fakeLearn(p); }, 50);
+      return { ok: true, persona: { ...p, active: settings.persona === id } };
+    },
+    persona_delete: async (id) => { const i = PERSONAS.findIndex((x) => x.id === id); if (i >= 0) PERSONAS.splice(i, 1); if (settings.persona === id) settings.persona = 'jarvis'; setTimeout(() => emit({ type: 'personas', personas: listPersonas() }), 0); return { ok: true }; },
+    persona_color: async (id, color) => {
+      const p = PERSONAS.find((x) => x.id === id);
+      p.color = color || p.theme;
+      if (id === settings.persona && settings.persona_theme) { settings.theme = p.color; setTimeout(() => emit({ type: 'settings', ...settings }), 0); }
+      return { ok: true, persona: { ...p, active: id === settings.persona } };
+    },
+    wake_learn: async (id) => { fakeLearn(PERSONAS.find((x) => x.id === id)); return { ok: true }; },
+    wake_record: async (id) => { const p = PERSONAS.find((x) => x.id === id); await new Promise((r) => setTimeout(r, 1200)); p.wake.recordings = (p.wake.recordings || 0) + 1; return { ok: true, count: p.wake.recordings, level: 0.6 }; },
+    wake_train_voice: async (id) => { const p = PERSONAS.find((x) => x.id === id); p.wake.user_samples = p.wake.recordings; fakeLearn(p); return { ok: true }; },
+    wake_clear_voice: async (id) => { PERSONAS.find((x) => x.id === id).wake.recordings = 0; return { ok: true }; },
     persona_set: async (id) => {
       settings.persona = id;
-      if (settings.persona_theme) settings.theme = PERSONAS.find((p) => p.id === id).theme;
+      if (settings.persona_theme) settings.theme = PERSONAS.find((p) => p.id === id).color;
       settings.voice = PERSONAS.find((p) => p.id === id).voice;
       setTimeout(() => emit({ type: 'settings', ...settings }), 0);
       return { ok: true, persona: personaInfo() };

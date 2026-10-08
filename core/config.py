@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -63,6 +64,10 @@ DEFAULTS: dict[str, Any] = {
     "user_title": "sir",
     "persona": "jarvis",  # jarvis | harper | friday | sage (see core/personas.py)
     "persona_theme": True,  # switching personality also switches the HUD colours
+    "custom_personas": [],  # personalities the user made: [{id, name, description, voice, gender, color, address}]
+    "persona_colors": {},  # the user's HUD colour for any personality: {persona id: "#RRGGBB"}
+    "wake_jarvis_always": True,  # "Hey Jarvis" works whichever personality is active
+    "wake_learn_auto": True,  # learn a personality's name as a wake word the first time it's used
     "theme": "arc",  # arc | mark3 | stealth | violet | rose
     # Long-term memory (memory.db next to the settings file; never leaves this computer)
     "memory_enabled": True,  # remember facts, preferences, routines and projects across sessions
@@ -126,6 +131,17 @@ def resource_path(*parts: str) -> Path:
 
 def _coerce(key: str, value: Any) -> Any:
     default = DEFAULTS[key]
+    if isinstance(default, (list, dict)):
+        if isinstance(value, str):
+            value = json.loads(value or ("[]" if isinstance(default, list) else "{}"))
+        if not isinstance(value, type(default)):
+            raise ValueError(f"{key} must be a {'list' if isinstance(default, list) else 'mapping'}")
+        if len(json.dumps(value)) > 20000:
+            raise ValueError(f"{key} is too large")
+        if key == "persona_colors":
+            return {str(k)[:40]: (str(v).upper() if str(v).startswith("#") else str(v)) for k, v in value.items()
+                    if re.match(r"^#[0-9a-fA-F]{6}$", str(v)) or str(v) in _CHOICES["theme"]}
+        return json.loads(json.dumps(value))  # a private, plain-JSON copy
     if isinstance(default, bool):
         if isinstance(value, str):
             value = value.strip().lower() in ("1", "true", "yes", "on")
@@ -140,6 +156,10 @@ def _coerce(key: str, value: Any) -> Any:
         number = min(max(number, lo), hi)
         return int(round(number)) if isinstance(default, int) else round(number, 3)
     text = "" if value is None else str(value).strip()
+    if key == "theme" and re.match(r"^#[0-9a-fA-F]{6}$", text):
+        return text.upper()  # a custom colour
+    if key == "persona" and text.startswith("my-") and re.match(r"^my-[a-z0-9-]{1,40}$", text):
+        return text  # one of the user's own personalities
     if key in _CHOICES and text not in _CHOICES[key]:
         raise ValueError(f"{key} must be one of {', '.join(_CHOICES[key])}")
     return text[: _MAX_TEXT.get(key, 400)]
@@ -151,7 +171,7 @@ class Config:
     def __init__(self, path: Path | None = None) -> None:
         self._path = Path(path) if path else app_data_dir() / "config.json"
         self._lock = threading.RLock()
-        self._data: dict[str, Any] = dict(DEFAULTS)
+        self._data: dict[str, Any] = json.loads(json.dumps(DEFAULTS))  # private copies of the list/dict defaults
         self.load()
 
     @property

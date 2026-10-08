@@ -171,7 +171,7 @@
         </button>
       </div>
       <div id="hints">
-        <span id="wake-hint" class="wake-hint hidden"><i></i>Say <b>“Hey Jarvis”</b></span>
+        <span id="wake-hint" class="wake-hint hidden"><i></i>Say <b id="wake-hint-phrase">“Hey Jarvis”</b></span>
         <span><kbd>SPACE</kbd> hold to talk</span>
         <span><kbd>ENTER</kbd> transmit</span>
         <span><kbd>ESC</kbd> interrupt</span>
@@ -300,7 +300,7 @@
       <p class="mc-lead ps-lead">Every personality has the same skills and shares one memory of you; each has its own character, voice and colours.</p>
       <div class="ps-grid" id="ps-grid"></div>
       <label class="toggle ps-toggle"><input type="checkbox" id="ps-theme"><i></i><span>Switch the HUD colours with the personality</span></label>
-      <div class="mc-foot">Tip: just say “switch to Harper” or “let me talk to Jarvis”. The wake word stays “Hey Jarvis” for everyone.</div>
+      <div class="mc-foot">Tip: say “switch to Harper” or “let me talk to Jarvis”. Each personality learns to answer to its own name (“Hey Harper”) on this PC.</div>
     </div>
   </div>
 
@@ -340,6 +340,58 @@
         <button class="btn primary" id="mm-done"><span>DONE</span></button>
       </div>
       <div class="mc-foot">Say “remember that…”, “forget that…”, “what do you know about me?” or “what am I working on?”.</div>
+    </div>
+  </div>
+
+  <!-- ======================================================= personality creator -->
+  <div id="persona-edit" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="pe-title">
+    <div class="modal-card cyan pe-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker">PERSONALITY MATRIX · NEW</div><h2 id="pe-title">Create a personality</h2></div>
+        <button class="wb" id="pe-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <form id="pe-form" class="pe-form" autocomplete="off">
+        <label class="field"><span>Name</span><input id="pe-name" type="text" maxlength="24" placeholder="e.g. Nova" required></label>
+        <label class="field"><span>Personality <output id="pe-count">0 / 600</output></span>
+          <textarea id="pe-desc" rows="4" maxlength="600" placeholder="Describe how they talk and behave, e.g. “A cheerful space explorer who loves fun facts about the universe, encourages me, and keeps answers short.”"></textarea></label>
+        <div class="pe-ideas" id="pe-ideas"></div>
+        <label class="field"><span>Voice</span>
+          <div class="row"><select id="pe-voice"></select><button type="button" class="btn sm ghost" id="pe-hear">HEAR</button></div></label>
+        <div class="pe-row">
+          <label class="field"><span>Colour</span><div class="pe-colors" id="pe-colors"></div></label>
+          <label class="field"><span>Calls me (optional)</span><input id="pe-address" type="text" maxlength="24" placeholder="your name"></label>
+        </div>
+        <p class="field-note" id="pe-error"></p>
+        <div class="mc-actions">
+          <button class="btn primary" type="submit" id="pe-save-switch"><span>SAVE &amp; TALK TO THEM</span></button>
+          <button class="btn" type="button" id="pe-save"><span>SAVE</span></button>
+          <span class="mm-spacer"></span>
+          <button class="btn ghost danger hidden" type="button" id="pe-delete">DELETE</button>
+        </div>
+      </form>
+      <div class="mc-foot">They'll learn to answer to “Hey <span id="pe-wake-name">…</span>” in the background (about a minute, needs internet once).</div>
+    </div>
+  </div>
+
+  <!-- ======================================================= teach the wake word my voice -->
+  <div id="wake-teach" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="wt-title">
+    <div class="modal-card cyan wt-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker">WAKE WORD · YOUR VOICE</div><h2 id="wt-title">Teach me your voice</h2></div>
+        <button class="wb" id="wt-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <p class="mc-lead">Press the button and say <b id="wt-phrase">“Hey Harper”</b> the way you normally would. Three times is enough; five is even better.</p>
+      <div class="wt-takes" id="wt-takes"></div>
+      <button class="wt-rec" id="wt-rec" type="button"><i></i><span id="wt-rec-label">RECORD</span></button>
+      <p class="field-note" id="wt-note">Speak at your usual distance from the microphone.</p>
+      <div class="mc-actions">
+        <button class="btn primary" id="wt-train" disabled><span>TRAIN WITH MY VOICE</span></button>
+        <button class="btn ghost" id="wt-reset">START OVER</button>
+        <span class="mm-spacer"></span>
+        <button class="btn ghost" id="wt-done">CLOSE</button>
+      </div>
     </div>
   </div>
 
@@ -448,7 +500,9 @@
         <label class="field"><span>Pause before I check you're done <output id="out-pause"></output></span><input id="set-pause" data-key="pause_threshold" type="range" min="0.4" max="3" step="0.1"></label>
         <label class="field"><span>Patience for unfinished sentences <output id="out-patience"></output></span><input id="set-patience" data-key="patience" type="range" min="0" max="8" step="0.5"></label>
         <p class="field-note">If you trail off (“open the…”, “and…”, “um…”) JARVIS keeps listening that much longer instead of answering over you. A finished sentence is still answered right away.</p>
-        <label class="toggle"><input type="checkbox" data-key="wake_word"><i></i><span>Wake word: say “Hey Jarvis” to start listening</span></label>
+        <label class="toggle"><input type="checkbox" data-key="wake_word"><i></i><span>Wake word: say the personality's name (“Hey Jarvis”, “Hey Harper”…) to start listening</span></label>
+        <label class="toggle"><input type="checkbox" data-key="wake_jarvis_always"><i></i><span>“Hey Jarvis” also works with every personality</span></label>
+        <label class="toggle"><input type="checkbox" data-key="wake_learn_auto"><i></i><span>Learn each personality's name automatically (needs internet once)</span></label>
         <label class="field"><span>Wake word sensitivity <output id="out-wake"></output></span><input id="set-wake" data-key="wake_sensitivity" type="range" min="0" max="1" step="0.05"></label>
         <label class="toggle"><input type="checkbox" data-key="auto_listen"><i></i><span>Conversation mode (listen again after replying)</span></label>
       </fieldset>
@@ -477,9 +531,10 @@
           <select data-key="theme">
             <option value="arc">Arc reactor (cyan)</option><option value="mark3">Mark III (red &amp; gold)</option>
             <option value="stealth">Stealth (green)</option><option value="violet">Violet</option>
-            <option value="rose">Rose (warm pink)</option>
+            <option value="rose">Rose (warm pink)</option><option value="custom">Custom colour…</option>
           </select>
         </label>
+        <label class="field hidden" id="set-theme-custom-row"><span>Custom colour</span><input type="color" id="set-theme-color" value="#7aa2ff" class="color-input"></label>
         <label class="toggle"><input type="checkbox" data-key="sfx_enabled"><i></i><span>Interface sounds</span></label>
         <label class="field"><span>Sound volume <output id="out-sfx"></output></span><input id="set-sfx" data-key="sfx_volume" type="range" min="0" max="1" step="0.05"></label>
         <label class="field"><span>J.A.R.V.I.S. calls me</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>

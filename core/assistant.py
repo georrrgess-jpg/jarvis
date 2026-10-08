@@ -44,14 +44,20 @@ from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
 from .memory import Memory, MemoryCommand, MemoryEngine, first_person_echo, parse_memory_command, spoken, today_routines
-from .personas import PERSONAS, Persona, address_for, asks_who, get_persona, parse_switch
+from .personas import (PERSONAS, Persona, address_for, asks_who, get_persona, is_custom, load_custom, names_pattern, parse_switch,
+                       theme_for, validate_custom)
+from .wakewords import WakeWords
+
+PRESET_THEMES = ("arc", "mark3", "stealth", "violet", "rose")
 from .tts import CODE_MARK, EdgeTTS, SentenceSplitter, TTSError, clean_for_speech
 
 log = logging.getLogger("jarvis.assistant")
 
 Emit = Callable[[str, dict], None]
 _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:]{0,120}$")
-_WAKE_PREFIX = re.compile(r"^\s*(?:(?:hey|hi|okay|ok)\s+)?jarvis\b[\s,.!?]*", re.IGNORECASE)
+def _strip_wake(text: str) -> str:
+    """'Hey Harper, what time is it' -> 'what time is it' (any personality's name)."""
+    return re.sub(r"^\s*(?:(?:hey|hi|okay|ok)\s+)?(?:" + names_pattern() + r")\b[\s,.!?]*", "", text, count=1, flags=re.I)
 _STOP_PHRASES = {
     "stop", "stop it", "stop talking", "stop listening", "cancel", "never mind", "nevermind", "forget it",
     "that's all", "thats all", "that is all", "nothing", "be quiet", "quiet", "shut up", "hush", "enough",
@@ -322,6 +328,9 @@ class Assistant:
         self._pending_forget = 0.0  # when JARVIS asked "forget everything?"
         self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
         self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
+        load_custom(config.get("custom_personas"))
+        self.wakewords = WakeWords(app_data_dir() / "wakewords", self.tts, self.audio, self.emit)
+        self.wakewords.on_ready = self._wake_learned
         self.llm.persona_provider = lambda: (self.persona, self.title)
 
     # ================================================================== plumbing
@@ -410,6 +419,7 @@ class Assistant:
             ("wake word", self._sync_wake_word),
             ("vision", self._start_vision),
             ("memory", self._start_memory),
+            ("wake words", self._wake_changed),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -466,6 +476,7 @@ class Assistant:
     def shutdown(self) -> None:
         self._prewarm_stop.set()
         self.memory.stop()
+        self.wakewords.cancel()
         self.tracker.stop()
         if self.watcher is not None:
             self.watcher.stop()
@@ -499,14 +510,23 @@ class Assistant:
             reason = "no microphone"
         elif not active:
             reason = self._wake_error or (self.wake.error if self.wake else None) or "not running"
-        return {"enabled": bool(self.config.get("wake_word", True)), "active": active, "phrase": "Hey Jarvis", "reason": reason}
+        use_jarvis, models = self._wake_words()
+        phrases = [m.phrase for m in models] + (["Hey Jarvis"] if use_jarvis else [])
+        learning = None
+        if self.persona.id != "jarvis" and not models:
+            state = self.wakewords.status(self.persona.name)
+            if state["state"] in ("learning", "queued"):
+                learning = {"name": self.persona.name, "progress": state["progress"]}
+        return {"enabled": bool(self.config.get("wake_word", True)), "active": active, "phrase": phrases[0] if phrases else "Hey Jarvis",
+                "phrases": phrases, "reason": reason, "learning": learning}
 
     def _sync_wake_word(self) -> None:
         """Start or stop the background "Hey Jarvis" listener to match settings and hardware."""
         ok, why = wakeword.available()
         want = bool(self.config.get("wake_word", True)) and ok and self._mic.get("available")
         if want and not (self.wake and self.wake.running):
-            self.wake = wakeword.WakeListener(self._on_wake, lambda: float(self.config.get("wake_sensitivity", 0.5)))
+            self.wake = wakeword.WakeListener(self._on_wake, lambda: float(self.config.get("wake_sensitivity", 0.5)),
+                                              words=self._wake_words)
             if self.wake.start():
                 self.stt.set_source_provider(self.wake.borrow)
                 self._wake_error = None
@@ -639,7 +659,7 @@ class Assistant:
             return
         if not self._is_current(turn):
             return
-        text = _WAKE_PREFIX.sub("", text, count=1).strip()
+        text = _strip_wake(text).strip()
         if not text:
             self.emit("notice", level="info", text=f"I didn't quite catch that, {self.title}.")
             self._finish_turn(turn)
@@ -654,7 +674,7 @@ class Assistant:
     def _probe(self, pcm: bytes, rate: int) -> tuple[str, bool]:
         """Recognise the speech so far, in the background, to decide whether the speaker has finished."""
         text = self.stt.transcribe(Capture(pcm, rate))
-        return text, not looks_unfinished(_WAKE_PREFIX.sub("", text, count=1) or text)
+        return text, not looks_unfinished(_strip_wake(text) or text)
 
     def _fail_turn(self, turn: Turn, message: str) -> None:
         if self._is_current(turn):
@@ -1803,13 +1823,19 @@ class Assistant:
             self.emit("mic_status", **{**self._mic, "engine": self.stt.engine_label()})
         if "wake_word" in applied:
             self._spawn(self._sync_wake_word, name="wake-sync")
+        if {"wake_jarvis_always", "wake_word"} & applied.keys():
+            self._wake_changed()
         self.emit("settings", **self.config.as_dict())
         return self.config.as_dict()
 
     # ================================================================== personalities
     def persona_info(self, persona: Persona | None = None) -> dict:
         p = persona or self.persona
-        return {**p.to_dict(), "address": address_for(p, self.config), "active": p.id == self.persona.id}
+        wake = {"name": "Jarvis", "phrase": "Hey Jarvis", "state": "ready", "progress": 1.0, "builtin": True} if p.id == "jarvis" \
+            else self.wakewords.status(p.name)
+        return {**p.to_dict(), "address": address_for(p, self.config), "active": p.id == self.persona.id,
+                "color": theme_for(p, self.config), "custom_color": p.id in (self.config.get("persona_colors") or {}),
+                "wake": wake, "saved": next((c for c in self.config.get("custom_personas") or [] if c.get("id") == p.id), None)}
 
     def persona_list(self) -> list[dict]:
         return [self.persona_info(p) for p in PERSONAS.values()]
@@ -1821,14 +1847,146 @@ class Assistant:
             raise ValueError(f"Unknown personality: {pid}")
         changes = {"persona": new.id, "voice": new.voice, "speech_rate": new.rate, "speech_pitch": new.pitch}
         if self.config.get("persona_theme", True):
-            changes["theme"] = new.theme
+            changes["theme"] = theme_for(new, self.config)
         self.config.update(changes)
         info = self.persona_info()
         self.emit("persona", **info)
         self.emit("settings", **self.config.as_dict())
+        self._wake_changed()
         if announce:
             self.speak(new.intro.format(title=self.title))
         return info
+
+    def save_persona(self, data: dict) -> dict:
+        """Create or edit one of the user's own personalities."""
+        saved = list(self.config.get("custom_personas") or [])
+        data = dict(data or {})
+        old = next((c for c in saved if c.get("id") == data.get("id")), None) if is_custom(str(data.get("id") or "")) else None
+        if old is None and len(saved) >= 12:
+            raise ValueError("You can have up to 12 personalities of your own. Delete one to make room.")
+        clean = validate_custom(data, saved)
+        saved = [clean if c.get("id") == clean["id"] else c for c in saved] if old else saved + [clean]
+        self.config.update({"custom_personas": saved})
+        load_custom(saved)
+        renamed = old is not None and old.get("name") != clean["name"]
+        if renamed:
+            self.wakewords.delete(old["name"])
+        persona = PERSONAS[clean["id"]]
+        if self.persona.id == clean["id"]:  # editing the active one: apply its new voice and colour now
+            changes = {"voice": persona.voice}
+            if self.config.get("persona_theme", True):
+                changes["theme"] = theme_for(persona, self.config)
+            self.config.update(changes)
+            self.emit("persona", **self.persona_info())
+            self._wake_changed()
+        self.emit("personas", personas=self.persona_list())
+        self.emit("settings", **self.config.as_dict())
+        if self.config.get("wake_word", True) and self.config.get("wake_learn_auto", True) and (old is None or renamed):
+            self.wakewords.learn(persona.name)
+        return self.persona_info(persona)
+
+    def delete_persona(self, pid: str) -> None:
+        if not is_custom(pid):
+            raise ValueError("The built-in personalities can't be deleted.")
+        saved = [c for c in self.config.get("custom_personas") or [] if c.get("id") != pid]
+        gone = PERSONAS.get(pid)
+        colors = {k: v for k, v in (self.config.get("persona_colors") or {}).items() if k != pid}
+        if self.persona.id == pid:
+            self.set_persona("jarvis", announce=False)
+        self.config.update({"custom_personas": saved, "persona_colors": colors})
+        load_custom(saved)
+        if gone is not None:
+            self.wakewords.cancel(gone.name)
+            self.wakewords.delete(gone.name)
+        self.emit("personas", personas=self.persona_list())
+
+    def set_persona_color(self, pid: str, color: str | None) -> dict:
+        """The HUD colour for a personality (None = back to its own)."""
+        p = PERSONAS.get(pid)
+        if p is None:
+            raise ValueError(f"Unknown personality: {pid}")
+        colors = dict(self.config.get("persona_colors") or {})
+        if color:
+            if re.match(r"^#[0-9a-fA-F]{6}$", color):
+                color = color.upper()
+            elif color not in PRESET_THEMES:
+                raise ValueError("That isn't a colour.")
+            colors[pid] = color
+        else:
+            colors.pop(pid, None)
+        self.config.update({"persona_colors": colors})
+        if pid == self.persona.id and self.config.get("persona_theme", True):
+            self.config.update({"theme": theme_for(p, self.config)})
+            self.emit("settings", **self.config.as_dict())
+        return self.persona_info(p)
+
+    # wake words ---------------------------------------------------------------
+    def _wake_words(self) -> tuple[bool, list]:
+        """What the listener should wake up for: "Hey Jarvis" and/or the active personality's learned name."""
+        p = self.persona
+        if p.id == "jarvis":
+            return True, []
+        model = self.wakewords.model(p.name)
+        return (bool(self.config.get("wake_jarvis_always", True)) or model is None), ([model] if model else [])
+
+    def _wake_changed(self) -> None:
+        if self.wake is not None:
+            self.wake.refresh_words()
+        p = self.persona
+        if (p.id != "jarvis" and self.config.get("wake_word", True) and self.config.get("wake_learn_auto", True)
+                and self.wakewords.model(p.name) is None and self.wakewords.status(p.name)["state"] == "missing"):
+            self.wakewords.learn(p.name)
+        self.emit("wake_status", **self.wake_status())
+
+    def _wake_learned(self, name: str) -> None:
+        if self.wake is not None:
+            self.wake.refresh_words()
+        self.emit("wake_status", **self.wake_status())
+        self.emit("personas", personas=self.persona_list())
+        if self.persona.name == name and self.wake is not None and self.wake.running:
+            self._announce(f"I've learned my name, {self.title}. Just say \"Hey {name}\" whenever you need me.")
+
+    def wake_learn(self, pid: str) -> dict:
+        p = PERSONAS.get(pid)
+        if p is None or p.id == "jarvis":
+            return {"ok": False, "error": "\u201cHey Jarvis\u201d is built in."}
+        self.wakewords.learn(p.name)
+        return {"ok": True, "wake": self.wakewords.status(p.name)}
+
+    def wake_record(self, pid: str) -> dict:
+        """Record the user saying the name once (about 2.5 seconds), to train the wake word on their voice."""
+        p = PERSONAS.get(pid)
+        if p is None or p.id == "jarvis":
+            return {"ok": False, "error": "Pick a personality first."}
+        if not self._mic.get("available"):
+            return {"ok": False, "error": "I can't find a microphone."}
+        try:
+            source = self.wake.borrow() if self.wake is not None and self.wake.running else wakeword.WakeListener._open_pyaudio()
+        except Exception as exc:
+            return {"ok": False, "error": f"Couldn't open the microphone: {exc}"}
+        try:
+            return self.wakewords.record(p.name, source)
+        except Exception as exc:
+            log.exception("Recording a wake-word sample failed")
+            return {"ok": False, "error": str(exc)}
+        finally:
+            try:
+                source.close()
+            except Exception:
+                pass
+
+    def wake_train_voice(self, pid: str) -> dict:
+        p = PERSONAS.get(pid)
+        if p is None or self.wakewords.recording_count(p.name) < 3:
+            return {"ok": False, "error": "Record the name at least three times first."}
+        self.wakewords.learn(p.name, with_my_voice=True)
+        return {"ok": True, "wake": self.wakewords.status(p.name)}
+
+    def wake_clear_voice(self, pid: str) -> dict:
+        p = PERSONAS.get(pid)
+        if p is not None:
+            self.wakewords.clear_recordings(p.name)
+        return {"ok": True}
 
     def preview_persona(self, pid: str) -> None:
         p = PERSONAS.get((pid or "").lower())

@@ -853,3 +853,60 @@ body.booting #col-center { transform: scale(.94); }
   .mm-stats > div { padding: 6px; } .mm-stats b { font-size: 16px; }
   .memory-card .mc-actions { margin-top: 12px; }
 }
+
+/* ------------------------------------------------------------ personality cards: colour, wake word, create */
+.ps-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.ps-color { position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; margin-top: 16px; }
+.ps-color input { width: 30px; height: 30px; padding: 0; border: 2px solid var(--ps); border-radius: 50%; background: none; cursor: pointer; }
+.ps-color input::-webkit-color-swatch-wrapper { padding: 2px; }
+.ps-color input::-webkit-color-swatch { border: 0; border-radius: 50%; }
+.ps-color span { font: 600 7.5px/1 var(--font-display); letter-spacing: .16em; color: var(--text-faint); }
+.ps-color:hover span { color: var(--ps); }
+.ps-wake { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 18px; margin-bottom: 6px; font: 400 11px/1.3 var(--font-mono); color: var(--text-dim); }
+.ps-wake .ok { color: var(--ps); }
+.ps-wake .bad { color: rgb(var(--amber)); }
+.ps-wake small { flex-basis: 100%; font-size: 10px; color: var(--text-faint); }
+.ps-bar { flex: 1 1 60px; height: 3px; background: rgb(255 255 255 / .08); }
+.ps-bar b { display: block; height: 100%; background: var(--ps); box-shadow: 0 0 6px var(--ps); transition: width .4s; }
+.ps-wake-acts { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 12px; }
+.ps-link { padding: 0 0 2px; border: 0; background: none; cursor: pointer; white-space: nowrap; font: 600 8.5px/1 var(--font-display); letter-spacing: .08em; color: var(--text-dim);
+  border-bottom: 1px dashed currentColor; }
+.ps-link:hover { color: var(--ps); }
+.ps-new { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 260px; cursor: pointer;
+  border-style: dashed !important; color: var(--text-dim); font: inherit; }
+.ps-new b { font: 300 46px/1 var(--font-display); color: rgb(var(--cyan)); }
+.ps-new span { font: 700 11px/1 var(--font-display); letter-spacing: .2em; color: var(--text-hi); }
+.ps-new small { font-size: 13px; }
+.ps-new:hover { color: var(--text-hi); }
+
+/* ------------------------------------------------------------ personality creator */
+.pe-card { width: min(640px, 95vw); max-height: 94vh; overflow-y: auto; }
+.pe-form .field input[type=text], .pe-form textarea, .pe-form select { width: 100%; }
+.pe-form textarea { min-height: 90px; font-size: 15px; line-height: 1.4; }
+.pe-form .row select { flex: 1; }
+.pe-ideas { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -4px 0 12px; font: 400 11px var(--font-mono); color: var(--text-faint); }
+.pe-ideas button { padding: 4px 10px; border: 1px solid var(--line-strong); background: none; cursor: pointer; color: var(--text-dim); font: 500 13px var(--font-ui); }
+.pe-ideas button:hover { color: var(--text-hi); border-color: rgb(var(--cyan) / .7); }
+.pe-row { display: grid; grid-template-columns: 1fr 200px; gap: 16px; }
+.pe-colors { display: flex; flex-wrap: wrap; gap: 7px; }
+.pe-sw { position: relative; width: 26px; height: 26px; border: 2px solid transparent; border-radius: 50%; cursor: pointer; box-shadow: inset 0 0 0 2px rgb(0 0 0 / .45); }
+.pe-sw.on { border-color: #fff; box-shadow: 0 0 10px rgb(255 255 255 / .5), inset 0 0 0 2px rgb(0 0 0 / .45); }
+.pe-custom { background: conic-gradient(#ff4a5c, #ffd24a, #48ff96, #2ad4ff, #ac7aff, #ff4a5c); overflow: hidden; }
+.pe-custom input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+@media (max-width: 600px) { .pe-row { grid-template-columns: 1fr; } }
+.color-input { width: 60px; height: 32px; padding: 2px; border: 1px solid var(--line-strong); background: #000; cursor: pointer; }
+
+/* ------------------------------------------------------------ teach the wake word */
+.wt-card { width: min(520px, 94vw); text-align: center; }
+.wt-card .rd-head, .wt-card .mc-actions { text-align: left; }
+.wt-takes { display: flex; justify-content: center; gap: 12px; margin: 6px 0 20px; }
+.wt-takes i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--line-strong); transition: all .3s; }
+.wt-takes i.on { background: rgb(var(--cyan)); border-color: rgb(var(--cyan)); box-shadow: 0 0 10px rgb(var(--cyan)); }
+.wt-takes i.next { border-color: rgb(var(--cyan) / .8); animation: blink 1.4s steps(2) infinite; }
+.wt-rec { display: inline-flex; flex-direction: column; align-items: center; gap: 10px; padding: 0; border: 0; background: none; cursor: pointer; }
+.wt-rec i { width: 84px; height: 84px; border-radius: 50%; border: 2px solid rgb(var(--cyan)); background: radial-gradient(circle, rgb(var(--cyan) / .35), rgb(var(--cyan) / .05) 70%);
+  box-shadow: 0 0 22px rgb(var(--cyan) / .4); transition: transform .2s; }
+.wt-rec:hover i { transform: scale(1.05); }
+.wt-rec.rec i { border-color: rgb(var(--red)); background: radial-gradient(circle, rgb(var(--red) / .55), rgb(var(--red) / .05) 70%); animation: ps-pulse 1s ease-in-out infinite; }
+.wt-rec span { font: 700 11px/1 var(--font-display); letter-spacing: .2em; color: var(--text-hi); }
+.wt-card .field-note { margin-top: 14px; }

@@ -262,6 +262,27 @@ class EdgeTTS:
             self._cache_store(cache_file, data)
         return data
 
+    def synthesize_many(self, items: list[tuple[str, str, int, int]], concurrency: int = 8,
+                        timeout: float = 120.0) -> list[bytes | None]:
+        """Synthesise many short clips at once [(text, voice, rate %, pitch Hz)], uncached; None for failures."""
+        async def one(sem, text, voice, rate, pitch):
+            async with sem:
+                for attempt in range(2):
+                    try:
+                        return await asyncio.wait_for(self._synthesize(text, voice, format_rate(rate), format_pitch(pitch)), 30)
+                    except Exception as exc:
+                        if attempt:
+                            log.debug("sample synthesis failed (%s, %s): %s", voice, text, exc)
+                return None
+
+        async def run():
+            sem = asyncio.Semaphore(concurrency)
+            return await asyncio.gather(*(one(sem, *item) for item in items))
+
+        if not items:
+            return []
+        return list(self._run(run(), timeout))
+
     async def _synthesize(self, text: str, voice: str, rate: str, pitch: str) -> bytes:
         import edge_tts
 

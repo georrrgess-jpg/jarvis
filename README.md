@@ -37,7 +37,10 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
   - **Harper**: an exceptionally kind, friendly and informative companion. Warm and conversational, explains things clearly with examples, asks about your day, cheers your wins, is gentle when things are hard, and brings up what she remembers about you. Calls you by your name.
   - **F.R.I.D.A.Y.**: quick, upbeat and a little cheeky, with an Irish voice. Calls you "boss".
   - **Sage**: a patient mentor who explains step by step and checks you've understood.
-  Each has its own character, voice (with matching voices in other languages), small talk and HUD colours (Harper brings a warm Rose theme); all share the same skills and memory. Press **HEAR** in the picker to listen before switching. The wake word stays "Hey Jarvis" for everyone.
+  Each has its own character, voice (with matching voices in other languages), small talk and HUD colours (Harper brings a warm Rose theme); all share the same skills and memory. Press **HEAR** in the picker to listen before switching.
+  - **Create your own**: press **+ Create your own** and give it a name, describe its personality in your own words ("a cheerful pirate who loves puns"), pick any voice (with a HEAR preview) and a colour. Edit or delete it any time; say "switch to Nova" like any other.
+  - **Your colours**: every personality has a colour button. Pick any colour and the whole HUD (reactor, gauges, glow) takes it on whenever that personality is active. Settings ▸ Interface ▸ *Custom colour…* does the same.
+- **Each personality answers to its own name**: "Hey Harper" (or just "Harper") wakes Harper, "Hey Sage" wakes Sage, "Hey Nova" wakes the one you made. There's no ready-made model for those names, so JARVIS **teaches itself**: it has dozens of Microsoft neural voices say the name in different accents, speeds and rooms, and trains a small listener on top of the same offline speech features "Hey Jarvis" uses (about a minute, in the background, the first time you switch; it needs the internet only for that). It checks itself on voices it never trained on before going live. For the best accuracy press **Teach my voice** on the card and say the name 3-5 times. "Hey Jarvis" keeps working with every personality unless you turn that off (Settings ▸ Voice input).
 - **Long-term memory that stays on your PC**: JARVIS remembers who you are across restarts.
   - **Facts, preferences, routines and projects**: "remember that my sister is called Ana", "I'm allergic to peanuts", "I go to yoga every Tuesday at 6 pm", "I'm building a website for my mum's bakery". It also picks these up from normal conversation by itself (a small background step with your local model that only runs when what you said sounds personal, and never stores passwords, codes or card numbers). A **REMEMBERED** note with **UNDO** appears in the log each time.
   - **Uses it naturally**: relevant memories go into every answer ("recommend some music" → it knows you love jazz), today's routines are mentioned when it starts up, and finished projects are ticked off ("I finished the bakery website").
@@ -100,7 +103,9 @@ core/
   assistant.py      orchestrator: turns, interruption, speech pipeline
   state.py          IDLE / LISTENING / THINKING / SPEAKING state machine
   llm.py            Ollama client: detection, streaming chat, history, JSON tasks, embeddings, model pull
-  personas.py       the personalities: character prompts, voices, colours, small talk, "switch to Harper"
+  personas.py       the personalities (built-in and your own): character prompts, voices, colours, "switch to Harper"
+  wakelearn.py      teaching the wake-word listener a new name: synthetic voices, augmentation, a tiny numpy network
+  wakewords.py      learned wake words: background training, recording your voice, models in %APPDATA%
   memory.py         long-term memory: SQLite store, hybrid recall, spoken commands, learning, episodes, resume
   tts.py            edge-tts on a background asyncio loop, sentence splitter, speech text cleanup
   stt.py            microphone capture with VAD + Google / Whisper / Vosk recognisers

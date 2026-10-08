@@ -39,7 +39,8 @@ class Persona:
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "display": self.display, "tagline": self.tagline,
-                "description": self.description, "voice": self.voice, "gender": self.gender, "theme": self.theme}
+                "description": self.description, "voice": self.voice, "gender": self.gender, "theme": self.theme,
+                "custom": self.id.startswith("my-")}
 
 
 _COMMON = (
@@ -187,19 +188,133 @@ def system_prompt(persona: Persona, title: str, abilities: str) -> str:
     return persona.identity + "\n\nGuidelines:\n" + "\n".join(f"- {r}" for r in rules) + "\n" + abilities
 
 
+# ----------------------------------------------------------------------------- your own personalities
+BUILT_IN = tuple(PERSONAS)
+CUSTOM_PREFIX = "my-"
+MAX_CUSTOM = 12
+HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+_NAME_OK = re.compile(r"^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .-]{0,23}$")
+
+
+def is_custom(pid: str) -> bool:
+    return (pid or "").startswith(CUSTOM_PREFIX)
+
+
+def _clean(text: str, limit: int) -> str:
+    return re.sub(r"\s+", " ", str(text or "").replace("{", "(").replace("}", ")")).strip()[:limit]
+
+
+def validate_custom(data: dict, existing: list[dict] | None = None) -> dict:
+    """Check and tidy a personality the user made; raises ValueError with a friendly message."""
+    name = _clean(data.get("name"), 24)
+    if not name or not _NAME_OK.match(name):
+        raise ValueError("Give your personality a name (letters only, up to 24 characters).")
+    taken = {p.name.lower() for pid, p in PERSONAS.items() if not is_custom(pid)}
+    taken |= {str(c.get("name", "")).lower() for c in existing or [] if c.get("id") != data.get("id")}
+    if name.lower() in taken or name.lower() in ("j.a.r.v.i.s.", "f.r.i.d.a.y."):
+        raise ValueError(f"There's already a personality called {name}.")
+    description = _clean(data.get("description"), 600)
+    if len(description) < 10:
+        raise ValueError("Describe the personality in a sentence or two, e.g. \u201cA cheerful pirate who loves puns.\u201d")
+    voice = str(data.get("voice") or "").strip()
+    if not re.match(r"^[a-z]{2,3}-[A-Z]{2}-[A-Za-z]+Neural$", voice):
+        raise ValueError("Pick a voice for your personality.")
+    color = str(data.get("color") or "").strip()
+    if not HEX.match(color):
+        color = "#7AA2FF"
+    gender = "female" if str(data.get("gender") or "").lower().startswith("f") else "male"
+    address = _clean(data.get("address"), 24)
+    pid = str(data.get("id") or "")
+    if not is_custom(pid):
+        base = CUSTOM_PREFIX + (re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "persona")
+        pid, n = base, 2
+        while any(c.get("id") == pid for c in existing or []):
+            pid, n = f"{base}-{n}", n + 1
+    return {"id": pid, "name": name, "description": description, "voice": voice, "gender": gender,
+            "color": color.upper(), "address": address}
+
+
+def make_custom(d: dict) -> Persona:
+    name = d["name"]
+    first = re.split(r"(?<=[.!?])\s", d["description"])[0].rstrip(".!? ")
+    tagline = first if len(first) <= 48 else first[:45].rsplit(" ", 1)[0] + "…"
+    address = d.get("address") or ""
+    return Persona(
+        id=d["id"], name=name, display=name.upper(), tagline=tagline, description=d["description"],
+        identity=(f"You are {name}, an AI assistant who lives on the user's computer and helps with anything they need. "
+                  f"Your personality, exactly as the user described it: {d['description']}"),
+        style=("Stay true to that personality in everything you say, while still being genuinely helpful.",
+               "Keep spoken replies natural and fairly short (one to three sentences) unless the user asks for more.",
+               "Address the user as \"{title}\" now and then."),
+        voice=d["voice"], gender=d.get("gender") or "male", theme=d.get("color") or "#7AA2FF",
+        address=address or "name", fallback="friend",
+        lines={"who": (f"I'm {name}, {{title}}. {d['description']}",),
+               "already": (f"{name} here, {{title}}. I'm right with you.",)},
+        greeting=(f"Good {{part}}, {{title}}. {name} here. What can I do for you?",),
+        intro=f"Hi {{title}}, {name} here. What can I do for you?",
+        sample=f"Hi {{title}}, I'm {name}. This is how I sound.",
+    )
+
+
+def load_custom(items: list[dict] | None) -> None:
+    """Make the user's own personalities available alongside the built-in ones."""
+    for pid in [p for p in PERSONAS if is_custom(p)]:
+        del PERSONAS[pid]
+    for d in (items or [])[:MAX_CUSTOM]:
+        try:
+            PERSONAS[d["id"]] = make_custom(validate_custom(d, [c for c in items if c is not d]))
+        except (KeyError, ValueError) as exc:
+            import logging
+
+            logging.getLogger("jarvis.personas").warning("Skipping a saved personality: %s", exc)
+    _compile()
+
+
+def theme_for(persona: Persona, config) -> str:
+    """The HUD colours for this personality: the user's pick, else its own."""
+    colors = config.get("persona_colors") or {}
+    pick = colors.get(persona.id) if isinstance(colors, dict) else None
+    return pick if pick and (HEX.match(str(pick)) or pick in ("arc", "mark3", "stealth", "violet", "rose")) else persona.theme
+
+
 # ----------------------------------------------------------------------------- switching by voice
-_NAMES = {"jarvis": "jarvis", "harper": "harper", "friday": "friday", "sage": "sage"}
-_NAME_RE = r"(?P<name>jarvis|j\.a\.r\.v\.i\.s\.?|harper|friday|f\.r\.i\.d\.a\.y\.?|sage)"
-_LEAD = r"^(?:(?:hey |ok |okay |hi )?(?:jarvis|harper|friday|sage)[, ]+)?(?:please |can you |could you |can i |could i |let me |i want to |i'd like to |let's )*"
-_SWITCH = [
-    re.compile(_LEAD + r"(?:switch|swap)\s+(?:over\s+)?(?:to|into|back to)\s+" + _NAME_RE + r"(?:\s+mode)?[\s.!?]*$", re.I),
-    re.compile(_LEAD + r"(?:switch|change|set)\s+(?:your\s+|the\s+)?(?:personality|persona|character|voice|assistant)\s+(?:to|back to)\s+" + _NAME_RE + r"[\s.!?]*$", re.I),
-    re.compile(_LEAD + r"(?:talk|speak|chat)\s+(?:to|with)\s+" + _NAME_RE + r"(?:\s+(?:now|instead|please))?[\s.!?]*$", re.I),
-    re.compile(_LEAD + r"(?:bring|put)\s+(?:back\s+)?" + _NAME_RE + r"(?:\s+back)?(?:\s+on)?[\s.!?]*$", re.I),
-    re.compile(_LEAD + r"(?:be|become|use|activate|enable)\s+" + _NAME_RE + r"(?:\s+(?:mode|personality|now))?[\s.!?]*$", re.I),
-    re.compile(r"^(?:hey |hi |hello )?" + _NAME_RE + r"[,!]?\s+(?:are you there|take over|come in|it'?s your turn|you'?re up)[\s.!?]*$", re.I),
-    re.compile(_LEAD + r"i\s+(?:want|need|'d like|would like)\s+(?:to\s+(?:talk|speak|chat)\s+(?:to|with)\s+)?" + _NAME_RE + r"(?:\s+(?:back|now|instead))?[\s.!?]*$", re.I),
-]
+_ALIASES = {"j.a.r.v.i.s": "jarvis", "f.r.i.d.a.y": "friday"}
+_NAMES: dict[str, str] = {}
+_SWITCH: list[re.Pattern] = []
+_LEAD = ""
+
+
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9à-ÿ]", "", name.lower())
+
+
+def names_pattern() -> str:
+    """Every personality's name, for regexes ("jarvis|harper|...|nova")."""
+    names = sorted({p.name.lower() for p in PERSONAS.values()}, key=len, reverse=True)
+    return "|".join(re.escape(n) for n in names)
+
+
+def _compile() -> None:
+    global _LEAD, _SWITCH
+    _NAMES.clear()
+    for pid, p in PERSONAS.items():
+        _NAMES[_key(p.name)] = pid
+    names = names_pattern()
+    name_re = r"(?P<name>" + names + r"|j\.a\.r\.v\.i\.s\.?|f\.r\.i\.d\.a\.y\.?)"
+    _LEAD = (r"^(?:(?:hey |ok |okay |hi )?(?:" + names + r")[, ]+)?"
+             r"(?:please |can you |could you |can i |could i |let me |i want to |i'd like to |let's )*")
+    _SWITCH = [
+        re.compile(_LEAD + r"(?:switch|swap)\s+(?:over\s+)?(?:to|into|back to)\s+" + name_re + r"(?:\s+mode)?[\s.!?]*$", re.I),
+        re.compile(_LEAD + r"(?:switch|change|set)\s+(?:your\s+|the\s+)?(?:personality|persona|character|voice|assistant)\s+(?:to|back to)\s+" + name_re + r"[\s.!?]*$", re.I),
+        re.compile(_LEAD + r"(?:talk|speak|chat)\s+(?:to|with)\s+" + name_re + r"(?:\s+(?:now|instead|please))?[\s.!?]*$", re.I),
+        re.compile(_LEAD + r"(?:bring|put)\s+(?:back\s+)?" + name_re + r"(?:\s+back)?(?:\s+on)?[\s.!?]*$", re.I),
+        re.compile(_LEAD + r"(?:be|become|use|activate|enable)\s+" + name_re + r"(?:\s+(?:mode|personality|now))?[\s.!?]*$", re.I),
+        re.compile(r"^(?:hey |hi |hello )?" + name_re + r"[,!]?\s+(?:are you there|take over|come in|it'?s your turn|you'?re up)[\s.!?]*$", re.I),
+        re.compile(_LEAD + r"i\s+(?:want|need|'d like|would like)\s+(?:to\s+(?:talk|speak|chat)\s+(?:to|with)\s+)?" + name_re + r"(?:\s+(?:back|now|instead))?[\s.!?]*$", re.I),
+    ]
+
+
+_compile()
 _WHO = re.compile(r"^(?:who am i (?:talking|speaking|chatting) (?:to|with)|who(?:'s| is) (?:this|there|speaking|talking)|which personality is (?:this|on|active)|"
                   r"what personality (?:is this|are you(?: using)?)|(?:what|which) personalities (?:are there|do you have|can i (?:choose|pick))|list (?:the |your )?personalities)[\s?.!]*$", re.I)
 
@@ -210,7 +325,8 @@ def parse_switch(text: str) -> str | None:
     for pattern in _SWITCH:
         m = pattern.match(t)
         if m:
-            return _NAMES.get(re.sub(r"[^a-z]", "", m.group("name").lower()))
+            key = _key(m.group("name"))
+            return _NAMES.get(key) or _NAMES.get(_ALIASES.get(m.group("name").lower().rstrip("."), ""))
     return None
 
 

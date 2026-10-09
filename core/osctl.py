@@ -82,6 +82,23 @@ def toggle_mute(platform: str | None = None, runner=subprocess.run, user32=None)
         raise OsControlError("I can't control the volume on this system.")
 
 
+VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_STOP, VK_MEDIA_PLAY_PAUSE = 0xB0, 0xB1, 0xB2, 0xB3
+_MEDIA_KEYS = {"toggle": VK_MEDIA_PLAY_PAUSE, "next": VK_MEDIA_NEXT, "previous": VK_MEDIA_PREV, "stop": VK_MEDIA_STOP}
+_PLAYERCTL = {"toggle": "play-pause", "next": "next", "previous": "previous", "stop": "stop", "play": "play", "pause": "pause"}
+
+
+def media_key(action: str, platform: str | None = None, runner=subprocess.run, user32=None) -> None:
+    """Press a media key: "toggle" (play/pause), "next", "previous" or "stop". Every player on Windows obeys these."""
+    platform = platform or sys.platform
+    if platform == "win32":
+        _press([_MEDIA_KEYS.get(action, VK_MEDIA_PLAY_PAUSE)], user32)
+        return
+    if shutil.which("playerctl") or runner is not subprocess.run:
+        runner(["playerctl", _PLAYERCTL.get(action, "play-pause")], check=False, capture_output=True)
+        return
+    raise OsControlError("I can't control media playback on this system.")
+
+
 def screenshots_folder() -> Path:
     base = Path.home() / "Pictures"
     folder = base / "Screenshots" if base.is_dir() else Path.home()

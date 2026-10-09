@@ -44,8 +44,9 @@ _SMALL_TALK: list[tuple[str, re.Pattern, list[str]]] = [  # (situation, pattern,
     ("who", re.compile(_LEAD + r"(?:who are you|what are you|what(?:'s| is) your name|what should i call you|introduce yourself)" + _END, re.I),
      ["I'm J.A.R.V.I.S., {title}: Just A Rather Very Intelligent System. I live on your computer and I'm entirely at your service."]),
     ("abilities", re.compile(_LEAD + r"(?:what can you do|what can i ask you|help me|what do you do|what are your (?:features|abilities|capabilities)|how do you work)" + _END, re.I),
-     ["I can open your apps, games and files, search the web, write documents and presentations in Google Docs and Slides, "
-      "send emails, set timers, do sums, control the volume and chat in your language. Just ask, {title}."]),
+     ["I can open your apps, games and files, play music, search the web, write documents and presentations in Google Docs and Slides, "
+      "send emails, set timers, do sums, control the volume and chat in your language. You can also teach me protocols: "
+      "lists of commands I run when you say “run” and the name. Just ask, {title}."]),
     ("goodbye", re.compile(_LEAD + r"(?:good ?night|goodbye|bye(?: bye)?|see you(?: later| tomorrow| soon)?|talk to you later|i'?m (?:off|going to bed|leaving)|that'?s all for (?:today|now))" + _END, re.I),
      ["Good night, {title}. I'll be here if you need me.", "Goodbye, {title}. Do call if you need anything.", "Until next time, {title}."]),
     ("joke", re.compile(_LEAD + r"(?:tell me a joke|say something funny|make me laugh|got any jokes|do you know any jokes|joke)" + _END, re.I), JOKES),

@@ -134,6 +134,13 @@ window.createJarvisMock = function createJarvisMock() {
     'Here is a quick example:\n```python\nprint("Hello from J.A.R.V.I.S.")\n```\nShall I explain it further?',
   ];
 
+  let protocols = [
+    { id: 'p1', name: 'Morning', steps: ['open Spotify', 'play some focus music', "what's the weather today", 'say Good morning, sir', 'open Gmail'],
+      schedule: { time: '07:30', days: [0, 1, 2, 3, 4], enabled: true }, created: now, last_run: now - 86000 },
+    { id: 'p2', name: 'House Party', steps: ['play party hits on YouTube', 'set the volume to 80', 'say Let\'s get this party started'], schedule: {}, created: now, last_run: 0 },
+  ];
+  const protoList = () => ({ protocols: protocols.map((p) => ({ ...p, when: p.schedule && p.schedule.time ? `on weekdays at ${p.schedule.time}` : '' })), running: null, recording: null });
+
   return {
     ui_ready: async () => ({
       version: '1.0.0-preview', settings: { ...settings }, state: 'IDLE', ollama: status(),
@@ -143,7 +150,8 @@ window.createJarvisMock = function createJarvisMock() {
       core: { online, model: models[0] || null, host: settings.ollama_host, first_token_ms: null, tokens_per_sec: null, memory_turns: 0 },
       window: { frameless: true },
       wake: { enabled: true, active: true, phrase: settings.persona === 'harper' ? 'Hey Harper' : 'Hey Jarvis', phrases: ['Hey Jarvis'], reason: null }, vision: mockVision,
-      persona: personaInfo(), personas: listPersonas(), memory: memStats(),
+      persona: personaInfo(), personas: listPersonas(), memory: memStats(), protocols: protoList(),
+      media: { title: 'Bohemian Rhapsody (Remastered 2011)', artist: 'Queen', app: 'Spotify', playing: true },
       restored: params.has('restored') ? [{ role: 'user', text: 'Any ideas for the bakery website homepage?', ts: now - 3000 },
         { role: 'assistant', text: 'Lead with a big photo of the bread, the opening hours and a "call to order" button. Want me to sketch a layout?', ts: now - 2990 }] : [],
     }),
@@ -298,6 +306,28 @@ window.createJarvisMock = function createJarvisMock() {
       return { ok: true, persona: personaInfo() };
     },
     persona_preview: async () => {},
+    protocol_list: async () => protoList(),
+    protocol_save: async (d) => {
+      const steps = (Array.isArray(d.steps) ? d.steps : String(d.steps || '').split('\n')).map((x) => x.trim()).filter(Boolean);
+      if (!String(d.name || '').trim()) return { ok: false, error: 'Give the protocol a name.' };
+      if (!steps.length) return { ok: false, error: 'A protocol needs at least one step.' };
+      let p = protocols.find((x) => x.id === d.id) || protocols.find((x) => x.name.toLowerCase() === d.name.trim().toLowerCase());
+      if (!p) { p = { id: `p${Date.now()}`, created: Date.now() / 1000, last_run: 0 }; protocols.push(p); }
+      Object.assign(p, { name: d.name.trim(), steps, schedule: d.schedule || {} });
+      setTimeout(() => emit({ type: 'protocols', ...protoList() }), 0);
+      return { ok: true, protocol: p };
+    },
+    protocol_delete: async (id) => { const p = protocols.find((x) => x.id === id); protocols = protocols.filter((x) => x.id !== id); return { ok: !!p, protocol: p || null }; },
+    protocol_restore: async (d) => { protocols.push(d); return { ok: true }; },
+    protocol_run: async (id) => {
+      const p = protocols.find((x) => x.id === id);
+      p.last_run = Date.now() / 1000;
+      p.steps.forEach((step, i) => setTimeout(() => emit({ type: 'protocol', status: 'step', id, name: p.name, index: i, total: p.steps.length, step }), 600 + i * 1600));
+      setTimeout(() => emit({ type: 'protocol', status: 'done', id, name: p.name, index: p.steps.length - 1, total: p.steps.length }), 600 + p.steps.length * 1600);
+      return { ok: true };
+    },
+    protocol_stop: async () => ({ ok: true }),
+    media_control: async () => ({ ok: true }),
     memory_list: async () => ({ memories: memories.slice(), episodes: episodes.slice(), stats: memStats() }),
     memory_add: async (kind, text) => { const m = mem(++memId, kind, text.replace(/\bI\b/g, 'You'), { source: 'manual' }); memories.unshift(m); memChanged(); return { ok: true, memory: m, status: 'added' }; },
     memory_update: async (id, fields) => {

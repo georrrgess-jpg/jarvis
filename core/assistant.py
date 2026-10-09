@@ -45,6 +45,9 @@ from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
+from .media import MediaCommand, NowPlaying, find_youtube_video, now_playing, parse_media, spotify_targets, youtube_search_url
+from .protocols import (Protocol, ProtocolCommand, ProtocolError, ProtocolStore, clean_name as clean_protocol_name, describe_schedule,
+                        due as protocol_due, join_names, parse_protocol_command, recording_reply, split_steps, spoken_steps, step_kind)
 from .weather import Weather, WeatherError, asks_pc_temperature, parse_weather
 from .monitors import MonitorCommand, describe as describe_monitor, parse_monitor_command, resolve as resolve_monitor, split_screen_phrase
 from .memory import Memory, MemoryCommand, MemoryEngine, first_person_echo, parse_memory_command, spoken, today_routines
@@ -345,6 +348,13 @@ class Assistant:
         self._awaiting: Draft | None = None  # the draft JARVIS just asked "shall I send it?" about
         self._pending_forget = 0.0  # when JARVIS asked "forget everything?"
         self._paused = False  # "stop listening": the microphone stays closed until asked again
+        self.protocols = ProtocolStore(config)
+        self._protocol_lock = threading.Lock()
+        self._protocol_run: dict | None = None  # the protocol running now: {id, name, steps, index, stop, turn, ...}
+        self._protocol_last: dict | None = None  # the one that ran last (so "stop the protocol" right after still makes sense)
+        self._recording: dict | None = None  # a protocol being dictated step by step: {name, steps, at, id}
+        self._scheduler_stop = threading.Event()
+        self._now_playing: NowPlaying | None = None
         self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
         self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
         self.weather = Weather(config, self.memory)
@@ -408,6 +418,9 @@ class Assistant:
     def _new_turn(self, kind: str) -> Turn:
         with self._turn_lock:
             old = self._turn
+            run = self._protocol_run
+            if old is not None and run is not None and run.get("turn") is old and not old.cancel.is_set():
+                run["interrupted_by"] = kind  # a timer going off pauses a protocol; the user speaking stops it
             if old is not None:
                 old.abort()
             self.audio.stop_voice()
@@ -461,6 +474,8 @@ class Assistant:
             ("vision", self._start_vision),
             ("memory", self._start_memory),
             ("wake words", self._wake_changed),
+            ("protocol scheduler", lambda: self._spawn(self._protocol_scheduler, name="protocol-scheduler")),
+            ("media watcher", lambda: self._spawn(self._media_watch, name="media-watch")),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -493,6 +508,8 @@ class Assistant:
             "memory": self.memory.stats(),
             "restored": self._restored,
             "paused": self._paused,
+            "protocols": self.protocol_list(),
+            "media": self._now_playing.to_dict() if self._now_playing else None,
         }
 
     def boot_complete(self) -> None:
@@ -517,6 +534,10 @@ class Assistant:
 
     def shutdown(self) -> None:
         self._prewarm_stop.set()
+        self._scheduler_stop.set()
+        run = self._protocol_run
+        if run is not None:
+            run["stop"].set()
         self.memory.stop()
         self.wakewords.cancel()
         self.tracker.stop()
@@ -620,6 +641,442 @@ class Assistant:
                 self._deliver(turn, [text], voice=voice)
 
         self._spawn(run, name=f"announce-{turn.id}")
+
+    # ================================================================== protocols
+    def protocol_list(self) -> dict:
+        items = []
+        for p in self.protocols.all():
+            d = p.to_dict()
+            d["when"] = p.describe_schedule()
+            items.append(d)
+        return {"protocols": items, "running": self._protocol_status(), "recording": self._recording_status()}
+
+    def _protocol_status(self) -> dict | None:
+        run = self._protocol_run
+        if run is None:
+            return None
+        return {"id": run["id"], "name": run["name"], "index": run["index"], "total": len(run["steps"]),
+                "step": run["steps"][run["index"]] if 0 <= run["index"] < len(run["steps"]) else ""}
+
+    def _recording_status(self) -> dict | None:
+        rec = self._recording
+        return {"name": rec["name"], "steps": list(rec["steps"])} if rec else None
+
+    def _emit_protocols(self) -> None:
+        self.emit("protocols", **self.protocol_list())
+
+    def protocol_save(self, data: dict) -> dict:
+        data = data if isinstance(data, dict) else {}
+        steps = data.get("steps") or []
+        if isinstance(steps, str):
+            steps = [line for line in steps.splitlines()]
+        try:
+            schedule = data.get("schedule") if "schedule" in data else None
+            p = self.protocols.save(str(data.get("name") or ""), [str(x) for x in steps], pid=data.get("id") or None,
+                                    schedule=schedule)
+        except ProtocolError as exc:
+            return {"ok": False, "error": str(exc)}
+        self._emit_protocols()
+        return {"ok": True, "protocol": p.to_dict()}
+
+    def protocol_delete(self, pid: str) -> dict:
+        gone = self.protocols.delete(str(pid))
+        self._emit_protocols()
+        return {"ok": gone is not None, "protocol": gone.to_dict() if gone else None}
+
+    def protocol_restore(self, data: dict) -> dict:
+        p = self.protocols.restore(data if isinstance(data, dict) else {})
+        self._emit_protocols()
+        return {"ok": p is not None}
+
+    def protocol_run(self, pid: str) -> dict:
+        p = self.protocols.get(str(pid))
+        if p is None:
+            return {"ok": False, "error": "That protocol doesn't exist any more."}
+        if self._protocol_run is not None:
+            return {"ok": False, "error": f"The {self._protocol_run['name']} protocol is still running."}
+        turn = self._new_turn("announce")
+
+        def run() -> None:
+            self._deliver(turn, [f"Initiating the {p.name} protocol, {self.title}."])
+            if not turn.cancel.is_set():
+                self._start_protocol(p)
+
+        self._spawn(run, name=f"protocol-start-{p.id}")
+        return {"ok": True}
+
+    def protocol_stop(self) -> dict:
+        run = self._protocol_run
+        if run is None:
+            return {"ok": False}
+        run["stop"].set()
+        step_turn = run.get("turn")
+        if step_turn is not None:
+            run["interrupted_by"] = "stop"
+            step_turn.abort()
+            self.audio.stop_voice(80)
+        return {"ok": True}
+
+    def _expand_steps(self, p: Protocol, depth: int = 0, seen: tuple = ()) -> list[str]:
+        """A step "run the Lights protocol" runs that protocol's steps in place (up to 3 deep, no loops)."""
+        out: list[str] = []
+        for raw in p.steps:
+            cmd = parse_protocol_command(raw, find=self.protocols.find)
+            inner = self.protocols.find(cmd.name) if cmd is not None and cmd.action == "run" else None
+            if inner is not None and inner.id not in seen + (p.id,) and depth < 3:
+                out.extend(self._expand_steps(inner, depth + 1, seen + (p.id,)))
+            elif inner is None:
+                out.append(raw)
+        return out
+
+    def _start_protocol(self, p: Protocol, scheduled: bool = False) -> bool:
+        with self._protocol_lock:
+            if self._protocol_run is not None:
+                return False
+            run = {"id": p.id, "name": p.name, "steps": self._expand_steps(p), "index": -1, "stop": threading.Event(),
+                   "turn": None, "interrupted_by": None, "scheduled": scheduled, "started": time.time()}
+            self._protocol_run = run
+        try:
+            self.protocols.update(p.id, last_run=time.time())
+        except ProtocolError:
+            pass
+        threading.Thread(target=self._protocol_runner, args=(run,), name=f"protocol-{p.id}", daemon=True).start()
+        return True
+
+    def _protocol_runner(self, run: dict) -> None:
+        stop, steps = run["stop"], run["steps"]
+        outcome = "done"
+        self.emit("protocol", status="running", **self._protocol_status())
+        try:
+            for i, raw in enumerate(steps):
+                if stop.is_set():
+                    outcome = "stopped"
+                    break
+                run["index"] = i
+                self.emit("protocol", status="step", **self._protocol_status())
+                step = step_kind(raw)
+                if step.kind == "wait":
+                    if stop.wait(step.seconds):
+                        outcome = "stopped"
+                        break
+                    continue
+                turn = self._new_turn("protocol")
+                turn.learn = False
+                run["turn"], run["interrupted_by"] = turn, None
+                try:
+                    if step.kind == "say":
+                        turn.text = ""
+                        if self._set_state(State.THINKING, turn, "protocol"):
+                            self._deliver(turn, [step.text])
+                    else:
+                        self._converse(turn, raw, "protocol")
+                except Exception:
+                    log.exception("Protocol step %r failed", raw)
+                    self._finish_turn(turn)
+                run["turn"] = None
+                if stop.is_set():
+                    outcome = "stopped"
+                    break
+                if turn.cancel.is_set() and run.get("interrupted_by") != "announce":
+                    outcome = "interrupted"  # the user spoke, typed or pressed stop: they've taken over
+                    break
+                if run.get("interrupted_by") == "announce":
+                    self._wait_for_quiet(stop)  # a timer or reminder went off: let it finish, then carry on
+        finally:
+            with self._protocol_lock:
+                self._protocol_run = None
+                run["outcome"], run["ended"] = outcome, time.time()
+                self._protocol_last = run
+            self.emit("protocol", status=outcome, id=run["id"], name=run["name"], index=run["index"], total=len(steps))
+            self._emit_protocols()
+        if outcome == "done" and not self._prewarm_stop.is_set():
+            self.speak(f"The {run['name']} protocol is complete, {self.title}.")
+
+    def _wait_for_quiet(self, stop: threading.Event, limit: float = 120.0) -> None:
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline and not stop.is_set():
+            with self._turn_lock:
+                busy = self._turn is not None
+            if not busy:
+                return
+            time.sleep(0.1)
+
+    def _protocol_command(self, cmd: ProtocolCommand, source: str) -> tuple[str, Protocol | None]:
+        """What to say about a protocol request, and the protocol to start once it has been said (if any)."""
+        t = self.title
+        names = self.protocols.names()
+
+        def unknown(name: str) -> str:
+            if not names:
+                return (f"You haven't made any protocols yet, {t}. Say “create a protocol called {name or 'Morning'}” "
+                        "and tell me the steps.")
+            return f"I don't have a protocol called {name}, {t}. Your protocols are {join_names(names)}."
+
+        if cmd.action == "list":
+            if not names:
+                return (f"You don't have any protocols yet, {t}. Say “create a protocol called Morning: open Spotify, "
+                        "then tell me the weather”, or press the protocols button.", None)
+            return (f"You have {len(names)} protocol{'s' if len(names) != 1 else ''}, {t}: {join_names(names)}.", None)
+        if cmd.action == "stop":
+            run = self._protocol_run
+            if run is not None:
+                self.protocol_stop()
+                return (f"I've stopped the {run['name']} protocol, {t}.", None)
+            last = self._protocol_last
+            if last is not None and time.time() - last.get("ended", 0) < 20 and last.get("outcome") != "done":
+                return (f"I've stopped the {last['name']} protocol, {t}.", None)
+            return (f"No protocol is running, {t}.", None)
+        if cmd.action == "record":
+            if source == "protocol":
+                return (f"I can't record a protocol from inside another one, {t}.", None)
+            self._recording = {"name": cmd.name, "steps": [], "at": time.time()}
+            self._emit_protocols()
+            if not cmd.name:
+                return (f"Of course, {t}. What shall I call the new protocol?", None)
+            replacing = " It will replace the one you have now." if self.protocols.find(cmd.name) else ""
+            return (f"Recording the {cmd.name} protocol, {t}.{replacing} Tell me the first step, and say “done” when you've finished.", None)
+        if cmd.action == "create":
+            if not cmd.name:
+                self._recording = {"name": "", "steps": list(cmd.steps), "at": time.time()}
+                self._emit_protocols()
+                return (f"Got {len(cmd.steps)} step{'s' if len(cmd.steps) != 1 else ''}, {t}. What shall I call this protocol?", None)
+            try:
+                existed = self.protocols.find(cmd.name) is not None
+                p = self.protocols.save(cmd.name, cmd.steps)
+            except ProtocolError as exc:
+                return (f"I couldn't save that, {t}: {exc}", None)
+            self._emit_protocols()
+            verb = "updated" if existed else "created"
+            return (f"Protocol {p.name} {verb}, {t}, with {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}: {spoken_steps(p.steps)}. "
+                    f"Say “run {p.name}” whenever you like.", None)
+
+        p = self.protocols.find(cmd.name) if cmd.name else None
+        if p is None:
+            if cmd.action == "run" and not cmd.name:
+                return (unknown(""), None)
+            return (unknown(cmd.name), None)
+        if cmd.action == "run":
+            if source == "protocol":
+                return (f"I can't start the {p.name} protocol from inside another protocol, {t}.", None)
+            if self._protocol_run is not None:
+                return (f"The {self._protocol_run['name']} protocol is still running, {t}. Say “stop the protocol” first.", None)
+            if not p.steps:
+                return (f"The {p.name} protocol has no steps yet, {t}.", None)
+            return (f"Initiating the {p.name} protocol, {t}.", p)
+        if cmd.action == "show":
+            when = f" It runs {p.describe_schedule()}." if p.schedule else ""
+            return (f"The {p.name} protocol has {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}, {t}: {spoken_steps(p.steps, 12)}.{when}", None)
+        if cmd.action == "add":
+            if not cmd.steps:
+                return (f"What should I add to the {p.name} protocol, {t}?", None)
+            try:
+                p = self.protocols.update(p.id, steps=p.steps + cmd.steps)
+            except ProtocolError as exc:
+                return (f"I couldn't change it, {t}: {exc}", None)
+            self._emit_protocols()
+            return (f"Added to the {p.name} protocol, {t}. It now has {len(p.steps)} steps.", None)
+        if cmd.action == "remove_step":
+            if len(p.steps) <= 1:
+                return (f"That's the only step in the {p.name} protocol, {t}. Say “delete the {p.name} protocol” to remove it altogether.", None)
+            index = (cmd.index or len(p.steps)) - 1
+            if not 0 <= index < len(p.steps):
+                return (f"The {p.name} protocol only has {len(p.steps)} steps, {t}.", None)
+            removed = p.steps[index]
+            p = self.protocols.update(p.id, steps=p.steps[:index] + p.steps[index + 1:])
+            self._emit_protocols()
+            return (f"Removed “{removed}” from the {p.name} protocol, {t}.", None)
+        if cmd.action == "delete":
+            self.protocols.delete(p.id)
+            self._emit_protocols()
+            return (f"I've deleted the {p.name} protocol, {t}.", None)
+        if cmd.action == "rename":
+            try:
+                new = self.protocols.update(p.id, name=cmd.new_name)
+            except ProtocolError as exc:
+                return (f"I couldn't rename it, {t}: {exc}", None)
+            self._emit_protocols()
+            return (f"The {p.name} protocol is now called {new.name}, {t}.", None)
+        if cmd.action == "schedule":
+            p = self.protocols.update(p.id, schedule=cmd.schedule or {})
+            self._emit_protocols()
+            return (f"Done, {t}. I'll run the {p.name} protocol {describe_schedule(p.schedule)}.", None)
+        if cmd.action == "unschedule":
+            p = self.protocols.update(p.id, schedule={})
+            self._emit_protocols()
+            return (f"The {p.name} protocol won't run by itself any more, {t}.", None)
+        return (unknown(cmd.name), None)
+
+    def _record_step(self, rec: dict, text: str) -> str:
+        """The user is dictating a protocol: each thing they say is a step until they say "done"."""
+        t = self.title
+        rec["at"] = time.time()
+        text = _bare(text).strip()
+        if not rec["name"]:
+            kind = recording_reply(text)
+            if kind == "abandon":
+                self._recording = None
+                self._emit_protocols()
+                return f"Very well, {t}. I've scrapped it."
+            rec["name"] = clean_protocol_name(re.sub(r"^(?:call it|name it|it'?s called|let'?s call it)\s+", "", text, flags=re.I))
+            if not rec["name"]:
+                return f"What shall I call it, {t}?"
+            self._emit_protocols()
+            if rec["steps"]:
+                return self._finish_recording(rec)
+            return f"The {rec['name']} protocol it is, {t}. What's the first step? Say “done” when you've finished."
+        kind = recording_reply(text)
+        if kind == "abandon":
+            self._recording = None
+            self._emit_protocols()
+            return f"Very well, {t}. I haven't saved the {rec['name']} protocol."
+        if kind == "undo":
+            if rec["steps"]:
+                gone = rec["steps"].pop()
+                self._emit_protocols()
+                return f"Removed “{gone}”. What's next, {t}?"
+            return f"There aren't any steps yet, {t}. What's the first one?"
+        if kind == "done":
+            if not rec["steps"]:
+                return f"There aren't any steps yet, {t}. Tell me one, or say “cancel”."
+            return self._finish_recording(rec)
+        new = split_steps(text)
+        if not new:
+            return f"Sorry, {t}, what's the next step?"
+        rec["steps"].extend(new)
+        self._emit_protocols()
+        n = len(rec["steps"])
+        lead = f"Step {n}" if len(new) == 1 else f"Steps {n - len(new) + 1} to {n}"
+        return f"{lead}: {'; '.join(new)}. What's next? Or say “done”."
+
+    def _finish_recording(self, rec: dict) -> str:
+        t = self.title
+        self._recording = None
+        try:
+            p = self.protocols.save(rec["name"], rec["steps"])
+        except ProtocolError as exc:
+            self._emit_protocols()
+            return f"I couldn't save it, {t}: {exc}"
+        self._emit_protocols()
+        return (f"Protocol {p.name} saved with {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}, {t}. "
+                f"Say “run {p.name}” whenever you like.")
+
+    def _protocol_scheduler(self) -> None:
+        """Runs protocols that have a schedule ("every weekday at 7:30")."""
+        while not self._scheduler_stop.wait(20):
+            try:
+                now = datetime.now()
+                for p in self.protocols.all():
+                    if p.steps and protocol_due(p.schedule, now, p.last_run) and self._protocol_run is None:
+                        self.protocols.update(p.id, last_run=time.time())
+                        self._wait_for_quiet(self._scheduler_stop, 60)
+                        turn = self._new_turn("announce")
+                        self._deliver(turn, [f"It's {now.strftime('%H:%M')}, {self.title}. Running your {p.name} protocol."])
+                        self._start_protocol(p, scheduled=True)
+                        break
+            except Exception:
+                log.exception("Protocol scheduler hiccup")
+
+    # ================================================================== music and media
+    def _media(self, turn: Turn, cmd: MediaCommand) -> str:
+        t = self.title
+        current = now_playing(self._safe_windows())
+        if cmd.action == "now_playing":
+            if current is None or not current.title:
+                if current is not None:
+                    return f"Spotify is open but nothing's playing, {t}."
+                return f"I can't see anything playing right now, {t}. I can read what's on Spotify, YouTube or VLC."
+            return f"That's {current.spoken()}, on {current.app}, {t}."
+        if cmd.action == "play":
+            return self._play_media(turn, cmd, current)
+        if cmd.action == "pause" and current is not None and current.app == "Spotify" and not current.playing:
+            return f"Spotify is already paused, {t}."
+        if cmd.action == "resume" and current is not None and current.app == "Spotify" and current.playing:
+            return f"It's already playing, {t}: {current.spoken()}."
+        key = {"pause": "toggle", "resume": "toggle", "next": "next", "previous": "previous"}[cmd.action]
+        try:
+            osctl.media_key(key)
+        except osctl.OsControlError as exc:
+            return f"{exc} Sorry, {t}."
+        self._spawn(self._media_refresh, 1.2, name="media-refresh")
+        return {"pause": f"Paused, {t}.", "resume": f"Resuming, {t}.", "next": f"Skipping ahead, {t}.",
+                "previous": f"Going back a track, {t}."}[cmd.action]
+
+    def _play_media(self, turn: Turn, cmd: MediaCommand, current: NowPlaying | None) -> str:
+        t = self.title
+        if not self.tools.web_enabled:
+            return f"Internet access is switched off in Settings, {t}, so I can't fetch music."
+        service = cmd.service or self.config.get("music_service") or "youtube"
+        query = cmd.query
+        if cmd.vague:
+            if current is not None and current.app == "Spotify":
+                if current.playing:
+                    return f"Spotify is already playing {current.spoken()}, {t}."
+                osctl.media_key("toggle")
+                self._spawn(self._media_refresh, 1.5, name="media-refresh")
+                return f"Resuming Spotify, {t}."
+            query = "relaxing music mix" if service == "youtube" else "Daily Mix"
+        if current is not None and current.app == "Spotify" and current.playing and service == "youtube":
+            try:
+                osctl.media_key("toggle")  # don't play two things at once
+            except osctl.OsControlError:
+                pass
+        if service == "spotify":
+            uri, web = spotify_targets(query)
+            self._emit_turn(turn, "tool_activity", tool="media", label=f"Opening {query} in Spotify")
+            try:
+                self.tools.open_uri(uri)
+                where = "Spotify"
+            except Exception:
+                self.tools.open_website(web)
+                where = "Spotify's web player"
+            self._spawn(self._media_refresh, 3.0, name="media-refresh")
+            return (f"I've searched {where} for {query}, {t}. Press play on the top result. "
+                    "If you'd like me to start songs by myself, say “play it on YouTube”.")
+        self._emit_turn(turn, "tool_activity", tool="media", label=f"Finding {query} on YouTube")
+        try:
+            found = find_youtube_video(self.tools._client(), query)
+        except Exception:
+            log.info("YouTube lookup for %r failed", query, exc_info=True)
+            found = None
+        if turn.cancel.is_set():
+            return ""
+        if found is None:
+            self.tools.open_website(youtube_search_url(query))
+            return f"I couldn't pick a video myself, {t}, so I've opened YouTube's results for {query}."
+        url, title = found
+        self.tools.open_website(url)
+        self._tool_used(turn, "open_website", {"url": url})
+        self._spawn(self._media_refresh, 4.0, name="media-refresh")
+        return f"Playing {title or query} on YouTube, {t}."
+
+    def media_control(self, action: str) -> dict:
+        """The HUD's ⏮ ⏯ ⏭ buttons."""
+        if action not in ("toggle", "next", "previous"):
+            return {"ok": False}
+        try:
+            osctl.media_key(action)
+        except osctl.OsControlError as exc:
+            return {"ok": False, "error": str(exc)}
+        self._spawn(self._media_refresh, 1.0, name="media-refresh")
+        return {"ok": True}
+
+    def _media_refresh(self, delay: float = 0.0) -> None:
+        if delay:
+            time.sleep(delay)
+        found = now_playing(self._safe_windows())
+        before = self._now_playing.to_dict() if self._now_playing else None
+        after = found.to_dict() if found and (found.title or found.app == "Spotify") else None
+        if before != after:
+            self._now_playing = found if after else None
+            self.emit("media", playing=after)
+
+    def _media_watch(self) -> None:
+        """Keeps the HUD's now-playing strip current (window titles change when the song does)."""
+        while not self._scheduler_stop.wait(4):
+            try:
+                self._media_refresh()
+            except Exception:
+                log.debug("media watch hiccup", exc_info=True)
 
     # ================================================================== "stop listening"
     def pause_listening(self) -> str:
@@ -1442,7 +1899,8 @@ class Assistant:
                 self._tool_used(turn, "open_file", {"query": target})
                 return f"Launching {result['name']}. Enjoy, {self.title}."
             except ToolError:
-                return None  # "play some jazz" etc. goes to the model
+                media = parse_media(text)  # no game called that: music ("play some jazz")
+                return self._media(turn, media) if media is not None and media.action == "play" else None
         new = parse_new_file(text) if self.tools.web_enabled else None
         if new is not None:
             return self._new_file(turn, new)
@@ -1551,6 +2009,22 @@ class Assistant:
             self._deliver(turn, [self.resume_listening()])
             return
 
+        if source != "protocol":
+            recording = self._recording
+            if recording is not None and time.time() - recording["at"] < 600:
+                turn.learn = False
+                self._deliver(turn, [self._record_step(recording, text)], listen_after=lambda: self._recording is not None)
+                return
+            self._recording = None
+        protocol_cmd = parse_protocol_command(_bare(text), find=self.protocols.find)
+        if protocol_cmd is not None:
+            turn.learn = False
+            reply, start = self._protocol_command(protocol_cmd, source)
+            self._deliver(turn, [reply], listen_after=lambda: self._recording is not None)
+            if start is not None and not turn.cancel.is_set():
+                self._start_protocol(start)
+            return
+
         asked_forget, self._pending_forget = self._pending_forget, 0.0
         if asked_forget and time.time() - asked_forget < 120:
             turn.learn = False
@@ -1589,6 +2063,10 @@ class Assistant:
             self._deliver(turn, self._doc_command(turn, text, doc_cmd, lang), language=lang.code if lang else None, working=True)
             return
 
+        media = parse_media(text)
+        if media is not None and media.action != "play":
+            self._deliver(turn, [self._media(turn, media)])
+            return
         try:
             direct = self._direct_chain(turn, text) or self._direct_command(turn, text)
         except Exception:
@@ -1596,6 +2074,9 @@ class Assistant:
             direct = None
         if direct:
             self._deliver(turn, [direct])
+            return
+        if media is not None:  # "play Bohemian Rhapsody" (no game or app by that name)
+            self._deliver(turn, [self._media(turn, media)], working=True)
             return
         clock = self._clock_answer(text)
         if clock:

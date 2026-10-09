@@ -1124,6 +1124,15 @@ class Toolbox:
         self._launch_url(with_account(target, self._config.get("google_user_email")))
         return {"opened": target}
 
+    def open_uri(self, uri: str) -> None:
+        """Open an app link such as spotify:search:jazz (raises if no app handles it)."""
+        if not re.match(r"^(?:spotify):[\w:%.\-]+$", uri or ""):
+            raise ToolError("unsupported link")
+        if sys.platform == "win32":
+            os.startfile(uri)  # type: ignore[attr-defined]
+        else:
+            raise ToolError("app links only work on Windows")
+
     # ---------------------------------------------------------------- direct commands
     def website_for(self, target: str) -> str | None:
         t = target.lower().strip().removeprefix("the ").strip()

@@ -59,6 +59,10 @@
       <button class="wb" id="btn-persona" title="Personality (Ctrl+P)" aria-label="Choose a personality">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.2c.9 1.3 2 1.9 3.4 1.9s2.5-.6 3.4-1.9"/><path d="M9.2 9.6h.01M14.8 9.6h.01" stroke-width="2.4" stroke-linecap="round"/></svg>
       </button>
+      <button class="wb" id="btn-protocols" title="Protocols (Ctrl+R)" aria-label="Open your protocols">
+        <svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><path d="M3.5 4.5 6.5 6.5 3.5 8.5Z" fill="currentColor" stroke-linejoin="round"/><path d="M4 12h1.5M4 17.5h1.5"/></svg>
+        <i class="wb-badge hidden" id="protocols-badge"></i>
+      </button>
       <button class="wb" id="btn-memory" title="Memory Core (Ctrl+M)" aria-label="Open the Memory Core">
         <svg viewBox="0 0 24 24"><path d="M9.5 4.5a3 3 0 0 0-3 3v.3a3 3 0 0 0-1.7 5.2 3 3 0 0 0 2.2 4.6 2.9 2.9 0 0 0 5 1.4V5.6a2.6 2.6 0 0 0-2.5-1.1Z"/><path d="M14.5 4.5a3 3 0 0 1 3 3v.3a3 3 0 0 1 1.7 5.2 3 3 0 0 1-2.2 4.6 2.9 2.9 0 0 1-5 1.4"/><path d="M12 9.5h2.2M12 14h2.6M9.6 11.6H12"/></svg>
         <i class="wb-badge hidden" id="memory-badge"></i>
@@ -149,6 +153,18 @@
       <div id="watch-strip" class="hidden">
         <svg viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></svg>
         <b>WATCHING</b><span id="watch-label">your screen</span><button id="watch-stop" type="button">STOP</button>
+      </div>
+      <div id="media-strip" class="hidden" aria-live="polite">
+        <svg viewBox="0 0 24 24"><path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>
+        <b id="media-app">NOW PLAYING</b><span id="media-title"></span>
+        <button type="button" data-media="previous" title="Previous track" aria-label="Previous track"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 5 9 12l9 7Z"/></svg></button>
+        <button type="button" data-media="toggle" title="Play / pause" aria-label="Play or pause"><svg viewBox="0 0 24 24"><path d="M7 5v14l6-7Z"/><path d="M15.5 6v12M19 6v12"/></svg></button>
+        <button type="button" data-media="next" title="Next track" aria-label="Next track"><svg viewBox="0 0 24 24"><path d="M18 5v14M6 5l9 7-9 7Z"/></svg></button>
+      </div>
+      <div id="protocol-strip" class="hidden" aria-live="polite">
+        <svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><path d="M3.5 4.5 6.5 6.5 3.5 8.5Z" fill="currentColor"/></svg>
+        <b id="protocol-kind">PROTOCOL</b><span id="protocol-label"></span><em id="protocol-progress"></em>
+        <button id="protocol-stop" type="button">STOP</button><i id="protocol-bar"></i>
       </div>
       <canvas id="wave"></canvas>
 
@@ -343,6 +359,46 @@
     </div>
   </div>
 
+  <!-- ======================================================= protocols -->
+  <div id="protocols" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="pr-title">
+    <div class="modal-card cyan protocol-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker" id="pr-kicker">PROTOCOLS · YOUR COMMAND SEQUENCES</div><h2 id="pr-title">Protocols</h2></div>
+        <button class="wb" id="pr-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div id="pr-browse">
+        <p class="mc-lead">A protocol is a list of commands I carry out in order when you say <b>“Jarvis, run Morning”</b>. Anything you can ask me works as a step.</p>
+        <div class="pr-list" id="pr-list"></div>
+        <div class="mc-actions">
+          <button class="btn primary" id="pr-new"><span>NEW PROTOCOL</span></button>
+          <span class="mm-spacer"></span>
+          <button class="btn ghost" id="pr-done">CLOSE</button>
+        </div>
+      </div>
+      <form id="pr-form" class="pe-form hidden" autocomplete="off">
+        <label class="field"><span>Name</span><input id="pr-name" type="text" maxlength="40" placeholder="e.g. Morning, Work Mode, House Party" required></label>
+        <label class="field"><span>Steps · one command per line <output id="pr-count">0 steps</output></span>
+          <textarea id="pr-steps" rows="8" spellcheck="true" placeholder="open Spotify&#10;play some focus music&#10;set the volume to 30&#10;wait 5 seconds&#10;say Good morning, sir&#10;what's the weather today"></textarea></label>
+        <div class="pe-ideas" id="pr-ideas"></div>
+        <div class="pr-sched">
+          <label class="toggle"><input type="checkbox" id="pr-sched-on"><i></i><span>Run it by itself at</span></label>
+          <input id="pr-time" type="time" value="07:30" aria-label="Time">
+          <div class="pr-days" id="pr-days" role="group" aria-label="Days"></div>
+        </div>
+        <p class="field-note" id="pr-error"></p>
+        <div class="mc-actions">
+          <button class="btn primary" type="submit" id="pr-save"><span>SAVE</span></button>
+          <button class="btn" type="button" id="pr-save-run"><span>SAVE &amp; RUN</span></button>
+          <button class="btn ghost" type="button" id="pr-back">BACK</button>
+          <span class="mm-spacer"></span>
+          <button class="btn ghost danger hidden" type="button" id="pr-delete">DELETE</button>
+        </div>
+      </form>
+      <div class="mc-foot">Say “create a protocol called Morning”, “run Morning”, “add open Gmail to the Morning protocol”, “schedule the Morning protocol for 7:30 on weekdays” or “stop the protocol”.</div>
+    </div>
+  </div>
+
   <!-- ======================================================= personality creator -->
   <div id="persona-edit" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="pe-title">
     <div class="modal-card cyan pe-card">
@@ -445,6 +501,11 @@
           </select>
         </label>
         <p class="field-note">Pick the browser you're signed in to Google with. Or say “show it here” and JARVIS displays your file itself.</p>
+        <label class="field"><span>Play music on</span>
+          <select data-key="music_service" id="set-music">
+            <option value="youtube">YouTube (starts the song for you)</option><option value="spotify">Spotify (opens the search)</option>
+          </select>
+        </label>
         <div class="row"><button class="btn ghost sm" id="g-setup">SET UP</button><button class="btn ghost sm hidden" id="g-update">UPDATE SCRIPT</button><button class="btn ghost sm hidden" id="g-disconnect">DISCONNECT</button></div>
       </fieldset>
       <fieldset id="vision-settings">

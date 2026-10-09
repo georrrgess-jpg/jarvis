@@ -527,6 +527,28 @@ class JarvisAPI:
     def memory_install_embeddings(self) -> dict:
         return self._assistant.pull_model("nomic-embed-text", role="embed")
 
+    # -- protocols & media -------------------------------------------------
+    def protocol_list(self) -> dict:
+        return self._assistant.protocol_list()
+
+    def protocol_save(self, data: dict) -> dict:
+        return self._assistant.protocol_save(data if isinstance(data, dict) else {})
+
+    def protocol_delete(self, pid: str) -> dict:
+        return self._assistant.protocol_delete(str(pid))
+
+    def protocol_restore(self, data: dict) -> dict:
+        return self._assistant.protocol_restore(data if isinstance(data, dict) else {})
+
+    def protocol_run(self, pid: str) -> dict:
+        return self._assistant.protocol_run(str(pid))
+
+    def protocol_stop(self) -> dict:
+        return self._assistant.protocol_stop()
+
+    def media_control(self, action: str) -> dict:
+        return self._assistant.media_control(str(action))
+
     # -- vision ------------------------------------------------------------
     def vision_status(self) -> dict:
         return self._assistant.vision_status()

@@ -576,7 +576,8 @@
     },
     user(ev) {
       const lang = ev.lang ? `<span class="src lang" title="Detected language: ${esc(ev.lang_name || ev.lang)}">${esc(ev.lang.toUpperCase())}</span>` : '';
-      const el = this.make('user', 'YOU', `<span class="src">${ev.source === 'voice' ? 'VOICE' : 'TEXT'}</span>${lang}`);
+      const src = ev.source === 'voice' ? 'VOICE' : ev.source === 'protocol' ? 'PROTOCOL' : 'TEXT';
+      const el = this.make('user', ev.source === 'protocol' ? 'STEP' : 'YOU', `<span class="src">${src}</span>${lang}`);
       $('.msg-body', el).textContent = ev.text;
       this.count++; this.updateCount();
       this.scroll(true);
@@ -712,7 +713,7 @@
       if ($('.suggest-card')) return;
       const ideas = [
         'What\'s on my screen?', 'Write a bio on Lionel Messi', 'Make a presentation about the solar system', 'Email Sarah saying I\'m running late',
-        'Open Spotify', 'Play GTA 5', 'What\'s the weather in London?', '¿Qué hora es en Tokio?',
+        'Play Bohemian Rhapsody', 'Create a protocol called Morning', 'What\'s the weather in London?', '¿Qué hora es en Tokio?',
       ];
       const el = this.card('suggest-card', '<div class="sg-kicker">TRY ASKING</div><div class="sg-list"></div>');
       call('google_status').then((g) => {
@@ -1884,6 +1885,219 @@
     },
   };
 
+  // ========================================================================= now playing
+  const Media = {
+    now: null,
+    update(ev) { this.set(ev.playing || null); },
+    set(np) {
+      this.now = np;
+      const el = $('#media-strip');
+      el.classList.toggle('hidden', !np);
+      if (!np) return;
+      el.classList.toggle('paused', !np.title || np.playing === false);
+      $('#media-app').textContent = (np.app || 'NOW PLAYING').toUpperCase();
+      $('#media-title').textContent = np.title ? (np.artist ? `${np.title} · ${np.artist}` : np.title) : 'paused';
+      el.title = np.title ? `${np.title}${np.artist ? ` by ${np.artist}` : ''} (${np.app})` : `${np.app}: nothing playing`;
+    },
+    init() {
+      $$('#media-strip [data-media]').forEach((b) => (b.onclick = async () => {
+        call('play_sfx', 'click');
+        const r = await call('media_control', b.dataset.media);
+        if (r && !r.ok && r.error) toast(r.error, 'error');
+      }));
+    },
+  };
+
+  // ========================================================================= protocols
+  const DAY_SHORT = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const DAY_LONG = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  const STEP_IDEAS = ['open Spotify', 'play some focus music', 'set the volume to 30', 'what\'s the weather today', 'wait 5 seconds',
+    'say Good morning, sir', 'open Gmail', 'mute', 'lock the computer', 'set a timer for 25 minutes'];
+  const Protocols = {
+    el: null, list: [], running: null, recording: null, editing: null, days: [0, 1, 2, 3, 4, 5, 6], deleteArmed: 0,
+    set(d) {
+      if (!d) return;
+      this.list = d.protocols || [];
+      this.running = d.running || null;
+      this.recording = d.recording || null;
+      const badge = $('#protocols-badge');
+      badge.textContent = String(this.list.length);
+      badge.classList.toggle('hidden', !this.list.length);
+      this.strip();
+      if (this.el && !this.el.classList.contains('hidden') && $('#pr-form').classList.contains('hidden')) this.render();
+    },
+    progress(ev) {
+      if (ev.status === 'running' || ev.status === 'step') this.running = { id: ev.id, name: ev.name, index: ev.index, total: ev.total, step: ev.step };
+      else {
+        this.running = null;
+        if (ev.status === 'done') toast(`${ev.name} protocol complete.`, 'ok', 3500);
+        else if (ev.status === 'stopped' || ev.status === 'interrupted') toast(`${ev.name} protocol stopped at step ${Math.max(1, (ev.index || 0) + 1)} of ${ev.total}.`, 'info', 4500);
+      }
+      this.strip();
+      if (this.el && !this.el.classList.contains('hidden') && $('#pr-form').classList.contains('hidden')) this.render();
+    },
+    strip() {
+      const el = $('#protocol-strip');
+      const r = this.running, rec = this.recording;
+      el.classList.toggle('hidden', !r && !rec);
+      el.classList.toggle('recording', !r && !!rec);
+      if (r) {
+        $('#protocol-kind').textContent = 'PROTOCOL';
+        $('#protocol-label').textContent = r.name;
+        const n = Math.max(0, r.index);
+        $('#protocol-progress').textContent = r.index >= 0 ? `${n + 1}/${r.total} · ${r.step || ''}` : 'starting…';
+        $('#protocol-stop').textContent = 'STOP';
+        $('#protocol-bar').style.width = r.total ? `${(100 * (n + (r.index >= 0 ? 0.5 : 0))) / r.total}%` : '0';
+      } else if (rec) {
+        $('#protocol-kind').textContent = 'RECORDING';
+        $('#protocol-label').textContent = rec.name || 'new protocol';
+        $('#protocol-progress').textContent = `${rec.steps.length} step${rec.steps.length === 1 ? '' : 's'} · say “done” to save`;
+        $('#protocol-stop').textContent = 'CANCEL';
+        $('#protocol-bar').style.width = '0';
+      }
+    },
+    render() {
+      const list = $('#pr-list');
+      list.innerHTML = '';
+      if (!this.list.length) {
+        list.innerHTML = '<div class="mm-empty">No protocols yet. Press <b>NEW PROTOCOL</b>, or say “create a protocol called Morning: open Spotify, then tell me the weather”.</div>';
+        return;
+      }
+      this.list.forEach((p) => {
+        const running = this.running && this.running.id === p.id;
+        const row = document.createElement('div');
+        row.className = `pr-item${running ? ' running' : ''}`;
+        const steps = p.steps.slice(0, 8).map((st, i) => `<li class="${running && this.running.index === i ? 'now' : ''}"></li>`).join('');
+        const meta = [`<span>${p.steps.length} step${p.steps.length === 1 ? '' : 's'}</span>`];
+        if (p.when) meta.push(`<span class="sched${p.schedule && p.schedule.enabled === false ? ' off' : ''}">runs ${esc(p.when)}</span>`);
+        if (p.last_run) { const d = new Date(p.last_run * 1000); meta.push(`<span>last run ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${fmtTime(d).slice(0, 5)}</span>`); }
+        row.innerHTML = `<div class="pr-main"><div><span class="pr-name"></span><span class="pr-say"></span></div><ol class="pr-steps">${steps}</ol><div class="pr-meta">${meta.join('')}</div></div>
+          <div class="pr-acts"><button class="btn sm primary run"><span>${running ? 'STOP' : 'RUN'}</span></button><button class="btn sm ghost edit">EDIT</button></div>`;
+        $('.pr-name', row).textContent = p.name;
+        $('.pr-say', row).textContent = `“run ${p.name}”`;
+        $$('.pr-steps li', row).forEach((li, i) => (li.textContent = p.steps[i]));
+        if (p.steps.length > 8) { const li = document.createElement('li'); li.textContent = `…and ${p.steps.length - 8} more`; li.style.listStyle = 'none'; $('.pr-steps', row).append(li); }
+        $('.run', row).onclick = async () => {
+          if (running) { call('protocol_stop'); return; }
+          const r = await call('protocol_run', p.id);
+          if (r && !r.ok) toast(r.error || 'Could not run it.', 'error'); else this.close();
+        };
+        $('.edit', row).onclick = () => this.edit(p);
+        $('.pr-name', row).ondblclick = () => this.edit(p);
+        list.append(row);
+      });
+    },
+    count() {
+      const n = $('#pr-steps').value.split('\n').filter((l) => l.trim()).length;
+      $('#pr-count').textContent = `${n} step${n === 1 ? '' : 's'}`;
+    },
+    renderDays() {
+      $('#pr-days').innerHTML = DAY_SHORT.map((d, i) => `<button type="button" data-d="${i}" class="${this.days.includes(i) ? 'on' : ''}" title="${DAY_LONG[i]}">${d}</button>`).join('');
+      $$('#pr-days button').forEach((b) => (b.onclick = () => {
+        const d = Number(b.dataset.d);
+        this.days = this.days.includes(d) ? this.days.filter((x) => x !== d) : [...this.days, d].sort();
+        if (!this.days.length) this.days = [d];
+        this.renderDays();
+      }));
+    },
+    schedOn(on) { $('#pr-sched-on').checked = on; $('.pr-sched').classList.toggle('off', !on); },
+    edit(p = null) {
+      this.editing = p;
+      $('#pr-browse').classList.add('hidden');
+      $('#pr-form').classList.remove('hidden');
+      $('#pr-title').textContent = p ? `Edit ${p.name}` : 'New protocol';
+      $('#pr-kicker').textContent = p ? 'PROTOCOLS · EDIT' : 'PROTOCOLS · NEW';
+      $('#pr-name').value = p ? p.name : '';
+      $('#pr-steps').value = p ? p.steps.join('\n') : '';
+      $('#pr-error').textContent = '';
+      const sch = (p && p.schedule) || {};
+      this.schedOn(!!sch.time && sch.enabled !== false);
+      $('#pr-time').value = sch.time || '07:30';
+      this.days = (sch.days && sch.days.length) ? sch.days.slice() : [0, 1, 2, 3, 4, 5, 6];
+      this.renderDays();
+      $('#pr-delete').classList.toggle('hidden', !p);
+      this.disarm();
+      this.count();
+      setTimeout(() => (p ? $('#pr-steps') : $('#pr-name')).focus(), 50);
+    },
+    back() {
+      this.editing = null;
+      $('#pr-form').classList.add('hidden');
+      $('#pr-browse').classList.remove('hidden');
+      $('#pr-title').textContent = 'Protocols';
+      $('#pr-kicker').textContent = 'PROTOCOLS · YOUR COMMAND SEQUENCES';
+      this.render();
+    },
+    async save(run = false) {
+      const data = { name: $('#pr-name').value.trim(), steps: $('#pr-steps').value };
+      if (this.editing) data.id = this.editing.id;
+      data.schedule = $('#pr-sched-on').checked ? { time: $('#pr-time').value || '07:30', days: this.days, enabled: true } : {};
+      const r = await call('protocol_save', data);
+      if (!r || !r.ok) { $('#pr-error').textContent = (r && r.error) || 'Could not save it.'; $('#pr-error').className = 'field-note warn'; return; }
+      toast(`Protocol ${r.protocol.name} saved.`, 'ok', 2500);
+      if (run) {
+        const go = await call('protocol_run', r.protocol.id);
+        if (go && !go.ok) toast(go.error || 'Could not run it.', 'error');
+        this.close();
+        return;
+      }
+      const fresh = await call('protocol_list');
+      if (fresh) this.set(fresh);
+      this.back();
+    },
+    disarm() { clearTimeout(this.deleteArmed); this.deleteArmed = 0; $('#pr-delete').textContent = 'DELETE'; $('#pr-delete').classList.remove('armed'); },
+    async remove() {
+      if (!this.editing) return;
+      if (!this.deleteArmed) { this.deleteArmed = setTimeout(() => this.disarm(), 4000); $('#pr-delete').textContent = 'CLICK AGAIN TO DELETE'; $('#pr-delete').classList.add('armed'); return; }
+      this.disarm();
+      const r = await call('protocol_delete', this.editing.id);
+      if (r && r.ok && r.protocol) {
+        const t = toast(`Deleted the ${r.protocol.name} protocol.`, 'info', 6500);
+        const b = document.createElement('button');
+        b.className = 'toast-act'; b.textContent = 'UNDO';
+        b.onclick = async () => { await call('protocol_restore', r.protocol); t.remove(); const d = await call('protocol_list'); if (d) this.set(d); };
+        t.append(b);
+      }
+      const fresh = await call('protocol_list');
+      if (fresh) this.set(fresh);
+      this.back();
+    },
+    async open(create = false) {
+      this.el.classList.remove('hidden');
+      call('play_sfx', 'click');
+      const d = await call('protocol_list');
+      if (d) this.set(d);
+      if (create) this.edit(null); else this.back();
+    },
+    close() { this.el.classList.add('hidden'); this.disarm(); },
+    init() {
+      this.el = $('#protocols');
+      $('#btn-protocols').onclick = () => this.open();
+      $('#pr-close').onclick = $('#pr-done').onclick = () => this.close();
+      this.el.addEventListener('click', (e) => { if (e.target === this.el) this.close(); });
+      $('#pr-new').onclick = () => this.edit(null);
+      $('#pr-back').onclick = () => this.back();
+      $('#pr-form').onsubmit = (e) => { e.preventDefault(); this.save(false); };
+      $('#pr-save-run').onclick = () => this.save(true);
+      $('#pr-delete').onclick = () => this.remove();
+      $('#pr-steps').oninput = () => this.count();
+      $('#pr-sched-on').onchange = (e) => this.schedOn(e.target.checked);
+      $('#pr-ideas').innerHTML = '<span>IDEAS:</span>' + STEP_IDEAS.map((i) => `<button type="button"></button>`).join('');
+      $$('#pr-ideas button').forEach((b, i) => {
+        b.textContent = STEP_IDEAS[i];
+        b.onclick = () => {
+          const ta = $('#pr-steps');
+          ta.value = (ta.value.trim() ? ta.value.replace(/\s*$/, '\n') : '') + STEP_IDEAS[i];
+          this.count(); ta.focus();
+        };
+      });
+      $('#protocol-stop').onclick = () => {
+        if (this.running) call('protocol_stop');
+        else if (this.recording) call('send_text', 'cancel');
+      };
+    },
+  };
+
   // ========================================================================= events from Python
   function handle(ev) {
     switch (ev.type) {
@@ -1941,6 +2155,9 @@
       case 'memory_changed': MemoryCore.stats(ev.stats); if (!MemoryCore.el.classList.contains('hidden')) MemoryCore.refresh(); break;
       case 'memory_open': MemoryCore.open(); break;
       case 'memory_cleared': MemoryCore.refresh(); break;
+      case 'protocols': Protocols.set(ev); break;
+      case 'protocol': Protocols.progress(ev); break;
+      case 'media': Media.update(ev); break;
       default: break;
     }
   }
@@ -2091,12 +2308,13 @@
     const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
     window.addEventListener('keydown', (e) => {
       if (!S.booted) return;
-      const modalOpen = ['#reader', '#google', '#memory', '#personas', '#persona-edit', '#wake-teach'].some((id) => !$(id).classList.contains('hidden'));
+      const modalOpen = ['#reader', '#google', '#memory', '#personas', '#persona-edit', '#wake-teach', '#protocols'].some((id) => !$(id).classList.contains('hidden'));
       if (e.code === 'Space' && !typing() && !modalOpen) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
         if (!$('#persona-edit').classList.contains('hidden')) PersonaEditor.close();
         else if (!$('#wake-teach').classList.contains('hidden')) WakeTeach.close();
         else if (!$('#memory').classList.contains('hidden')) MemoryCore.close();
+        else if (!$('#protocols').classList.contains('hidden')) { if (!$('#pr-form').classList.contains('hidden')) Protocols.back(); else Protocols.close(); }
         else if (!$('#personas').classList.contains('hidden')) Personas.close();
         else if (!$('#reader').classList.contains('hidden')) Reader.close();
         else if (!$('#google').classList.contains('hidden')) Google.close();
@@ -2110,6 +2328,7 @@
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); Chat.empty(); }
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); Settings.toggle(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); MemoryCore.el.classList.contains('hidden') ? MemoryCore.open() : MemoryCore.close(); }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'r') { e.preventDefault(); Protocols.el.classList.contains('hidden') ? Protocols.open() : Protocols.close(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); Personas.el.classList.contains('hidden') ? Personas.open() : Personas.close(); }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); call('vision_look', ''); }
     });
@@ -2125,6 +2344,8 @@
     PersonaEditor.init();
     WakeTeach.init();
     MemoryCore.init();
+    Protocols.init();
+    Media.init();
     bindControls();
     Hud.clock();
     setInterval(() => Hud.clock(), 1000);
@@ -2165,6 +2386,8 @@
     if (p.personas) S.personas = p.personas;
     if (p.persona) Personas.apply(p.persona);
     if (p.memory) MemoryCore.stats(p.memory);
+    if (p.protocols) Protocols.set(p.protocols);
+    if (p.media) Media.set(p.media);
     Telemetry.start();
 
     call('play_sfx', 'boot');

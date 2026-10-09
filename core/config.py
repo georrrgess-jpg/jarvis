@@ -65,6 +65,8 @@ DEFAULTS: dict[str, Any] = {
     "user_title": "sir",
     "persona": "jarvis",  # jarvis | harper | friday | sage (see core/personas.py)
     "persona_theme": True,  # switching personality also switches the HUD colours
+    "music_service": "youtube",  # youtube | spotify: where "play <song>" goes (see core/media.py)
+    "protocols": [],  # named lists of commands: [{id, name, steps, schedule, created, last_run}] (see core/protocols.py)
     "custom_personas": [],  # personalities the user made: [{id, name, description, voice, gender, color, address}]
     "persona_colors": {},  # the user's HUD colour for any personality: {persona id: "#RRGGBB"}
     "wake_jarvis_always": True,  # "Hey Jarvis" works whichever personality is active
@@ -89,6 +91,7 @@ DEFAULTS: dict[str, Any] = {
 _CHOICES: dict[str, tuple[str, ...]] = {
     "stt_engine": ("auto", "google", "whisper", "vosk"),
     "link_browser": ("default", "chrome", "edge", "firefox", "brave"),
+    "music_service": ("youtube", "spotify"),
     "theme": ("arc", "mark3", "stealth", "violet", "rose"),
     "persona": ("jarvis", "harper", "friday", "sage"),
     "temperature_unit": ("auto", "celsius", "fahrenheit"),

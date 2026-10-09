@@ -252,3 +252,21 @@ def test_an_app_is_only_called_open_once_its_window_shows(jarvis):
     wins.append(Window(5, "Friends - Discord", "Discord.exe"))
     assert ask(assistant, events, "open discord") == "Discord is open, sir."
     assert assistant._activities[-1]["status"] == "ok" and assistant._activities[-1]["kind"] == "app"
+
+
+def test_a_slow_app_is_watched_until_its_window_appears(jarvis, monkeypatch):
+    assistant, events, _ = jarvis
+    from core.assistant import Assistant
+
+    monkeypatch.setattr(Assistant, "LAUNCH_WAIT", 0.2)
+    wins = []
+    assistant.desktop = type("D", (), {"windows": lambda self: list(wins), "foreground": lambda self: None,
+                                       "bring_to_front": lambda self, w: None, "monitors": lambda self: []})()
+    assistant.tools.open_target = lambda target, **k: {"name": "Steam", "kind": "app"}
+    assert ask(assistant, events, "open steam") == "Opening Steam, sir."
+    wins.append(Window(6, "Steam", "steam.exe"))  # the window shows up a moment later
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(a["kind"] == "app" and a["status"] == "ok" for a in assistant._activities):
+        time.sleep(0.05)
+    done = [a for a in assistant._activities if a["kind"] == "app"]
+    assert done and done[-1]["status"] == "ok" and "window appeared" in done[-1]["detail"]

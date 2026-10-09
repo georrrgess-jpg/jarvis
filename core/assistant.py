@@ -381,6 +381,8 @@ class Speaker:
 
 
 class Assistant:
+    LAUNCH_WAIT = 4.0 if sys.platform == "win32" else 0.0  # seconds to wait for an app's window before saying "opening"
+
     def __init__(
         self,
         config: Config,
@@ -2657,8 +2659,7 @@ class Assistant:
     def _confirm_opened(self, name: str, kind: str = "") -> str:
         """Only say an app is open once its window shows; otherwise keep an eye on it and log how it went."""
         t = self.title
-        wait = 4.0 if sys.platform == "win32" else 0.0
-        deadline = time.monotonic() + wait
+        deadline = time.monotonic() + self.LAUNCH_WAIT
         while True:
             if self._find_app_window(name):
                 self._activity("app", f"Opened {name}", "ok", kind)
@@ -2666,7 +2667,7 @@ class Assistant:
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.3)
-        if sys.platform != "win32":
+        if not self.LAUNCH_WAIT:
             self._activity("app", f"Opened {name}", "unverified", kind)
         else:
             threading.Thread(target=self._watch_launch, args=(name, kind), name="launch-watch", daemon=True).start()

@@ -22,9 +22,13 @@ def isolated_home(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def no_real_browser(monkeypatch):
     """Nothing in the tests ever starts a real browser: launches are recorded in ``no_real_browser`` instead."""
+    from core.assistant import Assistant
     from core.browser import BrowserManager
 
     launched: list[str] = []
+    # the same behaviour on every OS: tests that watch windows say so (watch=True), and nothing waits for real app windows
+    monkeypatch.setattr(BrowserManager, "WATCH", False)
+    monkeypatch.setattr(Assistant, "LAUNCH_WAIT", 0.0)
     monkeypatch.setattr(BrowserManager, "real_launch", BrowserManager._launch, raising=False)  # for tests of the launch itself
     monkeypatch.setattr(BrowserManager, "_launch", lambda self, url, key: launched.append(url or ""))
     return launched

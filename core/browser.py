@@ -229,13 +229,15 @@ class NavResult:
 
 
 class BrowserManager:
+    WATCH = sys.platform == "win32"  # watching the browser's windows needs Windows
+
     def __init__(self, config, windows: Callable[[], list], helper=None, popen=subprocess.Popen,
                  sleep: Callable[[float], None] = time.sleep, profiles: Callable[[str], list[Profile]] | None = None,
                  front: Callable[[], object] | None = None, bring_to_front: Callable[[object], None] | None = None,
                  on_state: Callable[[dict], None] | None = None, watch: bool | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self.config = config
-        self.watch = (sys.platform == "win32") if watch is None else watch  # can we see the browser's windows?
+        self.watch = self.WATCH if watch is None else watch  # can we see the browser's windows?
         self._clock = clock
         self.url_launcher: Callable[[str], None] | None = None  # an embedder's own way of opening links (tests, tools)
         self._windows = windows
@@ -249,7 +251,7 @@ class BrowserManager:
         self.state = NOT_RUNNING
         self.last: Look = Look(NOT_RUNNING)
         self.history: list[dict] = []  # state transitions, for diagnostics
-        self._url_cache: dict[int, tuple[float, str]] = {}
+        self._url_cache: dict[int, tuple[float, str, str]] = {}
         self._lock = threading.Lock()
         self.waiting: dict | None = None  # a sign-in JARVIS is waiting for the user to finish
 
@@ -311,8 +313,9 @@ class BrowserManager:
         if not self.helper or window is None:
             return ""
         hwnd = int(getattr(window, "hwnd", 0) or 0)
+        title = str(getattr(window, "title", "") or "")
         cached = self._url_cache.get(hwnd)
-        if cached and time.monotonic() - cached[0] < max_age:
+        if cached and time.monotonic() - cached[0] < max_age and cached[2] == title:  # a new tab title means a new page: read again
             return cached[1]
         url = ""
         try:
@@ -321,7 +324,7 @@ class BrowserManager:
                 url = str(reply.get("url") or "") if reply.get("ok") else ""
         except Exception:
             log.debug("couldn't read the address bar", exc_info=True)
-        self._url_cache[hwnd] = (time.monotonic(), url)
+        self._url_cache[hwnd] = (time.monotonic(), url, title)
         return url
 
     def look(self, key: str | None = None, read_url: bool = True) -> Look:

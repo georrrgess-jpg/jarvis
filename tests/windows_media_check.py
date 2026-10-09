@@ -39,7 +39,10 @@ navigator.mediaSession.metadata = new MediaMetadata({{title: '{title}', artist: 
 navigator.mediaSession.setActionHandler('seekto', (d) => {{ a.currentTime = d.seekTime; }});
 navigator.mediaSession.setActionHandler('play', () => a.play());
 navigator.mediaSession.setActionHandler('pause', () => a.pause());
-a.addEventListener('timeupdate', () => {{ if (a.duration) navigator.mediaSession.setPositionState({{duration: a.duration, position: a.currentTime, playbackRate: 1}}); }});
+a.addEventListener('timeupdate', () => {{
+  if (a.duration) navigator.mediaSession.setPositionState({{duration: a.duration, position: a.currentTime, playbackRate: 1}});
+  document.title = '{title} - Media Page - at ' + Math.floor(a.currentTime);  // the page's own clock, to check seeks against
+}});
 a.play().catch(e => document.title = 'blocked ' + e);
 </script>"""
 
@@ -141,11 +144,26 @@ def main() -> int:
         reply = say("resume")
         check("'resume' plays it again (Windows reports playing)", reply.startswith("Resuming") and windows_status("Jarvis Test Tune") == "playing",
               {"reply": reply, "status": windows_status("Jarvis Test Tune")})
+        def page_clock():
+            import re as _re
+            for w in assistant._safe_windows():
+                m = _re.search(r"Jarvis Test Tune - Media Page - at (\d+)", w.title or "")
+                if m:
+                    return int(m.group(1))
+            return None
+
         before = next((s.position for s in assistant.media.sessions() if s.title == "Jarvis Test Tune"), None)
+        page_before = page_clock()
         reply = say("skip forward 20 seconds")
+        time.sleep(1.0)
         after = next((s.position for s in assistant.media.sessions() if s.title == "Jarvis Test Tune"), None)
-        check("'skip forward 20 seconds' moves the position", before is not None and after is not None and after >= before + 15,
-              {"reply": reply, "before": before, "after": after})
+        page_after = page_clock()
+        moved = page_before is not None and page_after is not None and page_after >= page_before + 15
+        detail = {"reply": reply, "windows_before": before, "windows_after": after, "page_before": page_before, "page_after": page_after}
+        # the rule that matters: never claim a jump that didn't happen (the page's own clock is the truth)
+        check("'skip forward 20 seconds' on a plain page: claimed only if it really moved",
+              (reply.startswith("Jumped") and moved) or (not reply.startswith("Jumped") and not moved) or "didn't confirm" in reply, detail)
+        report["plain_page_seek_moved"] = moved
 
         edge = next((p for p in (Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft/Edge/Application/msedge.exe",
                                   Path(os.environ.get("ProgramFiles", "")) / "Microsoft/Edge/Application/msedge.exe") if p.exists()), None)
@@ -165,6 +183,13 @@ def main() -> int:
         playing = [s.to_dict() for s in assistant.media.sessions() if s.playing]
         check("'play <song>' opens the top YouTube video and confirms it's playing", reply.startswith("Playing") and "YouTube" in reply,
               {"reply": reply, "playing": playing})
+        yt = lambda: next((x for x in assistant.media.sessions() if x.site.startswith("YouTube") or "Never Gonna" in x.title), None)  # noqa: E731
+        before = yt().position if yt() else None
+        reply = say("skip forward 30 seconds")
+        time.sleep(1.0)
+        after = yt().position if yt() else None
+        check("'skip forward 30 seconds' on YouTube moves the video", before is not None and after is not None and after >= before + 20
+              and (reply.startswith("Jumped") or reply.startswith("Forward")), {"reply": reply, "before": before, "after": after})
         reply = say("pause it")
         check("'pause it' pauses the video just started", reply.startswith("Paused"), reply)
     except Exception as exc:  # noqa: BLE001

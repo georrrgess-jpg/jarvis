@@ -53,8 +53,11 @@ from .mediahub import _HINTS, MediaHub, MediaSession, describe_position, hint_fr
 from .winhelper import WinHelper
 from .browser import (AUTHENTICATION_REQUIRED, CONSENT, ERROR as BROWSER_ERROR, FIRST_RUN_SETUP, OFFLINE, PROFILE_SELECTION,
                       BrowserManager, NavResult, needs_account, site_name, tab_title as tab_title_of)
-from .protocols import (Protocol, ProtocolCommand, ProtocolError, ProtocolStore, clean_name as clean_protocol_name, describe_schedule,
-                        due as protocol_due, join_names, parse_protocol_command, recording_reply, split_steps, spoken_steps, step_kind)
+from .protocols import (CATEGORIES as PROTOCOL_CATEGORIES, ICONS as PROTOCOL_ICONS, TEMPLATES as PROTOCOL_TEMPLATES, Protocol, ProtocolCommand,
+                        ProtocolError, ProtocolStore, clean_name as clean_protocol_name, condition_met as protocol_condition,
+                        describe_condition, describe_schedule, due as protocol_due, join_names, parse_protocol_command, recording_reply,
+                        risk as protocol_risk, split_steps, spoken_steps, step_kind, structured_step)
+from .hotkeys import HotkeyManager
 from .weather import Weather, WeatherError, asks_pc_temperature, parse_weather
 from .monitors import MonitorCommand, describe as describe_monitor, parse_monitor_command, resolve as resolve_monitor, split_screen_phrase
 from .memory import Memory, MemoryCommand, MemoryEngine, first_person_echo, parse_memory_command, spoken, today_routines
@@ -117,6 +120,36 @@ _TOOL_CUES = re.compile(
     r"news|weather|latest|current|price|summari[sz]e|"
     r"write|create|make|add|edit|update|replace|list|delete|remove|move|reorder|rearrange|rename|table|row|rows|column|cell)\b", re.IGNORECASE)
 _CLOSING = re.compile(r"^\W*(?:please\s+)?(?:close|quit|exit|shut|kill|end)\b", re.I)  # never answer these by opening things
+_FAILED_REPLY = re.compile(r"^(?:I couldn't|I can't|I'm afraid|I could not|I cannot|Sorry|I don't have|I didn't|There's nothing|Nothing's playing|"
+                           r"I don't know|That works on|Internet access is switched off|.{0,80}\b(?:didn't (?:load|open|respond)|isn't open|doesn't let me|"
+                           r"is switched off)\b)", re.I)
+_PLACEHOLDER = re.compile(r"\bmy\s+(?P<thing>game|project(?:\s+folder)?|playlist|favou?rite\s+(?:song|playlist|game|album|artist|show)|editor|ide|music\s+app|"
+                          r"browser\s+game|work\s+app|chat\s+app|code\s+editor)\b", re.I)
+
+
+def _verb_of(text: str) -> str:
+    first = (text.split() or ["open"])[0].lower()
+    return first if first in ("open", "launch", "play", "start", "run", "load") else "open"
+
+
+_ICON_WORDS = [("game", r"game|gaming|steam|xbox|discord|fortnite|minecraft"), ("code", r"code|dev|vs\s*code|visual studio|github|project|program"),
+               ("music", r"music|spotify|song|playlist|lo-?fi|jazz"), ("film", r"movie|film|netflix|youtube|entertain|watch|tv"),
+               ("focus", r"focus|study|pomodoro|concentrat|deep work"), ("sun", r"morning|wake|sunrise|breakfast"),
+               ("moon", r"night|bed|sleep|wind down|evening"), ("work", r"work|office|meeting|email|slack|teams|outlook"),
+               ("party", r"party|celebrat|dance"), ("book", r"read|book|learn|research"), ("coffee", r"coffee|break|lunch")]
+_CATEGORY_OF = {"game": "Gaming", "code": "Development", "music": "Entertainment", "film": "Entertainment", "focus": "Focus",
+                "sun": "Morning", "moon": "Evening", "work": "Work", "party": "Entertainment", "book": "Focus", "coffee": "General"}
+
+
+def _guess_icon(name: str, steps) -> str:
+    text = " ".join([name or ""] + [getattr(s, "text", s) if not isinstance(s, dict) else s.get("text", "") for s in steps or []]).lower()
+    return next((icon for icon, pattern in _ICON_WORDS if re.search(pattern, text)), "bolt")
+
+
+def _guess_category(name: str, steps) -> str:
+    return _CATEGORY_OF.get(_guess_icon(name, steps), "General")
+
+
 _GOOGLE_SEARCH = re.compile(r"^(?:(?:please|can you|could you)\s+)*(?:(?:search|look)\s+(?:on\s+)?google\s+for\s+(?P<q>.+)|google\s+(?:search\s+)?for\s+(?P<q2>.+)|"
                             r"(?:search\s+for|look\s+up|search)\s+(?P<q3>.+?)\s+on\s+google)$", re.I)
 _BROWSER_NAMES = {"chrome": "chrome", "google chrome": "chrome", "browser": "", "web browser": "", "internet": "", "edge": "edge",
@@ -399,11 +432,22 @@ class Assistant:
         self._awaiting: Draft | None = None  # the draft JARVIS just asked "shall I send it?" about
         self._pending_forget = 0.0  # when JARVIS asked "forget everything?"
         self._paused = False  # "stop listening": the microphone stays closed until asked again
-        self.protocols = ProtocolStore(config)
+        self.protocols = ProtocolStore(config, backup_dir=app_data_dir() / "backups")
+        try:
+            migrated = self.protocols.migrate()
+            if migrated:
+                log.info("Updated %d protocol(s) to the new format (originals kept in backups/)", migrated)
+        except ProtocolError as exc:
+            log.warning("Protocols left as they were: %s", exc)
         self._protocol_lock = threading.Lock()
         self._protocol_run: dict | None = None  # the protocol running now: {id, name, steps, index, stop, turn, ...}
         self._protocol_last: dict | None = None  # the one that ran last (so "stop the protocol" right after still makes sense)
         self._recording: dict | None = None  # a protocol being dictated step by step: {name, steps, at, id}
+        self._proposal: dict | None = None  # a protocol made from a sentence, waiting for details / a yes
+        self._protocol_confirm: dict | None = None  # a running step waiting for "shall I go ahead?"
+        self._pending_skip: list[str] = []
+        self._scheduler_tick = 5.0
+        self.hotkeys = HotkeyManager(self._hotkey_pressed) if sys.platform == "win32" else None
         self._scheduler_stop = threading.Event()
         self._now_playing: MediaSession | None = None
         self._media_snapshot = ""
@@ -544,6 +588,7 @@ class Assistant:
             ("memory", self._start_memory),
             ("wake words", self._wake_changed),
             ("protocol scheduler", lambda: self._spawn(self._protocol_scheduler, name="protocol-scheduler")),
+            ("protocol hotkeys", self._sync_hotkeys),
             ("media watcher", lambda: self._spawn(self._media_watch, name="media-watch")),
         )
         try:
@@ -601,6 +646,7 @@ class Assistant:
             text = f"Good {part}, {self.title}. I'm afraid my neural core is offline. I've put instructions on screen to bring it online."
         self.sfx.play("activate")
         self.speak(text, delay=0.45)
+        self._spawn(self._startup_protocols, name="startup-protocols")
 
     def shutdown(self) -> None:
         self._prewarm_stop.set()
@@ -633,6 +679,8 @@ class Assistant:
             self.wake.stop()
         try:
             self.winhelper.stop()
+            if self.hotkeys is not None:
+                self.hotkeys.stop()
         except Exception:
             pass
         with self._turn_lock:
@@ -733,19 +781,79 @@ class Assistant:
         for p in self.protocols.all():
             d = p.to_dict()
             d["when"] = p.describe_schedule()
+            d["steps"] = [{**st.to_dict(), **self._step_info(st)} for st in p.steps]
             items.append(d)
-        return {"protocols": items, "running": self._protocol_status(), "recording": self._recording_status()}
+        return {"protocols": items, "running": self._protocol_status(), "recording": self._recording_status(),
+                "proposal": self._proposal_status(), "templates": PROTOCOL_TEMPLATES, "icons": list(PROTOCOL_ICONS),
+                "categories": list(PROTOCOL_CATEGORIES), "suggestions": self._protocol_suggestions()}
+
+    def _step_info(self, step) -> dict:
+        """How JARVIS will understand a step (for the editor): a label, whether it needs a go-ahead, and its condition."""
+        text = getattr(step, "text", step)
+        label, kind = self._understand(text)
+        info = {"label": label, "kind": kind, "risk": protocol_risk(text)}
+        when = getattr(step, "when", None)
+        if when:
+            info["condition"] = describe_condition(when)
+        return info
+
+    def _understand(self, text: str) -> tuple[str, str]:
+        t = _bare(text).strip()
+        k = step_kind(t)
+        if k.kind == "wait":
+            return f"Wait {describe_duration(int(k.seconds))}", "wait"
+        if k.kind == "say":
+            return "Say", "say"
+        cmd = parse_protocol_command(t, find=self.protocols.find)
+        if cmd is not None and cmd.action == "run":
+            return f"Run protocol {cmd.name}", "protocol"
+        m = parse_media(t)
+        if m is not None:
+            return {"play": "Play music / video", "pause": "Pause media", "resume": "Resume media", "next": "Next track",
+                    "previous": "Previous track", "volume": "Music volume", "now_playing": "What's playing",
+                    "resume_history": "Resume earlier media", "search": "Search YouTube"}.get(m.action, "Media control"), "media"
+        if parse_switch(t):
+            return "Switch personality", "persona"
+        q = parse_quick(t)
+        if q is not None and q.kind not in ("talk", "greeting"):
+            return {"timer": "Timer / reminder", "volume": "System volume", "status": "System status", "screenshot": "Screenshot",
+                    "desktop": "Show desktop", "lock": "Lock the PC", "math": "Calculate"}.get(q.kind, q.kind.replace("_", " ").title()), "quick"
+        if parse_weather(t) is not None:
+            return "Weather", "info"
+        if _GOOGLE_SEARCH.match(t):
+            return "Google search", "browser"
+        o = _OPEN_COMMAND.match(t)
+        if o:
+            target = o.group("target")
+            return ("Open website" if self.tools.website_for(target) else "Open app / file"), "open"
+        if parse_doc_command(t) is not None:
+            return "Google Doc", "doc"
+        if parse_email_request(t):
+            return "Email (asks before sending)", "email"
+        if parse_act(t) is not None:
+            return "Screen / tab action", "act"
+        return "Ask JARVIS", "ai"
 
     def _protocol_status(self) -> dict | None:
         run = self._protocol_run
         if run is None:
             return None
         return {"id": run["id"], "name": run["name"], "index": run["index"], "total": len(run["steps"]),
-                "step": run["steps"][run["index"]] if 0 <= run["index"] < len(run["steps"]) else ""}
+                "step": run["steps"][run["index"]].text if 0 <= run["index"] < len(run["steps"]) else "",
+                "results": list(run["results"]), "steps": [s.text for s in run["steps"]], "ephemeral": run.get("ephemeral", False),
+                "confirm": ({k: v for k, v in self._protocol_confirm.items() if k != "event"} if self._protocol_confirm else None)}
 
     def _recording_status(self) -> dict | None:
         rec = self._recording
         return {"name": rec["name"], "steps": list(rec["steps"])} if rec else None
+
+    def _proposal_status(self) -> dict | None:
+        prop = self._proposal
+        if not prop:
+            return None
+        data = prop["protocol"]
+        return {**data, "steps": [{**st, **self._step_info(st["text"])} for st in data["steps"]], "question": prop.get("question", ""),
+                "stage": prop["stage"]}
 
     def _emit_protocols(self) -> None:
         self.emit("protocols", **self.protocol_list())
@@ -754,25 +862,41 @@ class Assistant:
         data = data if isinstance(data, dict) else {}
         steps = data.get("steps") or []
         if isinstance(steps, str):
-            steps = [line for line in steps.splitlines()]
+            steps = [structured_step(line).to_dict() for line in steps.splitlines() if line.strip()]
         try:
             schedule = data.get("schedule") if "schedule" in data else None
-            p = self.protocols.save(str(data.get("name") or ""), [str(x) for x in steps], pid=data.get("id") or None,
-                                    schedule=schedule)
+            meta = {k: data[k] for k in ("description", "icon", "category", "phrases", "enabled", "on_failure", "triggers") if k in data}
+            p = self.protocols.save(str(data.get("name") or ""), steps, pid=data.get("id") or None, schedule=schedule, **meta)
         except ProtocolError as exc:
             return {"ok": False, "error": str(exc)}
+        self._activity("protocol", f"Saved protocol {p.name}", "ok")
+        self._sync_hotkeys()
         self._emit_protocols()
         return {"ok": True, "protocol": p.to_dict()}
 
     def protocol_delete(self, pid: str) -> dict:
         gone = self.protocols.delete(str(pid))
+        self._sync_hotkeys()
         self._emit_protocols()
         return {"ok": gone is not None, "protocol": gone.to_dict() if gone else None}
 
     def protocol_restore(self, data: dict) -> dict:
         p = self.protocols.restore(data if isinstance(data, dict) else {})
+        self._sync_hotkeys()
         self._emit_protocols()
         return {"ok": p is not None}
+
+    def protocol_from_template(self, name: str) -> dict:
+        tpl = next((t for t in PROTOCOL_TEMPLATES if t["name"] == name), None)
+        if tpl is None:
+            return {"ok": False, "error": "No such template."}
+        base, n = tpl["name"], 2
+        new_name = base
+        taken = {x.lower() for x in self.protocols.names()}
+        while new_name.lower() in taken and n < 50:
+            new_name, n = f"{base} {n}", n + 1
+        return self.protocol_save({**tpl, "name": new_name, "steps": [{"text": t} for t in tpl["steps"]],
+                                   "phrases": [] if new_name != base else tpl.get("phrases", [])})
 
     def protocol_run(self, pid: str) -> dict:
         p = self.protocols.get(str(pid))
@@ -783,18 +907,26 @@ class Assistant:
         turn = self._new_turn("announce")
 
         def run() -> None:
-            self._deliver(turn, [f"Initiating the {p.name} protocol, {self.title}."])
+            self._deliver(turn, [self._protocol_intro(p)])
             if not turn.cancel.is_set():
-                self._start_protocol(p)
+                self._start_protocol(p, trigger="button")
 
         self._spawn(run, name=f"protocol-start-{p.id}")
         return {"ok": True}
+
+    def _protocol_intro(self, p) -> str:
+        line = self.persona.line("protocol_start", (), self.title) if "protocol_start" in getattr(self.persona, "lines", {}) else ""
+        return line.replace("{name}", p.name) if line else f"Initiating the {p.name} protocol, {self.title}."
 
     def protocol_stop(self) -> dict:
         run = self._protocol_run
         if run is None:
             return {"ok": False}
         run["stop"].set()
+        confirm = self._protocol_confirm
+        if confirm is not None:
+            confirm["answer"] = False
+            confirm["event"].set()
         step_turn = run.get("turn")
         if step_turn is not None:
             run["interrupted_by"] = "stop"
@@ -802,87 +934,238 @@ class Assistant:
             self.audio.stop_voice(80)
         return {"ok": True}
 
-    def _expand_steps(self, p: Protocol, depth: int = 0, seen: tuple = ()) -> list[str]:
+    def protocol_answer(self, yes: bool) -> dict:
+        """The HUD's Go ahead / Skip buttons for a step that needs a yes."""
+        confirm = self._protocol_confirm
+        if confirm is None:
+            return {"ok": False}
+        confirm["answer"] = bool(yes)
+        confirm["event"].set()
+        return {"ok": True}
+
+    def _expand_steps(self, p, depth: int = 0, seen: tuple = ()) -> list:
         """A step "run the Lights protocol" runs that protocol's steps in place (up to 3 deep, no loops)."""
-        out: list[str] = []
-        for raw in p.steps:
-            cmd = parse_protocol_command(raw, find=self.protocols.find)
+        out = []
+        for st in p.steps:
+            if not st.enabled:
+                continue
+            cmd = parse_protocol_command(st.text, find=self.protocols.find)
             inner = self.protocols.find(cmd.name) if cmd is not None and cmd.action == "run" else None
             if inner is not None and inner.id not in seen + (p.id,) and depth < 3:
                 out.extend(self._expand_steps(inner, depth + 1, seen + (p.id,)))
             elif inner is None:
-                out.append(raw)
+                out.append(st)
         return out
 
-    def _start_protocol(self, p: Protocol, scheduled: bool = False) -> bool:
+    def _start_protocol(self, p, trigger: str = "voice", skip: list[str] | None = None, ephemeral: bool = False) -> bool:
         with self._protocol_lock:
             if self._protocol_run is not None:
                 return False
-            run = {"id": p.id, "name": p.name, "steps": self._expand_steps(p), "index": -1, "stop": threading.Event(),
-                   "turn": None, "interrupted_by": None, "scheduled": scheduled, "started": time.time()}
+            steps = self._expand_steps(p)
+            skipped = []
+            if skip:
+                words = [re.sub(r"[^a-z0-9 ]", "", x.lower()).strip() for x in skip]
+                keep = []
+                for st in steps:
+                    low = st.text.lower()
+                    if any(w and (w in low or all(part in low for part in w.split() if part not in ("open", "the", "my", "launch", "start"))) for w in words):
+                        skipped.append(st.text)
+                    else:
+                        keep.append(st)
+                steps = keep
+            run = {"id": p.id, "name": p.name, "steps": steps, "index": -1, "stop": threading.Event(), "turn": None,
+                   "interrupted_by": None, "trigger": trigger, "started": time.time(), "results": [],
+                   "policy": getattr(p, "on_failure", "stop"), "ephemeral": ephemeral, "excluded": skipped,
+                   "unattended": trigger in ("schedule", "startup", "app")}
             self._protocol_run = run
-        try:
-            self.protocols.update(p.id, last_run=time.time())
-        except ProtocolError:
-            pass
+        if not ephemeral:
+            try:
+                self.protocols.update(p.id, last_run=time.time())
+            except ProtocolError:
+                pass
         threading.Thread(target=self._protocol_runner, args=(run,), name=f"protocol-{p.id}", daemon=True).start()
         return True
 
+    def _running_apps(self) -> set[str]:
+        out = set()
+        for w in self._safe_windows():
+            app = re.sub(r"\.exe$", "", (w.app or "").lower())
+            if app:
+                out.add(re.sub(r"[^a-z0-9]", "", app))
+            title = re.sub(r"[^a-z0-9 ]", " ", (w.title or "").lower())
+            out.update(x for x in title.split() if len(x) > 3)
+        return out
+
+    def _ask_protocol_confirm(self, run: dict, i: int, step, why: str) -> bool | None:
+        """Ask "shall I go ahead?" for one step and wait (up to a minute) for yes / no by voice or on screen."""
+        event = threading.Event()
+        self._protocol_confirm = {"event": event, "answer": None, "run": run["name"], "index": i, "text": step.text, "why": why}
+        self.emit("protocol", status="confirm", **self._protocol_status())
+        question = (f"Step {i + 1} of {run['name']}: “{step.text}”. " + (f"It {why}. " if why else "") + f"Shall I go ahead, {self.title}?")
+        turn = self._new_turn("announce")
+        self._deliver(turn, [question])
+        if not self._paused and self._mic.get("available") and self.config.get("voice_enabled", True):
+            self.start_listening()
+        event.wait(60)
+        answer = self._protocol_confirm["answer"] if self._protocol_confirm else None
+        self._protocol_confirm = None
+        time.sleep(0.05)
+        self._wait_for_quiet(run["stop"], 15)  # let "Going ahead" / "Skipping that step" be heard before carrying on
+        return answer
+
+    def _run_command_step(self, run: dict, text: str, timeout: float) -> tuple[str, str]:
+        """Run one command exactly as if the user had said it; work out from what happened whether it worked."""
+        with self._turn_lock:
+            speaking = self._turn is not None and self._turn.kind == "announce"
+        if speaking:
+            self._wait_for_quiet(run["stop"])
+        turn = self._new_turn("protocol")
+        turn.learn = False
+        run["turn"], run["interrupted_by"] = turn, None
+        started = time.time()
+
+        def too_slow() -> None:
+            if run.get("turn") is turn and not turn.cancel.is_set():
+                run["interrupted_by"] = "timeout"
+                turn.abort()
+
+        watchdog = threading.Timer(timeout, too_slow)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            self._converse(turn, text, "protocol")
+        except Exception:
+            log.exception("Protocol step %r failed", text)
+            self._finish_turn(turn)
+            return "failed", "an internal error (details in the log)"
+        finally:
+            watchdog.cancel()
+            run["turn"] = None
+        if run.get("interrupted_by") == "timeout":
+            return "failed", f"took longer than {int(timeout)} seconds"
+        reply = getattr(turn, "reply", "") or ""
+        acts = [a for a in list(self._activities) if a.get("at", 0) >= started]
+        statuses = {a["status"] for a in acts}
+        if "failed" in statuses:
+            return "failed", next(a["text"] for a in acts if a["status"] == "failed")
+        if _FAILED_REPLY.search(reply):
+            return "failed", reply[:160]
+        if "waiting" in statuses:
+            return "unverified", next(a["text"] for a in acts if a["status"] == "waiting")
+        if "unverified" in statuses:
+            return "unverified", reply[:160]
+        return "ok", reply[:160]
+
     def _protocol_runner(self, run: dict) -> None:
-        stop, steps = run["stop"], run["steps"]
+        stop, steps, results = run["stop"], run["steps"], run["results"]
         outcome = "done"
+        failed_step = None
+        previous_ok: bool | None = None
+        results.extend({"text": st.text, "status": "pending", "detail": ""} for st in steps)
         self.emit("protocol", status="running", **self._protocol_status())
         try:
-            for i, raw in enumerate(steps):
+            for i, st in enumerate(steps):
                 if stop.is_set():
                     outcome = "stopped"
                     break
                 run["index"] = i
+                results[i]["status"] = "running"
+                began = time.time()
                 self.emit("protocol", status="step", **self._protocol_status())
-                step = step_kind(raw)
-                if step.kind == "wait":
-                    if stop.wait(step.seconds):
-                        outcome = "stopped"
-                        break
-                    continue
-                waited = time.monotonic()
-                while self._announcements and not stop.is_set() and time.monotonic() - waited < 30:
-                    time.sleep(0.05)  # a timer went off during the last step: it speaks first
-                with self._turn_lock:
-                    speaking = self._turn is not None and self._turn.kind == "announce"
-                if speaking:
-                    self._wait_for_quiet(stop)  # a timer or reminder is being announced: don't cut it off
-                turn = self._new_turn("protocol")
-                turn.learn = False
-                run["turn"], run["interrupted_by"] = turn, None
-                try:
-                    if step.kind == "say":
-                        turn.text = ""
-                        if self._set_state(State.THINKING, turn, "protocol"):
-                            self._deliver(turn, [step.text])
-                    else:
-                        self._converse(turn, raw, "protocol")
-                except Exception:
-                    log.exception("Protocol step %r failed", raw)
-                    self._finish_turn(turn)
-                run["turn"] = None
-                if stop.is_set():
+                status, detail = self._run_step(run, i, st, previous_ok)
+                results[i].update(status=status, detail=detail, seconds=round(time.time() - began, 1))
+                self.emit("protocol", status="step_done", **self._protocol_status())
+                if status == "stopped" or stop.is_set():
                     outcome = "stopped"
                     break
-                if turn.cancel.is_set() and run.get("interrupted_by") != "announce":
+                if status == "interrupted":
                     outcome = "interrupted"  # the user spoke, typed or pressed stop: they've taken over
                     break
-                if run.get("interrupted_by") == "announce":
-                    self._wait_for_quiet(stop)  # a timer or reminder went off: let it finish, then carry on
+                if status in ("ok", "unverified"):
+                    previous_ok = True
+                elif status == "failed":
+                    previous_ok = False
+                    keep_going = st.continue_on_error if st.continue_on_error is not None else run["policy"] == "continue"
+                    if not keep_going:
+                        outcome, failed_step = "failed", st.text
+                        break
         finally:
+            for r in results:
+                if r["status"] in ("pending", "running"):
+                    r["status"] = "not_run" if r["status"] == "pending" else "stopped"
             with self._protocol_lock:
                 self._protocol_run = None
                 run["outcome"], run["ended"] = outcome, time.time()
                 self._protocol_last = run
-            self.emit("protocol", status=outcome, id=run["id"], name=run["name"], index=run["index"], total=len(steps))
+            self._protocol_confirm = None
+            if not run.get("ephemeral"):
+                try:
+                    self.protocols.record_run(run["id"], {"at": run["started"], "status": outcome, "trigger": run["trigger"],
+                                                         "seconds": round(time.time() - run["started"], 1),
+                                                         "steps": [{k: r.get(k) for k in ("text", "status", "detail")} for r in results],
+                                                         "excluded": run.get("excluded", [])})
+                except Exception:
+                    log.debug("couldn't save the protocol run", exc_info=True)
+            self.emit("protocol", status=outcome, id=run["id"], name=run["name"], index=run["index"], total=len(steps),
+                      results=list(results), ephemeral=run.get("ephemeral", False))
             self._emit_protocols()
-        if outcome == "done" and not self._prewarm_stop.is_set():
-            self.speak(f"The {run['name']} protocol is complete, {self.title}.")
+        problems = [r for r in results if r["status"] == "failed"]
+        verdict = "ok" if outcome == "done" and not problems else ("failed" if outcome == "failed" or problems else "unverified")
+        if not run.get("ephemeral"):
+            self._activity("protocol", f"Protocol {run['name']}: {outcome}" + (f" ({len(problems)} step(s) failed)" if problems else ""), verdict)
+        if self._prewarm_stop.is_set():
+            return
+        if outcome == "done" and not run.get("ephemeral"):
+            if problems:
+                self.speak(f"The {run['name']} protocol has finished, {self.title}, but {len(problems)} step"
+                           f"{' did' if len(problems) == 1 else 's did'}n't work: {join_names([p['text'] for p in problems][:3])}.")
+            else:
+                self.speak(f"The {run['name']} protocol is complete, {self.title}.")
+        elif outcome == "failed":
+            self.speak(f"I've stopped the {'request' if run.get('ephemeral') else run['name'] + ' protocol'}, {self.title}: "
+                       f"“{failed_step}” didn't work, so I haven't done the steps after it.")
+
+    def _run_step(self, run: dict, i: int, st, previous_ok: bool | None) -> tuple[str, str]:
+        if not protocol_condition(st.when, datetime.now(), self._running_apps(), previous_ok):
+            return "skipped", describe_condition(st.when)
+        why = protocol_risk(st.text)
+        if st.confirm or (why and not st.approved):
+            if run["unattended"] and why and not st.approved:
+                return "skipped", f"needs your OK first ({why}); it never runs unattended"
+            answer = self._ask_protocol_confirm(run, i, st, why)
+            if run["stop"].is_set():
+                return "stopped", ""
+            if not answer:
+                return "skipped", "you said no" if answer is False else "no answer"
+        kind = step_kind(st.text)
+        if kind.kind == "wait":
+            return ("stopped", "") if run["stop"].wait(kind.seconds) else ("ok", f"waited {describe_duration(int(kind.seconds))}")
+        if kind.kind == "say":
+            turn = self._new_turn("protocol")
+            turn.learn = False
+            turn.text = ""
+            run["turn"] = turn
+            if self._set_state(State.THINKING, turn, "protocol"):
+                self._deliver(turn, [kind.text])
+            run["turn"] = None
+            if turn.cancel.is_set() and run.get("interrupted_by") not in (None, "announce"):
+                return "interrupted", ""
+            return "ok", kind.text
+        status, detail = "failed", ""
+        for attempt in range(1 + max(0, int(st.retries))):
+            status, detail = self._run_command_step(run, st.text, st.timeout)
+            if run.get("interrupted_by") not in (None, "announce", "timeout"):
+                return "interrupted", ""
+            if status != "failed" or run["stop"].is_set():
+                break
+            if attempt < st.retries:
+                run["stop"].wait(1.5)
+        if status == "failed" and st.fallback and not run["stop"].is_set():
+            alt, alt_detail = self._run_command_step(run, st.fallback, st.timeout)
+            if run.get("interrupted_by") not in (None, "announce", "timeout"):
+                return "interrupted", ""
+            return alt, f"used the fallback “{st.fallback}”: {alt_detail}"
+        return status, detail
 
     def _wait_for_quiet(self, stop: threading.Event, limit: float = 120.0) -> None:
         deadline = time.monotonic() + limit
@@ -893,7 +1176,8 @@ class Assistant:
                 return
             time.sleep(0.1)
 
-    def _protocol_command(self, cmd: ProtocolCommand, source: str) -> tuple[str, Protocol | None]:
+    # -- what the user says about protocols
+    def _protocol_command(self, cmd: ProtocolCommand, source: str) -> tuple[str, object | None]:
         """What to say about a protocol request, and the protocol to start once it has been said (if any)."""
         t = self.title
         names = self.protocols.names()
@@ -928,41 +1212,35 @@ class Assistant:
             replacing = " It will replace the one you have now." if self.protocols.find(cmd.name) else ""
             return (f"Recording the {cmd.name} protocol, {t}.{replacing} Tell me the first step, and say “done” when you've finished.", None)
         if cmd.action == "create":
-            if not cmd.name:
-                self._recording = {"name": "", "steps": list(cmd.steps), "at": time.time()}
-                self._emit_protocols()
-                return (f"Got {len(cmd.steps)} step{'s' if len(cmd.steps) != 1 else ''}, {t}. What shall I call this protocol?", None)
-            try:
-                existed = self.protocols.find(cmd.name) is not None
-                p = self.protocols.save(cmd.name, cmd.steps)
-            except ProtocolError as exc:
-                return (f"I couldn't save that, {t}: {exc}", None)
-            self._emit_protocols()
-            verb = "updated" if existed else "created"
-            return (f"Protocol {p.name} {verb}, {t}, with {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}: {spoken_steps(p.steps)}. "
-                    f"Say “run {p.name}” whenever you like.", None)
+            if source == "protocol":
+                return (f"I can't create a protocol from inside another one, {t}.", None)
+            return (self._propose(cmd.name, cmd.steps), None)
 
         p = self.protocols.find(cmd.name) if cmd.name else None
         if p is None:
-            if cmd.action == "run" and not cmd.name:
-                return (unknown(""), None)
             return (unknown(cmd.name), None)
         if cmd.action == "run":
             if source == "protocol":
                 return (f"I can't start the {p.name} protocol from inside another protocol, {t}.", None)
             if self._protocol_run is not None:
                 return (f"The {self._protocol_run['name']} protocol is still running, {t}. Say “stop the protocol” first.", None)
+            if not p.enabled:
+                return (f"The {p.name} protocol is switched off, {t}. Turn it on in the protocols panel first.", None)
             if not p.steps:
                 return (f"The {p.name} protocol has no steps yet, {t}.", None)
-            return (f"Initiating the {p.name} protocol, {t}.", p)
+            self._pending_skip = list(cmd.skip)
+            extra = f" Leaving out {join_names(cmd.skip)}." if cmd.skip else ""
+            return (self._protocol_intro(p) + extra, p)
         if cmd.action == "show":
             when = f" It runs {p.describe_schedule()}." if p.schedule else ""
-            return (f"The {p.name} protocol has {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}, {t}: {spoken_steps(p.steps, 12)}.{when}", None)
+            last = p.history[-1] if p.history else None
+            ran = f" Last time it {'finished' if last['status'] == 'done' else last['status']}." if last else ""
+            return (f"The {p.name} protocol has {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}, {t}: {spoken_steps(p.steps, 12)}.{when}{ran}", None)
         if cmd.action == "add":
             if not cmd.steps:
                 return (f"What should I add to the {p.name} protocol, {t}?", None)
             try:
-                p = self.protocols.update(p.id, steps=p.steps + cmd.steps)
+                p = self.protocols.update(p.id, steps=[st.to_dict() for st in p.steps] + [structured_step(x).to_dict() for x in cmd.steps])
             except ProtocolError as exc:
                 return (f"I couldn't change it, {t}: {exc}", None)
             self._emit_protocols()
@@ -973,12 +1251,13 @@ class Assistant:
             index = (cmd.index or len(p.steps)) - 1
             if not 0 <= index < len(p.steps):
                 return (f"The {p.name} protocol only has {len(p.steps)} steps, {t}.", None)
-            removed = p.steps[index]
-            p = self.protocols.update(p.id, steps=p.steps[:index] + p.steps[index + 1:])
+            removed = p.steps[index].text
+            p = self.protocols.update(p.id, steps=[st.to_dict() for j, st in enumerate(p.steps) if j != index])
             self._emit_protocols()
             return (f"Removed “{removed}” from the {p.name} protocol, {t}.", None)
         if cmd.action == "delete":
             self.protocols.delete(p.id)
+            self._sync_hotkeys()
             self._emit_protocols()
             return (f"I've deleted the {p.name} protocol, {t}.", None)
         if cmd.action == "rename":
@@ -997,6 +1276,102 @@ class Assistant:
             self._emit_protocols()
             return (f"The {p.name} protocol won't run by itself any more, {t}.", None)
         return (unknown(cmd.name), None)
+
+    # -- making one from a sentence: a proposal, details asked for, then a yes
+    def _propose(self, name: str, texts: list[str]) -> str:
+        t = self.title
+        steps = [structured_step(x).to_dict() for x in texts]
+        self._proposal = {"protocol": {"name": name, "steps": steps, "icon": _guess_icon(name, texts), "category": _guess_category(name, texts)},
+                          "stage": "name" if not name else "detail", "at": time.time(), "question": ""}
+        if not name:
+            self._proposal["question"] = "What shall I call this protocol?"
+            self._emit_protocols()
+            return f"Got {len(steps)} step{'s' if len(steps) != 1 else ''}, {t}. What shall I call this protocol?"
+        return self._next_proposal_question()
+
+    def _next_proposal_question(self) -> str:
+        t = self.title
+        prop = self._proposal
+        for i, st in enumerate(prop["protocol"]["steps"]):
+            m = _PLACEHOLDER.search(st["text"])
+            if m:
+                prop.update(stage="detail", index=i, placeholder=m.group(0))
+                thing = m.group("thing").lower()
+                prop["question"] = f"Which {thing} should {prop['protocol']['name']} {_verb_of(st['text'])}?"
+                self._emit_protocols()
+                return f"{prop['question'][:-1]}, {t}?"
+        prop.update(stage="approve", question="Shall I save it?")
+        self._emit_protocols()
+        steps = [st["text"] for st in prop["protocol"]["steps"]]
+        risky = [x for x in steps if protocol_risk(x)]
+        warn = f" I'll check with you before “{risky[0]}” each time it runs." if len(risky) == 1 else \
+            (f" I'll check with you before the {len(risky)} steps that send, close or change things." if risky else "")
+        return (f"Here's the {prop['protocol']['name']} protocol, {t}: {spoken_steps(steps, 12)}.{warn} Shall I save it? "
+                "You can also say “edit it” to change it on screen.")
+
+    def _proposal_reply(self, text: str) -> str | None:
+        """While a proposed protocol waits: answers to its questions, "yes" / "no" / "edit it"."""
+        prop = self._proposal
+        if prop is None:
+            return None
+        if time.time() - prop["at"] > 600:
+            self._proposal = None
+            return None
+        t = self.title
+        clean = _bare(text).strip()
+        if is_cancellation(clean) or re.match(r"^(?:no|nope|don'?t save it|scrap it|forget it|discard it)\W*$", clean, re.I):
+            self._proposal = None
+            self._emit_protocols()
+            return f"Very well, {t}. I haven't saved it."
+        if prop["stage"] == "name":
+            name = clean_protocol_name(re.sub(r"^(?:call it|name it|it'?s called|let'?s call it)\s+", "", clean, flags=re.I))
+            if not name:
+                return f"What shall I call it, {t}?"
+            prop["protocol"]["name"] = name
+            prop["at"] = time.time()
+            return self._next_proposal_question()
+        if prop["stage"] == "detail":
+            answer = re.sub(r"^(?:it'?s|use|launch|open|the one called|my)\s+", "", clean, flags=re.I).strip(" .")
+            if not answer:
+                return prop["question"]
+            st = prop["protocol"]["steps"][prop["index"]]
+            st["text"] = st["text"].replace(prop["placeholder"], answer, 1)
+            prop["at"] = time.time()
+            return self._next_proposal_question()
+        if re.match(r"^(?:edit|change|tweak|adjust)\s+(?:it|that|the\s+protocol)\W*$", clean, re.I):
+            self.emit("protocol_edit", protocol=prop["protocol"])
+            self._proposal = None
+            self._emit_protocols()
+            return f"I've opened it in the protocol editor, {t}. Save it there when it's right."
+        if is_confirmation(clean):
+            return self._save_proposal()
+        return None  # something else entirely: the proposal waits on screen
+
+    def _save_proposal(self, data: dict | None = None) -> str:
+        t = self.title
+        prop = self._proposal
+        if prop is None and data is None:
+            return f"There's nothing waiting to be saved, {t}."
+        payload = dict(data or prop["protocol"])
+        self._proposal = None
+        existed = self.protocols.find(payload.get("name") or "") is not None
+        result = self.protocol_save(payload)
+        if not result["ok"]:
+            self._emit_protocols()
+            return f"I couldn't save it, {t}: {result['error']}"
+        name = result["protocol"]["name"]
+        return (f"Protocol {name} {'updated' if existed else 'saved'}, {t}. Say “run {name}” whenever you like.")
+
+    def protocol_proposal_answer(self, action: str, data: dict | None = None) -> dict:
+        """The proposal card's Save / Edit / Cancel buttons."""
+        if action == "save":
+            reply = self._save_proposal(data if isinstance(data, dict) else None)
+            return {"ok": reply.startswith("Protocol"), "message": reply}
+        if action == "edit" and self._proposal:
+            self.emit("protocol_edit", protocol=self._proposal["protocol"])
+        self._proposal = None
+        self._emit_protocols()
+        return {"ok": True}
 
     def _record_step(self, rec: dict, text: str) -> str:
         """The user is dictating a protocol: each thing they say is a step until they say "done"."""
@@ -1044,7 +1419,8 @@ class Assistant:
         t = self.title
         self._recording = None
         try:
-            p = self.protocols.save(rec["name"], rec["steps"])
+            p = self.protocols.save(rec["name"], [structured_step(x).to_dict() for x in rec["steps"]],
+                                    icon=_guess_icon(rec["name"], rec["steps"]), category=_guess_category(rec["name"], rec["steps"]))
         except ProtocolError as exc:
             self._emit_protocols()
             return f"I couldn't save it, {t}: {exc}"
@@ -1052,21 +1428,80 @@ class Assistant:
         return (f"Protocol {p.name} saved with {len(p.steps)} step{'s' if len(p.steps) != 1 else ''}, {t}. "
                 f"Say “run {p.name}” whenever you like.")
 
+    # -- triggers: schedules, starting up, an app opening, a hotkey
     def _protocol_scheduler(self) -> None:
-        """Runs protocols that have a schedule ("every weekday at 7:30")."""
-        while not self._scheduler_stop.wait(20):
+        """Runs protocols by themselves: on a schedule ("every weekday at 7:30") or when an app opens."""
+        seen_apps: set[str] | None = None
+        fired: dict[str, float] = {}
+        while not self._scheduler_stop.wait(self._scheduler_tick):
             try:
                 now = datetime.now()
-                for p in self.protocols.all():
-                    if p.steps and protocol_due(p.schedule, now, p.last_run) and self._protocol_run is None:
+                items = [p for p in self.protocols.all() if p.enabled and p.steps]
+                for p in items:
+                    if protocol_due(p.schedule, now, p.last_run) and self._protocol_run is None:
                         self.protocols.update(p.id, last_run=time.time())
-                        self._wait_for_quiet(self._scheduler_stop, 60)
-                        turn = self._new_turn("announce")
-                        self._deliver(turn, [f"It's {now.strftime('%H:%M')}, {self.title}. Running your {p.name} protocol."])
-                        self._start_protocol(p, scheduled=True)
+                        self._auto_run(p, "schedule", f"It's {now.strftime('%H:%M')}, {self.title}. Running your {p.name} protocol.")
                         break
+                watched = [p for p in items if p.triggers.get("app")]
+                if watched:
+                    running = self._running_apps()
+                    if seen_apps is not None:
+                        for p in watched:
+                            app = re.sub(r"[^a-z0-9]", "", p.triggers["app"].lower())
+                            now_up = any(app and (app == r or (len(app) > 3 and app in r)) for r in running)
+                            was_up = any(app and (app == r or (len(app) > 3 and app in r)) for r in seen_apps)
+                            if now_up and not was_up and time.time() - fired.get(p.id, 0) > 900 and self._protocol_run is None:
+                                fired[p.id] = time.time()
+                                self._auto_run(p, "app", f"{p.triggers['app']} just opened, {self.title}. Running your {p.name} protocol.")
+                                break
+                    seen_apps = running
             except Exception:
                 log.exception("Protocol scheduler hiccup")
+
+    def _auto_run(self, p, trigger: str, line: str) -> None:
+        self._wait_for_quiet(self._scheduler_stop, 60)
+        turn = self._new_turn("announce")
+        self._deliver(turn, [line])
+        self._start_protocol(p, trigger=trigger)
+
+    def _startup_protocols(self) -> None:
+        for p in self.protocols.all():
+            if p.enabled and p.steps and p.triggers.get("startup"):
+                time.sleep(6)  # after the greeting
+                self._auto_run(p, "startup", f"Running your {p.name} protocol, {self.title}, as you asked when I start.")
+                return
+
+    def _sync_hotkeys(self) -> None:
+        if self.hotkeys is None:
+            return
+        wanted = {}
+        for p in self.protocols.all():
+            key = p.triggers.get("hotkey") if p.enabled else None
+            if key:
+                wanted[key] = p.id
+        try:
+            problems = self.hotkeys.set(wanted)
+            for key, why in problems.items():
+                self._activity("protocol", f"Hotkey {key} isn't available", "failed", why)
+        except Exception:
+            log.debug("hotkeys unavailable", exc_info=True)
+
+    def _hotkey_pressed(self, pid: str) -> None:
+        p = self.protocols.get(pid)
+        if p is not None and self._protocol_run is None:
+            self._spawn(lambda: self._auto_run(p, "hotkey", self._protocol_intro(p)), name="protocol-hotkey")
+
+    # -- "you keep doing these together": protocol ideas from the command history
+    def _protocol_suggestions(self) -> list[dict]:
+        cmds = [a for a in self._activities if a.get("kind") == "command"]
+        pairs: dict[tuple, int] = {}
+        for a, b in zip(cmds, cmds[1:]):
+            if 0 < b["at"] - a["at"] < 180 and a["text"].lower() != b["text"].lower():
+                key = (a["text"].lower(), b["text"].lower())
+                pairs[key] = pairs.get(key, 0) + 1
+        existing = {tuple(s.text.lower() for s in p.steps[:2]) for p in self.protocols.all()}
+        out = [{"steps": list(k), "count": n} for k, n in pairs.items() if n >= 3 and k not in existing]
+        return sorted(out, key=lambda x: -x["count"])[:3]
 
     # ================================================================== activity log (what JARVIS did, and whether it worked)
     def _activity(self, kind: str, text: str, status: str = "ok", detail: str = "") -> dict:
@@ -2623,6 +3058,26 @@ class Assistant:
                 self._deliver(turn, [self._record_step(recording, text)], listen_after=lambda: self._recording is not None)
                 return
             self._recording = None
+        if source in ("voice", "text"):
+            self._activity("command", text, "ok")
+        confirm = self._protocol_confirm
+        if confirm is not None and source != "protocol":
+            bare = _bare(text)
+            if is_confirmation(bare) or re.match(r"^(?:go\s+ahead|do\s+it|proceed|carry\s+on|continue)\W*$", bare, re.I):
+                confirm["answer"] = True
+                confirm["event"].set()
+                self._deliver(turn, [f"Going ahead, {self.title}."])
+                return
+            if is_cancellation(bare) or re.match(r"^(?:no|skip(?:\s+it|\s+that)?|don'?t)\W*$", bare, re.I):
+                confirm["answer"] = False
+                confirm["event"].set()
+                self._deliver(turn, [f"Skipping that step, {self.title}."])
+                return
+        if self._proposal is not None and source != "protocol":
+            answer = self._proposal_reply(text)
+            if answer:
+                self._deliver(turn, [answer], listen_after=lambda: self._proposal is not None)
+                return
         if self._pending_media is not None:
             choice = self._media_choice(text)
             if choice:
@@ -2642,13 +3097,18 @@ class Assistant:
             self.config.update({"favorite_website": site})
             self._deliver(turn, [f"Noted, {self.title}. Say “open my favourite website” any time."])
             return
-        protocol_cmd = parse_protocol_command(_bare(text), find=self.protocols.find)
+        phrase = self.protocols.find_phrase(_bare(text)) if source != "protocol" else None
+        if phrase is not None:
+            protocol_cmd = ProtocolCommand("run", name=phrase.name)
+        else:
+            protocol_cmd = parse_protocol_command(_bare(text), find=self.protocols.find)
         if protocol_cmd is not None:
             turn.learn = False
+            self._pending_skip = []
             reply, start = self._protocol_command(protocol_cmd, source)
-            self._deliver(turn, [reply], listen_after=lambda: self._recording is not None)
+            self._deliver(turn, [reply], listen_after=lambda: self._recording is not None or self._proposal is not None)
             if start is not None and not turn.cancel.is_set():
-                self._start_protocol(start)
+                self._start_protocol(start, trigger="voice" if source == "voice" else "text", skip=self._pending_skip)
             return
 
         asked_forget, self._pending_forget = self._pending_forget, 0.0
@@ -2807,6 +3267,7 @@ class Assistant:
             log.exception("Reply generation failed")
             error = "Something went wrong while generating the reply. See the log for details."
 
+        turn.reply = "".join(reply).strip()
         self.emit("assistant_end", id=mid, interrupted=turn.cancel.is_set(), error=error, stats=self.core_stats())
         said = getattr(turn, "text", None)
         if said and not error:

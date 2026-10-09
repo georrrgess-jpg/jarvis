@@ -1,5 +1,7 @@
 """Protocols: named command lists made by voice or on screen and run with "Jarvis, run <name>"."""
 
+import json
+import threading
 import time
 from datetime import datetime
 
@@ -123,10 +125,10 @@ def test_schedules():
 def test_store_round_trip(config):
     store = ProtocolStore(config)
     p = store.save("morning", ["open Spotify", " ", "what's the weather"])
-    assert p.name == "Morning" and p.steps == ["open Spotify", "what's the weather"]
+    assert p.name == "Morning" and p.texts == ["open Spotify", "what's the weather"]
     assert store.find("the Morning protocol").id == p.id and store.find("mornin").id == p.id
     again = store.save("Morning", ["open Gmail"])  # the same name replaces it
-    assert again.id == p.id and store.get(p.id).steps == ["open Gmail"] and len(store.all()) == 1
+    assert again.id == p.id and store.get(p.id).texts == ["open Gmail"] and len(store.all()) == 1
     other = store.save("Night", ["lock the computer"], schedule={"time": "23:00", "days": [0, 1]})
     assert store.get(other.id).schedule == {"time": "23:00", "days": [0, 1], "enabled": True}
     with pytest.raises(ProtocolError):
@@ -136,7 +138,7 @@ def test_store_round_trip(config):
     gone = store.delete(p.id)
     assert store.find("morning") is None
     store.restore(gone.to_dict())
-    assert store.find("morning").steps == ["open Gmail"]
+    assert store.find("morning").texts == ["open Gmail"]
 
 
 # ----------------------------------------------------------------------------- running them
@@ -145,14 +147,16 @@ def protocol_events(events, status):
 
 
 def wait_done(events, timeout=30):
-    events.wait_for(lambda: any(p["status"] in ("done", "stopped", "interrupted") for p in events.of("protocol")), timeout)
+    events.wait_for(lambda: any(p["status"] in ("done", "stopped", "interrupted", "failed") for p in events.of("protocol")), timeout)
     events.wait_for(lambda: events.states()[-1:] == ["IDLE"], timeout)
 
 
 def test_create_and_run_by_voice(make):
     assistant, events = make()
     reply = ask(assistant, events, "Create a protocol called Morning: what's 6 times 7, then wait 1 second, then say Rise and shine, then what's 2 plus 2")
-    assert reply.startswith("Protocol Morning created, sir, with 4 steps")
+    assert reply.startswith("Here's the Morning protocol, sir: 1, what's 6 times 7; 2, wait 1 second; 3, say Rise and shine")
+    assert events.of("protocols")[-1]["proposal"]["stage"] == "approve" and assistant.protocols.find("morning") is None
+    assert ask(assistant, events, "yes").startswith("Protocol Morning saved")
     reply = ask(assistant, events, "Jarvis, run Morning")
     assert reply == "Initiating the Morning protocol, sir."
     wait_done(events)
@@ -174,7 +178,7 @@ def test_recording_step_by_step(make):
     assert ask(assistant, events, "scratch that").startswith("Removed")
     assert events.of("protocols")[-1]["recording"] == {"name": "Study", "steps": ["open Notion", "set the volume to 20"]}
     assert ask(assistant, events, "that's it").startswith("Protocol Study saved with 2 steps")
-    assert assistant.protocols.find("study").steps == ["open Notion", "set the volume to 20"]
+    assert assistant.protocols.find("study").texts == ["open Notion", "set the volume to 20"]
     assert assistant._recording is None
     assert "42" in ask(assistant, events, "what's 6 times 7")  # back to normal
 
@@ -205,7 +209,7 @@ def test_a_timer_going_off_does_not_stop_a_protocol(make):
 def test_the_hud_buttons(make):
     assistant, events = make()
     saved = assistant.protocol_save({"name": "Desk", "steps": "say hello desk\n\nwait 1 second\nsay bye desk"})
-    assert saved["ok"] and saved["protocol"]["steps"] == ["say hello desk", "wait 1 second", "say bye desk"]
+    assert saved["ok"] and [x["text"] for x in saved["protocol"]["steps"]] == ["say hello desk", "wait 1 second", "say bye desk"]
     assert assistant.protocol_save({"name": "", "steps": "x"})["ok"] is False
     listing = assistant.protocol_list()
     assert listing["protocols"][0]["name"] == "Desk" and listing["running"] is None
@@ -231,6 +235,7 @@ def test_managing_by_voice(make):
     assistant, events = make()
     assert "don't have any protocols" in ask(assistant, events, "list my protocols")
     ask(assistant, events, "create a protocol called Morning: open Spotify, then open Gmail")
+    ask(assistant, events, "yes")
     assert ask(assistant, events, "add check the weather to the morning protocol").startswith("Added to the Morning protocol")
     assert "3 steps" in ask(assistant, events, "what's in the morning protocol")
     assert ask(assistant, events, "remove the first step from the morning protocol").startswith("Removed “open Spotify”")
@@ -255,9 +260,173 @@ def test_scheduled_protocols_run_by_themselves(make, monkeypatch):
     assistant._scheduler_stop = type(assistant._scheduler_stop)()
     original = assistant._scheduler_stop.wait
     assistant._scheduler_stop.wait = lambda timeout=None: original(0.05)
-    import threading
     threading.Thread(target=assistant._protocol_scheduler, daemon=True).start()
     events.wait_for(lambda: "scheduled hello" in assistant.tts.spoken, 20)
     assert any("Running your Auto protocol" in s for s in assistant.tts.spoken)
     time.sleep(0.5)
     assert assistant.tts.spoken.count("scheduled hello") == 1  # only once per slot
+
+
+# ----------------------------------------------------------------------------- protocols v2
+def test_old_protocols_are_migrated_with_a_backup(config, tmp_path):
+    config.update({"protocols": [{"id": "p1", "name": "Morning", "steps": ["open Spotify", "wait 5 seconds"], "schedule": {}, "created": 1, "last_run": 0}]})
+    store = ProtocolStore(config, backup_dir=tmp_path / "backups")
+    assert store.migrate() == 1
+    saved = config.get("protocols")[0]
+    assert saved["version"] == 2 and saved["steps"] == [{"text": "open Spotify"}, {"text": "wait 5 seconds"}] and saved["id"] == "p1"
+    backups = list((tmp_path / "backups").glob("protocols-backup-*.json"))
+    assert len(backups) == 1 and json.loads(backups[0].read_text())[0]["steps"] == ["open Spotify", "wait 5 seconds"]
+    assert store.migrate() == 0  # once only
+
+
+def test_structured_steps_from_words():
+    from core.protocols import structured_step, split_steps, normalise_hotkey, risk
+    from core.hotkeys import to_vk
+
+    assert structured_step("if Spotify is open, pause the music").when == {"type": "app_running", "app": "Spotify"}
+    assert structured_step("if Discord isn't running, open Discord").when == {"type": "app_not_running", "app": "Discord"}
+    assert structured_step("on weekdays, open Slack").when == {"type": "weekday", "days": [0, 1, 2, 3, 4]}
+    step = structured_step("open Spotify, but use YouTube if Spotify isn't available")
+    assert step.text == "open Spotify" and step.fallback == "open YouTube"
+    assert split_steps("if Spotify is open, pause the music, then open Discord") == ["if Spotify is open, pause the music", "open Discord"]
+    assert risk("email Sarah saying hi") and risk("delete my downloads") and risk("shut down the computer") and risk("close Spotify")
+    assert not risk("open Spotify") and not risk("close the other tabs") and not risk("say goodbye") and not risk("play some jazz")
+    assert normalise_hotkey("ctrl + alt + g") == "Ctrl+Alt+G" and normalise_hotkey("shift+g") == "" and normalise_hotkey("ctrl+alt+f5") == "Ctrl+Alt+F5"
+    assert to_vk("Ctrl+Alt+G") == (0x2 | 0x1 | 0x4000, ord("G")) and to_vk("Ctrl+Alt+F5")[1] == 0x74 and to_vk("Alt") is None
+
+
+def test_create_from_a_sentence_asks_for_details_then_approval(make):
+    assistant, events = make()
+    reply = ask(assistant, events, "create a protocol called Game Night that opens Discord, launches my game, and turns the music down")
+    assert reply == "Which game should Game Night launch, sir?"
+    reply = ask(assistant, events, "Fortnite")
+    assert reply.startswith("Here's the Game Night protocol, sir: 1, open Discord; 2, launch Fortnite; 3, turn the music down.")
+    proposal = events.of("protocols")[-1]["proposal"]
+    assert [st["label"] for st in proposal["steps"]] == ["Open app / file", "Open app / file", "Music volume"]
+    assert proposal["icon"] == "game" and proposal["category"] == "Gaming"
+    assert ask(assistant, events, "yes") == "Protocol Game Night saved, sir. Say “run Game Night” whenever you like."
+    p = assistant.protocols.find("game night")
+    assert p.texts == ["open Discord", "launch Fortnite", "turn the music down"] and p.icon == "game"
+
+
+def test_a_proposal_can_be_cancelled_or_edited(make):
+    assistant, events = make()
+    ask(assistant, events, "create a protocol called Focus: pause everything, then set a timer for 25 minutes")
+    assert ask(assistant, events, "no") == "Very well, sir. I haven't saved it."
+    assert assistant.protocols.all() == []
+    ask(assistant, events, "create a protocol called Focus: pause everything, then set a timer for 25 minutes")
+    assert ask(assistant, events, "edit it").startswith("I've opened it in the protocol editor")
+    assert events.of("protocol_edit")[-1]["protocol"]["name"] == "Focus"
+    ask(assistant, events, "create a protocol called Focus: pause everything")
+    assert assistant.protocol_proposal_answer("save")["ok"] and assistant.protocols.find("focus") is not None
+
+
+def test_risky_steps_ask_first_and_never_run_unattended(make):
+    assistant, events = make()
+    assistant._mic = {"available": False}  # answered by typing here (with a microphone JARVIS listens for the answer)
+    assistant.protocols.save("Mail", [{"text": "say before"}, {"text": "email Sarah saying hi"}, {"text": "say after"}])
+    ask(assistant, events, "run mail")
+    events.wait_for(lambda: any(p.get("status") == "confirm" for p in events.of("protocol")), 15)
+    confirm = [p for p in events.of("protocol") if p.get("status") == "confirm"][-1]["confirm"]
+    assert confirm["text"] == "email Sarah saying hi" and "sends something" in confirm["why"]
+    ask(assistant, events, "no")
+    wait_done(events)
+    assert "Skipping that step, sir." in assistant.tts.spoken
+    events.wait_for(lambda: "after" in assistant.tts.spoken, 10)
+    last = assistant.protocols.find("mail").history[-1]
+    assert [s["status"] for s in last["steps"]] == ["ok", "skipped", "ok"] and last["status"] == "done"
+    # the same protocol on a schedule: the risky step is skipped, never sent unattended
+    events.items.clear()
+    assistant._start_protocol(assistant.protocols.find("mail"), trigger="schedule")
+    wait_done(events)
+    last = assistant.protocols.find("mail").history[-1]
+    assert last["steps"][1]["status"] == "skipped" and "never runs unattended" in last["steps"][1]["detail"]
+
+
+def test_conditions_and_the_failure_policy(make):
+    assistant, events = make()
+    assistant.protocols.save("Checks", [{"text": "pause the music", "when": {"type": "app_running", "app": "Spotify"}},
+                                        {"text": "pause the music"}, {"text": "say never reached"}])
+    ask(assistant, events, "run checks")
+    wait_done(events)
+    last = assistant.protocols.find("checks").history[-1]
+    assert [s["status"] for s in last["steps"]] == ["skipped", "failed", "not_run"] and last["status"] == "failed"
+    events.wait_for(lambda: any("done the steps after it" in s for s in assistant.tts.spoken), 10)
+    assistant.protocols.update(assistant.protocols.find("checks").id, on_failure="continue")
+    events.items.clear()
+    ask(assistant, events, "run checks")
+    wait_done(events)
+    last = assistant.protocols.find("checks").history[-1]
+    assert [s["status"] for s in last["steps"]] == ["skipped", "failed", "ok"] and last["status"] == "done"
+    events.wait_for(lambda: any("but 1 step didn't work" in s for s in assistant.tts.spoken), 10)
+
+
+def test_fallback_retries_and_timeout(make, monkeypatch):
+    assistant, events = make()
+    assistant.protocols.save("Backup", [{"text": "pause the music", "retries": 1, "fallback": "what's 2 plus 2"},
+                                        {"text": "slow thing", "timeout": 1}, {"text": "say done"}])
+    original = assistant._converse
+
+    def converse(turn, text, source):
+        if text == "slow thing":
+            turn.cancel.wait(5)
+            return assistant._finish_turn(turn)
+        return original(turn, text, source)
+
+    assistant._converse = converse
+    ask(assistant, events, "run backup")
+    wait_done(events, 40)
+    last = assistant.protocols.find("backup").history[-1]
+    assert last["steps"][0]["status"] == "ok" and "fallback" in last["steps"][0]["detail"]
+    assert last["steps"][1]["status"] == "failed" and "longer than 1 seconds" in last["steps"][1]["detail"]
+    assert last["status"] == "failed"
+
+
+def test_run_but_leave_something_out(make):
+    assistant, events = make()
+    assistant.protocols.save("Dev", ["say one", "open Discord", "say two"])
+    assert ask(assistant, events, "start my dev protocol, but don't open Discord") == "Initiating the Dev protocol, sir. Leaving out open Discord."
+    wait_done(events)
+    last = assistant.protocols.find("dev").history[-1]
+    assert [s["text"] for s in last["steps"]] == ["say one", "say two"] and last["excluded"] == ["open Discord"]
+
+
+def test_activation_phrases_and_history(make):
+    assistant, events = make()
+    saved = assistant.protocol_save({"name": "Gaming Mode", "steps": "say game on", "phrases": ["activate gaming mode", "Game time!"],
+                                     "icon": "game", "category": "Gaming", "description": "Discord and a game"})
+    assert saved["ok"] and saved["protocol"]["phrases"] == ["activate gaming mode", "game time"]
+    assert ask(assistant, events, "Jarvis, activate gaming mode") == "Initiating the Gaming Mode protocol, sir."
+    wait_done(events)
+    p = assistant.protocols.find("gaming mode")
+    assert p.history[-1]["status"] == "done" and p.history[-1]["trigger"] == "text"
+    clash = assistant.protocol_save({"name": "Other", "steps": "say x", "phrases": ["game time"]})
+    assert not clash["ok"] and "already starts the Gaming Mode protocol" in clash["error"]
+    listing = assistant.protocol_list()
+    assert listing["protocols"][0]["steps"][0]["label"] == "Say" and listing["templates"]
+
+
+def test_templates(make):
+    assistant, events = make()
+    assert assistant.protocol_from_template("Focus")["ok"]
+    assert assistant.protocol_from_template("Focus")["protocol"]["name"] == "Focus 2"
+    focus = assistant.protocols.find("focus")
+    assert focus.texts[0] == "pause everything" and focus.phrases == ["start focus mode", "time to focus"]
+    assert assistant.protocols.find("focus 2").phrases == []
+
+
+def test_app_trigger(make, monkeypatch):
+    assistant, events = make()
+    assistant.protocol_save({"name": "Steam Time", "steps": "say steam opened", "triggers": {"app": "Steam"}})
+    apps = [set()]
+    monkeypatch.setattr(assistant, "_running_apps", lambda: apps[0])
+    assistant._scheduler_stop.set()
+    assistant._scheduler_stop = threading.Event()
+    assistant._scheduler_tick = 0.05
+    threading.Thread(target=assistant._protocol_scheduler, daemon=True).start()
+    time.sleep(0.3)
+    apps[0] = {"steam", "chrome"}
+    events.wait_for(lambda: "steam opened" in assistant.tts.spoken, 15)
+    wait_done(events)
+    assert any("Steam just opened" in s for s in assistant.tts.spoken)
+    assert assistant.protocols.find("steam time").history[-1]["trigger"] == "app"

@@ -14,11 +14,13 @@ the assistant runs the steps.
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 MAX_PROTOCOLS = 60
 MAX_STEPS = 40
@@ -32,33 +34,167 @@ class ProtocolError(ValueError):
     pass
 
 
+ICONS = ("bolt", "sun", "moon", "game", "code", "music", "film", "focus", "work", "home", "coffee", "rocket", "party", "book", "heart", "shield")
+CATEGORIES = ("General", "Morning", "Work", "Development", "Gaming", "Entertainment", "Focus", "Home", "Evening")
+FAILURE_POLICIES = ("stop", "continue")
+MAX_HISTORY = 12
+
+
+@dataclass
+class ProtoStep:
+    """One step: what to say to JARVIS, plus how to run it."""
+
+    text: str
+    when: dict = field(default_factory=dict)  # condition: {"type": "app_running"|"app_not_running"|"time"|"weekday"|"previous", ...}
+    confirm: bool = False  # ask "shall I go ahead?" before this step
+    approved: bool = False  # the user ticked "don't ask" for a risky step in the editor
+    continue_on_error: bool | None = None  # None = the protocol's policy
+    retries: int = 0
+    timeout: float = 90.0
+    fallback: str = ""  # tried if the step fails ("open Spotify, but use YouTube if Spotify isn't available")
+    enabled: bool = True
+
+    def to_dict(self) -> dict:
+        d = {"text": self.text}
+        if self.when:
+            d["when"] = dict(self.when)
+        for key, default in (("confirm", False), ("approved", False), ("continue_on_error", None), ("retries", 0),
+                             ("timeout", 90.0), ("fallback", ""), ("enabled", True)):
+            value = getattr(self, key)
+            if value != default:
+                d[key] = value
+        return d
+
+    @classmethod
+    def from_any(cls, raw) -> "ProtoStep | None":
+        if isinstance(raw, str):
+            text = raw.strip()[:MAX_STEP_CHARS]
+            return cls(text) if text else None
+        if not isinstance(raw, dict):
+            return None
+        text = str(raw.get("text") or "").strip()[:MAX_STEP_CHARS]
+        if not text:
+            return None
+        coe = raw.get("continue_on_error")
+        return cls(text, when=_clean_condition(raw.get("when")), confirm=bool(raw.get("confirm")), approved=bool(raw.get("approved")),
+                   continue_on_error=None if coe is None else bool(coe), retries=max(0, min(3, int(raw.get("retries") or 0))),
+                   timeout=max(1.0, min(600.0, float(raw.get("timeout") or 90.0))), fallback=str(raw.get("fallback") or "")[:MAX_STEP_CHARS],
+                   enabled=raw.get("enabled", True) is not False)
+
+
+def _clean_condition(raw) -> dict:
+    if not isinstance(raw, dict) or raw.get("type") not in ("app_running", "app_not_running", "time", "weekday", "previous"):
+        return {}
+    kind = raw["type"]
+    if kind in ("app_running", "app_not_running"):
+        app = str(raw.get("app") or "").strip()[:60]
+        return {"type": kind, "app": app} if app else {}
+    if kind == "time":
+        out = {"type": "time"}
+        for k in ("after", "before"):
+            m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(raw.get(k) or "").strip())
+            if m and int(m.group(1)) < 24 and int(m.group(2)) < 60:
+                out[k] = f"{int(m.group(1)):02d}:{m.group(2)}"
+        return out if len(out) > 1 else {}
+    if kind == "weekday":
+        days = sorted({int(d) for d in raw.get("days") or [] if str(d).isdigit() and 0 <= int(d) <= 6})
+        return {"type": "weekday", "days": days} if days else {}
+    return {"type": "previous", "ok": raw.get("ok", True) is not False}
+
+
 @dataclass
 class Protocol:
     id: str
     name: str
-    steps: list[str] = field(default_factory=list)
+    steps: list[ProtoStep] = field(default_factory=list)
     schedule: dict = field(default_factory=dict)  # {"time": "07:30", "days": [0..6], "enabled": True}
     created: float = 0.0
     last_run: float = 0.0
+    description: str = ""
+    icon: str = "bolt"
+    category: str = "General"
+    phrases: list[str] = field(default_factory=list)  # extra ways to start it: "activate gaming mode", "game time"
+    enabled: bool = True
+    on_failure: str = "stop"  # stop | continue (for steps that don't say)
+    triggers: dict = field(default_factory=dict)  # {"startup": bool, "app": "Steam", "hotkey": "Ctrl+Alt+G"}
+    history: list[dict] = field(default_factory=list)  # the last runs: {at, status, trigger, seconds, steps: [{text, status, detail}]}
+
+    @property
+    def texts(self) -> list[str]:
+        return [s.text for s in self.steps if s.enabled]
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "name": self.name, "steps": list(self.steps), "schedule": dict(self.schedule),
-                "created": self.created, "last_run": self.last_run}
+        return {"id": self.id, "name": self.name, "steps": [s.to_dict() for s in self.steps], "schedule": dict(self.schedule),
+                "created": self.created, "last_run": self.last_run, "description": self.description, "icon": self.icon,
+                "category": self.category, "phrases": list(self.phrases), "enabled": self.enabled, "on_failure": self.on_failure,
+                "triggers": dict(self.triggers), "history": [dict(h) for h in self.history[-MAX_HISTORY:]], "version": 2}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Protocol | None":
+        """Reads both the original format (steps as plain text) and the current one."""
         try:
-            steps = [str(s).strip()[:MAX_STEP_CHARS] for s in d.get("steps") or [] if str(s).strip()][:MAX_STEPS]
+            steps = [s for s in (ProtoStep.from_any(x) for x in d.get("steps") or []) if s][:MAX_STEPS]
             name = clean_name(str(d.get("name") or ""))
             if not name:
                 return None
+            phrases = [p for p in (clean_phrase(x) for x in d.get("phrases") or []) if p][:8]
+            icon = str(d.get("icon") or "bolt")
+            category = str(d.get("category") or "General")
             return cls(id=str(d.get("id") or _new_id()), name=name, steps=steps, schedule=normalise_schedule(d.get("schedule")),
-                       created=float(d.get("created") or 0), last_run=float(d.get("last_run") or 0))
+                       created=float(d.get("created") or 0), last_run=float(d.get("last_run") or 0),
+                       description=str(d.get("description") or "")[:300], icon=icon if icon in ICONS else "bolt",
+                       category=category if category in CATEGORIES else "General", phrases=phrases,
+                       enabled=d.get("enabled", True) is not False,
+                       on_failure=d.get("on_failure") if d.get("on_failure") in FAILURE_POLICIES else "stop",
+                       triggers=normalise_triggers(d.get("triggers")),
+                       history=[h for h in (d.get("history") or []) if isinstance(h, dict)][-MAX_HISTORY:])
         except (TypeError, ValueError):
             return None
 
     def describe_schedule(self) -> str:
         return describe_schedule(self.schedule)
+
+
+def clean_phrase(text) -> str:
+    t = re.sub(r"\s+", " ", str(text or "").strip(" \"'“”.,!?")).lower()
+    return t[:80] if len(t) >= 3 else ""
+
+
+def normalise_triggers(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    if raw.get("startup"):
+        out["startup"] = True
+    app = str(raw.get("app") or "").strip()[:60]
+    if app:
+        out["app"] = app
+    hotkey = normalise_hotkey(raw.get("hotkey"))
+    if hotkey:
+        out["hotkey"] = hotkey
+    return out
+
+
+_MODS = {"ctrl": "Ctrl", "control": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win", "windows": "Win"}
+
+
+def normalise_hotkey(raw) -> str:
+    """'ctrl + alt + g' -> 'Ctrl+Alt+G' (needs at least one of Ctrl / Alt / Win and one key)."""
+    parts = [p.strip().lower() for p in str(raw or "").replace("-", "+").split("+") if p.strip()]
+    mods = []
+    key = ""
+    for p in parts:
+        if p in _MODS:
+            if _MODS[p] not in mods:
+                mods.append(_MODS[p])
+        elif re.fullmatch(r"[a-z0-9]|f(?:[1-9]|1[0-2])", p) and not key:
+            key = p.upper()
+        else:
+            return ""
+    if not key or not ({"Ctrl", "Alt", "Win"} & set(mods)):
+        return ""
+    order = [m for m in ("Ctrl", "Alt", "Shift", "Win") if m in mods]
+    return "+".join(order + [key])
 
 
 def _new_id() -> str:
@@ -179,8 +315,22 @@ _THIRD_PERSON = {"does": "do", "goes": "go", "has": "have", "plays": "play", "sa
 _SOFT_SPLIT = re.compile(r"\s*(?:,\s*(?:and\s+)?|\s+and\s+)(?=" + _VERB_START + "|(?:" + "|".join(_THIRD_PERSON) + r")\b)", re.I)
 
 
+_CONDITION_ONLY = re.compile(r"^(?:if|when|only\s+if)\s+[\w .'-]+?\s+(?:is|isn'?t|is\s+not)\s+(?:open|running|on)$|^(?:only\s+)?on\s+(?:weekdays|weekends|\w+days?)$", re.I)
+
+
 def split_steps(text: str) -> list[str]:
     """'open Spotify, then check the weather and open Gmail; wait 5 seconds' -> 3 or 4 steps."""
+    steps = []
+    merged = []
+    for piece in _split_pieces(text):
+        if merged and _CONDITION_ONLY.match(merged[-1]):
+            merged[-1] = merged[-1] + ", " + piece  # "if Spotify is open, pause the music" is one step
+        else:
+            merged.append(piece)
+    return merged
+
+
+def _split_pieces(text: str) -> list[str]:
     steps = []
     for chunk in _SPLIT.split(text or ""):
         for piece in _SOFT_SPLIT.split(chunk or ""):
@@ -235,11 +385,21 @@ def describe_step(step: str) -> str:
 
 
 # ----------------------------------------------------------------------------- the store
+_META = ("description", "icon", "category", "phrases", "enabled", "on_failure", "triggers")
+
+
+def _steps(raw) -> list[ProtoStep]:
+    if isinstance(raw, str):
+        raw = raw.splitlines()
+    return [s for s in (ProtoStep.from_any(x) for x in raw or []) if s]
+
+
 class ProtocolStore:
     """Protocols live in the settings file under "protocols" (a list of dicts)."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, backup_dir: Path | None = None) -> None:
         self.config = config
+        self.backup_dir = backup_dir
 
     def all(self) -> list[Protocol]:
         out = []
@@ -248,6 +408,22 @@ class ProtocolStore:
             if p:
                 out.append(p)
         return out
+
+    def migrate(self) -> int:
+        """Bring protocols saved by an older JARVIS up to date, keeping a copy of the originals first."""
+        raw = [r for r in self.config.get("protocols") or [] if isinstance(r, dict)]
+        old = [r for r in raw if r.get("version") != 2]
+        if not old:
+            return 0
+        if self.backup_dir is not None:
+            try:
+                self.backup_dir.mkdir(parents=True, exist_ok=True)
+                path = self.backup_dir / f"protocols-backup-{time.strftime('%Y%m%d-%H%M%S')}.json"
+                path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+            except OSError as exc:
+                raise ProtocolError(f"couldn't back up the protocols before updating them: {exc}") from exc
+        self._write(self.all())
+        return len(old)
 
     def _write(self, protocols: list[Protocol]) -> None:
         self.config.update({"protocols": [p.to_dict() for p in protocols]})
@@ -272,14 +448,24 @@ class ProtocolStore:
         close = difflib.get_close_matches(want, list(names), n=1, cutoff=0.82)
         return names[close[0]] if close else None
 
+    def find_phrase(self, text: str) -> Protocol | None:
+        """A protocol whose own activation phrase this is ("activate gaming mode")."""
+        said = clean_phrase(re.sub(r"^(?:(?:please|now|ok(?:ay)?)\s+)+", "", text or "", flags=re.I))
+        if not said:
+            return None
+        for p in self.all():
+            if p.enabled and any(said == ph or difflib.SequenceMatcher(None, said, ph).ratio() > 0.92 for ph in p.phrases):
+                return p
+        return None
+
     def names(self) -> list[str]:
         return [p.name for p in self.all()]
 
-    def save(self, name: str, steps: list[str], pid: str | None = None, schedule: dict | None = None) -> Protocol:
+    def save(self, name: str, steps, pid: str | None = None, schedule: dict | None = None, **meta) -> Protocol:
         name = clean_name(name)
         if not name:
             raise ProtocolError("Give the protocol a name.")
-        steps = [s.strip()[:MAX_STEP_CHARS] for s in steps if s and s.strip()]
+        steps = _steps(steps)
         if not steps:
             raise ProtocolError("A protocol needs at least one step.")
         if len(steps) > MAX_STEPS:
@@ -297,8 +483,20 @@ class ProtocolStore:
         target.name, target.steps = name, steps
         if schedule is not None:
             target.schedule = normalise_schedule(schedule)
+        self._apply_meta(target, meta, items)
         self._write(items)
         return target
+
+    def _apply_meta(self, target: Protocol, meta: dict, items: list[Protocol]) -> None:
+        clean = Protocol.from_dict({**target.to_dict(), **{k: v for k, v in meta.items() if k in _META}})
+        if clean is None:
+            return
+        for p in items:  # one phrase, one protocol
+            if p.id != target.id and set(p.phrases) & set(clean.phrases):
+                taken = sorted(set(p.phrases) & set(clean.phrases))[0]
+                raise ProtocolError(f"“{taken}” already starts the {p.name} protocol.")
+        for key in _META:
+            setattr(target, key, getattr(clean, key))
 
     def update(self, pid: str, **fields) -> Protocol:
         items = self.all()
@@ -306,7 +504,7 @@ class ProtocolStore:
         if target is None:
             raise ProtocolError("That protocol doesn't exist any more.")
         if "steps" in fields:
-            steps = [s.strip()[:MAX_STEP_CHARS] for s in fields["steps"] if s and s.strip()]
+            steps = _steps(fields["steps"])
             if not steps:
                 raise ProtocolError("A protocol needs at least one step.")
             target.steps = steps[:MAX_STEPS]
@@ -321,8 +519,16 @@ class ProtocolStore:
             target.schedule = normalise_schedule(fields["schedule"])
         if "last_run" in fields:
             target.last_run = float(fields["last_run"])
+        if "history" in fields:
+            target.history = [h for h in fields["history"] if isinstance(h, dict)][-MAX_HISTORY:]
+        self._apply_meta(target, fields, items)
         self._write(items)
         return target
+
+    def record_run(self, pid: str, run: dict) -> None:
+        p = self.get(pid)
+        if p is not None:
+            self.update(pid, history=p.history + [run], last_run=run.get("at") or time.time())
 
     def delete(self, pid: str) -> Protocol | None:
         items = self.all()
@@ -340,6 +546,116 @@ class ProtocolStore:
         return p
 
 
+# ----------------------------------------------------------------------------- safety and conditions
+_RISKY = [  # (pattern, why) - steps that change or send things need a "yes" first
+    (re.compile(r"\b(?:send|email|e-mail|message|text|reply to|post|tweet|share)\b", re.I), "sends something on your behalf"),
+    (re.compile(r"\b(?:delete|erase|remove|wipe|empty\s+the\s+(?:recycle\s+)?bin|trash|format|uninstall)\b", re.I), "deletes things"),
+    (re.compile(r"\b(?:shut\s*down|restart|reboot|log\s*(?:off|out)|sign\s+out|sleep\s+the\s+(?:computer|pc)|hibernate)\b", re.I), "turns the computer off or signs you out"),
+    (re.compile(r"\b(?:close|quit|kill|end|terminate)\s+(?!the\s+(?:other\s+)?tabs?\b|this\s+tab\b|(?:the\s+)?tab\b)", re.I), "closes programs (unsaved work could be lost)"),
+    (re.compile(r"\b(?:click|press|type|buy|pay|order|purchase|book)\b", re.I), "acts on the screen or spends money"),
+    (re.compile(r"\b(?:run|execute)\s+(?:a\s+|the\s+)?(?:command|script|powershell|cmd|terminal|program\s+at)\b", re.I), "runs a command"),
+]
+
+
+def risk(text: str) -> str:
+    """Why a step needs your go-ahead ('' if it's a safe one: opening, playing, volume, questions...)."""
+    t = (text or "").strip()
+    if re.match(r"^(?:wait|pause|say|announce|speak)\b", t, re.I):
+        return ""
+    for pattern, why in _RISKY:
+        if pattern.search(t):
+            return why
+    return ""
+
+
+def condition_met(when: dict, now: datetime, running: set[str], previous_ok: bool | None) -> bool:
+    if not when:
+        return True
+    kind = when.get("type")
+    if kind in ("app_running", "app_not_running"):
+        app = re.sub(r"[^a-z0-9]", "", str(when.get("app") or "").lower())
+        up = any(app and (app in r or r in app) for r in running)
+        return up if kind == "app_running" else not up
+    if kind == "time":
+        hm = now.strftime("%H:%M")
+        after, before = when.get("after"), when.get("before")
+        if after and before and after > before:  # overnight: 22:00-06:00
+            return hm >= after or hm < before
+        return (not after or hm >= after) and (not before or hm < before)
+    if kind == "weekday":
+        return now.weekday() in (when.get("days") or [])
+    if kind == "previous":
+        return previous_ok is None or previous_ok == bool(when.get("ok", True))
+    return True
+
+
+def describe_condition(when: dict) -> str:
+    if not when:
+        return ""
+    kind = when.get("type")
+    if kind == "app_running":
+        return f"only if {when.get('app')} is open"
+    if kind == "app_not_running":
+        return f"only if {when.get('app')} isn't open"
+    if kind == "time":
+        return "only " + " ".join(x for x in (f"after {when['after']}" if when.get("after") else "", f"before {when['before']}" if when.get("before") else "") if x)
+    if kind == "weekday":
+        return "only on " + _join([DAY_NAMES[d] + "s" for d in when.get("days") or []])
+    if kind == "previous":
+        return "only if the previous step " + ("worked" if when.get("ok", True) else "failed")
+    return ""
+
+
+_STEP_IF = re.compile(r"^(?:if|when|only\s+if)\s+(?P<app>[\w .'-]+?)\s+(?P<neg>is\s+not|isn'?t|is)\s+(?:open|running|on)\s*,?\s*(?:then\s+)?(?P<rest>.+)$", re.I)
+_STEP_DAYS = re.compile(r"^(?:only\s+)?on\s+(?P<days>weekdays|weekends|(?:mondays?|tuesdays?|wednesdays?|thursdays?|fridays?|saturdays?|sundays?)(?:\s*(?:,|and)\s*\w+)*)\s*,?\s*(?P<rest>.+)$", re.I)
+_STEP_FALLBACK = re.compile(r"^(?P<step>.+?),?\s+(?:but\s+|or\s+)?(?:use|try|open|play\s+it\s+on)\s+(?P<alt>.+?)\s+if\s+(?:it|that|.+?)\s+(?:isn'?t|is\s+not|aren'?t|doesn'?t|does\s+not|can'?t|fails|won'?t)\b.*$", re.I)
+
+
+def structured_step(text: str) -> ProtoStep:
+    """'if Spotify is open, pause the music' / 'on weekdays, open Slack' / 'open Spotify, but use YouTube if it isn't available'."""
+    t = text.strip()
+    m = _STEP_IF.match(t)
+    if m:
+        neg = m.group("neg").lower() != "is"
+        return ProtoStep(m.group("rest").strip(), when={"type": "app_not_running" if neg else "app_running", "app": m.group("app").strip()})
+    m = _STEP_DAYS.match(t)
+    if m:
+        days = parse_schedule("at 1:00 on " + m.group("days"))
+        if days:
+            return ProtoStep(m.group("rest").strip(), when={"type": "weekday", "days": days["days"]})
+    m = _STEP_FALLBACK.match(t)
+    if m:
+        alt = m.group("alt").strip()
+        verb = re.match(r"^(?:open|play|start|launch)\b", m.group("step").strip(), re.I)
+        if not re.match(r"^(?:open|play|launch|start|go\s+to)\b", alt, re.I):
+            alt = (verb.group(0).lower() if verb else "open") + " " + alt
+        return ProtoStep(m.group("step").strip(), fallback=alt)
+    return ProtoStep(t)
+
+
+# ----------------------------------------------------------------------------- ready-made protocols to start from
+TEMPLATES = [
+    {"name": "Gaming Mode", "icon": "game", "category": "Gaming", "phrases": ["activate gaming mode", "game time"],
+     "description": "Discord and your game, music down, and a lively personality.",
+     "steps": ["open Discord", "open Steam", "turn the music down", "switch to Friday", "say Game on, boss."]},
+    {"name": "Development", "icon": "code", "category": "Development", "phrases": ["initiate development protocol", "let's code"],
+     "description": "Your editor, your docs and a calm, focused assistant.",
+     "steps": ["open Visual Studio Code", "open github.com", "switch to Sage", "what am I working on"]},
+    {"name": "Entertainment", "icon": "film", "category": "Entertainment", "phrases": ["activate entertainment mode", "movie night"],
+     "description": "YouTube up, your last music back, and Harper for company.",
+     "steps": ["switch to Harper", "resume what I was listening to", "set the music volume to 60"]},
+    {"name": "Focus", "icon": "focus", "category": "Focus", "phrases": ["start focus mode", "time to focus"],
+     "description": "A 25-minute focus timer, quiet music and your work apps.",
+     "steps": ["pause everything", "switch to Sage", "set a timer for 25 minutes", "play lo-fi beats", "set the music volume to 25"]},
+    {"name": "Morning Briefing", "icon": "sun", "category": "Morning", "phrases": ["good morning jarvis", "morning briefing"],
+     "description": "Weather, your day and the news.", "schedule": {"time": "07:30", "days": [0, 1, 2, 3, 4], "enabled": False},
+     "steps": ["what's the weather today", "what's my routine today", "open news.google.com"]},
+    {"name": "Wind Down", "icon": "moon", "category": "Evening", "phrases": ["time for bed", "wind down"],
+     "description": "Music off, volume low, a reminder for tomorrow.",
+     "steps": ["pause everything", "set the volume to 20", "say Sleep well. I'll be here in the morning."]},
+]
+
+
 # ----------------------------------------------------------------------------- what the user says
 @dataclass
 class ProtocolCommand:
@@ -350,6 +666,7 @@ class ProtocolCommand:
     index: int | None = None  # remove_step: 1-based, None = the last one
     schedule: dict | None = None
     explicit: bool = False  # the word "protocol" was used (so an unknown name is still about protocols)
+    skip: list[str] = field(default_factory=list)  # "run Development, but don't open Discord" -> ["open discord"]
 
 
 _P = r"(?:protocol|routine|sequence)"
@@ -411,11 +728,20 @@ def _strip(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
 
 
+_EXCEPT = re.compile(r"^(?P<main>.+?),?\s+(?:but\s+(?:please\s+)?(?:don'?t|do\s+not|skip|leave\s+out|not|no)|except(?:\s+for)?|without|minus|skipping)\s+(?P<skip>.+?)[\s.!?]*$", re.I)
+
+
 def parse_protocol_command(text: str, find=None) -> ProtocolCommand | None:
     """Understand a request about protocols. ``find(name)`` says whether a protocol exists (for plain "run X")."""
     t = _strip(text)
     if not t or len(t) > 1500:
         return None
+    ex = _EXCEPT.match(t)
+    if ex and re.search(r"\b(?:run|start|initiate|activate|execute|engage|launch|begin|kick\s+off|do|trigger)\b", ex.group("main"), re.I):
+        cmd = parse_protocol_command(ex.group("main"), find)
+        if cmd is not None and cmd.action == "run":
+            cmd.skip = [x.strip(" ,.") for x in re.split(r"\s*(?:,|\bor\b|\band\b|\bnor\b)\s*", ex.group("skip")) if x.strip(" ,.")]
+            return cmd
     low = t.lower()
     mentions = re.search(r"\b" + _P + r"s?\b", low) is not None
 
@@ -511,8 +837,8 @@ def _join(items: list[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def spoken_steps(steps: list[str], limit: int = 8) -> str:
-    shown = [describe_step(s) for s in steps[:limit]]
+def spoken_steps(steps, limit: int = 8) -> str:
+    shown = [describe_step(getattr(s, "text", s)) for s in steps[:limit]]
     text = "; ".join(f"{i + 1}, {s}" for i, s in enumerate(shown))
     if len(steps) > limit:
         text += f"; and {len(steps) - limit} more"

@@ -546,8 +546,30 @@ class JarvisAPI:
     def protocol_stop(self) -> dict:
         return self._assistant.protocol_stop()
 
-    def media_control(self, action: str) -> dict:
-        return self._assistant.media_control(str(action))
+    def protocol_answer(self, yes: bool) -> dict:
+        return self._assistant.protocol_answer(bool(yes))
+
+    def protocol_proposal_answer(self, action: str, data: dict | None = None) -> dict:
+        return self._assistant.protocol_proposal_answer(str(action), data if isinstance(data, dict) else None)
+
+    def protocol_from_template(self, name: str) -> dict:
+        return self._assistant.protocol_from_template(str(name))
+
+    def media_control(self, action: str, key: str = "") -> dict:
+        return self._assistant.media_control(str(action), str(key or ""))
+
+    def media_volume(self, key: str, level: float) -> dict:
+        return self._assistant.media_volume(str(key), float(level))
+
+    def activity_list(self) -> dict:
+        return self._assistant.activity_list()
+
+    def browser_status(self) -> dict:
+        return self._assistant.browser_status()
+
+    def browser_set_profile(self, directory: str) -> dict:
+        self._assistant.config.update({"browser_profile": str(directory or "auto")})
+        return self._assistant.browser_status()
 
     # -- vision ------------------------------------------------------------
     def vision_status(self) -> dict:

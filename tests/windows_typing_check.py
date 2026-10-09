@@ -120,7 +120,9 @@ def main() -> int:
 
         # a protocol made by voice, run by name, whose steps type into the same real app
         reply = say("create a protocol called Sign Off: type the words: best wishes, then wait 1 second, then type the words: from your assistant")
-        check("protocol created by voice", reply.startswith("Protocol Sign Off created") and "3 steps" in reply, reply)
+        check("protocol proposed from a sentence", reply.startswith("Here's the Sign Off protocol") and "Shall I save it?" in reply, reply)
+        reply = say("yes")
+        check("protocol saved after approval", reply.startswith("Protocol Sign Off saved"), reply)
         reply = say("run sign off")
         check("protocol started by name", reply.startswith("Initiating the Sign Off protocol"), reply)
         events.wait_for(lambda: any(p.get("status") in ("done", "stopped", "interrupted") for p in events.of("protocol")), 60)

@@ -19,6 +19,17 @@ def isolated_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch):
+    """Nothing in the tests ever starts a real browser: launches are recorded in ``no_real_browser`` instead."""
+    from core.browser import BrowserManager
+
+    launched: list[str] = []
+    monkeypatch.setattr(BrowserManager, "real_launch", BrowserManager._launch, raising=False)  # for tests of the launch itself
+    monkeypatch.setattr(BrowserManager, "_launch", lambda self, url, key: launched.append(url or ""))
+    return launched
+
+
 @pytest.fixture
 def config(tmp_path):
     from core.config import Config

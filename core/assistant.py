@@ -9,10 +9,13 @@ touch the state machine or the UI.
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import random
 import sys
 import queue
+from collections import deque
+from urllib.parse import quote_plus
 import re
 import threading
 import time
@@ -45,7 +48,11 @@ from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
-from .media import MediaCommand, NowPlaying, find_youtube_video, now_playing, parse_media, spotify_targets, youtube_search_url
+from .media import MediaCommand, find_youtube_video, parse_media, spotify_targets, youtube_search_url
+from .mediahub import _HINTS, MediaHub, MediaSession, describe_position, hint_from
+from .winhelper import WinHelper
+from .browser import (AUTHENTICATION_REQUIRED, CONSENT, ERROR as BROWSER_ERROR, FIRST_RUN_SETUP, OFFLINE, PROFILE_SELECTION,
+                      BrowserManager, NavResult, needs_account, site_name, tab_title as tab_title_of)
 from .protocols import (Protocol, ProtocolCommand, ProtocolError, ProtocolStore, clean_name as clean_protocol_name, describe_schedule,
                         due as protocol_due, join_names, parse_protocol_command, recording_reply, split_steps, spoken_steps, step_kind)
 from .weather import Weather, WeatherError, asks_pc_temperature, parse_weather
@@ -65,6 +72,11 @@ _MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:]{0,120}$")
 def _bare(text: str) -> str:
     """'stop listening, Jarvis!' -> 'stop listening' (a personality's name or 'please' at the end)."""
     return re.sub(r"(?:[,\s]+(?:" + names_pattern() + r"|please|thanks|thank you))+\W*$", "", text.strip(), flags=re.I)
+
+
+def _media_hint(name: str):
+    """The test for 'is this the player the user named' ("youtube", "spotify", "video"...)."""
+    return _HINTS.get(hint_from(name) or name, lambda s: True)
 
 
 def _strip_wake(text: str) -> str:
@@ -105,6 +117,13 @@ _TOOL_CUES = re.compile(
     r"news|weather|latest|current|price|summari[sz]e|"
     r"write|create|make|add|edit|update|replace|list|delete|remove|move|reorder|rearrange|rename|table|row|rows|column|cell)\b", re.IGNORECASE)
 _CLOSING = re.compile(r"^\W*(?:please\s+)?(?:close|quit|exit|shut|kill|end)\b", re.I)  # never answer these by opening things
+_GOOGLE_SEARCH = re.compile(r"^(?:(?:please|can you|could you)\s+)*(?:(?:search|look)\s+(?:on\s+)?google\s+for\s+(?P<q>.+)|google\s+(?:search\s+)?for\s+(?P<q2>.+)|"
+                            r"(?:search\s+for|look\s+up|search)\s+(?P<q3>.+?)\s+on\s+google)$", re.I)
+_BROWSER_NAMES = {"chrome": "chrome", "google chrome": "chrome", "browser": "", "web browser": "", "internet": "", "edge": "edge",
+                  "microsoft edge": "edge", "firefox": "firefox", "brave": "brave"}
+_WHAT_PAGE = re.compile(r"^(?:(?:hey\s+)?\w+,\s*)?(?:what|which)\s+(?:page|website|site|tab|web\s*page)\s+(?:am\s+i\s+on|is\s+(?:this|open|showing)|is\s+chrome\s+on)|"
+                        r"^what(?:'s|\s+is)\s+(?:this|the)\s+(?:page|website|site|tab)(?:\s+called)?|^where\s+am\s+i\s+in\s+(?:the\s+)?(?:browser|chrome)", re.I)
+_FAVORITE_SITE = re.compile(r"^(?:my\s+)?favou?rite\s+(?:web\s*)?site\s+is\s+(?P<site>\S+(?:\s+\S+){0,3})[\s.!]*$", re.I)
 _CHAIN_SPLIT = re.compile(r"\s*(?:,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+)(?=(?:open|launch|start|play|fire up|boot up)\b)", re.IGNORECASE)
 _OPEN_COMMAND = re.compile(
     r"^(?:(?:hey |ok |okay )?jarvis[, ]+)?(?:please |can you |could you |would you )*(?:open|launch|start|run|load|pull up|bring up|show me)"
@@ -214,6 +233,7 @@ class Speaker:
         self._sentences: "queue.Queue[str | None]" = queue.Queue()
         self._clips: "queue.Queue[tuple | None]" = queue.Queue(maxsize=3)
         self.spoke = False
+        self._ducked = False
         self.failed: str | None = None
         self._threads = [
             threading.Thread(target=self._synth_loop, name=f"tts-{turn.id}", daemon=True),
@@ -290,6 +310,14 @@ class Speaker:
             self._clips.put(None)
 
     def _play_loop(self) -> None:
+        a = self._a
+        try:
+            self._play_clips()
+        finally:
+            if self._ducked:
+                a._duck(False)  # always give the music its volume back, even after an error or an interruption
+
+    def _play_clips(self) -> bool:
         a, turn = self._a, self._turn
         while True:
             item = self._clips.get()
@@ -300,6 +328,9 @@ class Speaker:
             sound, frames, levels, duration = item
             if not a._set_state(State.SPEAKING, turn, "speech"):
                 continue
+            if not self._ducked and a.config.get("duck_media", True):
+                self._ducked = True
+                a._duck(True)
             self.spoke = True
             a._emit_turn(turn, "speech_clip", fps=VIS_FPS, frames=frames, levels=levels, duration=round(duration, 3))
             a.audio.play_voice(sound)
@@ -312,6 +343,7 @@ class Speaker:
                 time.sleep(0.02)
             if self._working and not self._closed and self._clips.empty():
                 a._set_state(State.THINKING, turn, "working")
+        return self._ducked
 
 
 class Assistant:
@@ -373,7 +405,24 @@ class Assistant:
         self._protocol_last: dict | None = None  # the one that ran last (so "stop the protocol" right after still makes sense)
         self._recording: dict | None = None  # a protocol being dictated step by step: {name, steps, at, id}
         self._scheduler_stop = threading.Event()
-        self._now_playing: NowPlaying | None = None
+        self._now_playing: MediaSession | None = None
+        self._media_snapshot = ""
+        self._pending_media: dict | None = None  # "Spotify and YouTube are both playing. Which one?"
+        self.winhelper = WinHelper()
+        self.media = MediaHub(self.winhelper, windows=self._safe_windows, media_key=lambda a: osctl.media_key(a), youtube_keys=self._youtube_keys,
+                              state_dir=app_data_dir())
+        self.browser = BrowserManager(config, windows=self._safe_windows, helper=self.winhelper, front=self._foreground,
+                                      bring_to_front=lambda w: self.desktop.bring_to_front(w),
+                                      on_state=lambda st: self.emit("browser", **st))
+        if getattr(self.tools, "custom_url_launcher", False):
+            self.browser.url_launcher = self.tools._launch_url
+        else:
+            self.tools._launch_url = lambda url: self.browser._launch(url, self.browser.key())  # every link: right browser, right profile
+        self._activities: deque = deque((a for a in (config.get("activity_history") or []) if isinstance(a, dict)), maxlen=120)
+        self._activity_ids = itertools.count(int(time.time() * 1000))
+        self._duck_jobs: "queue.Queue[str]" = queue.Queue()
+        self._duck_worker: threading.Thread | None = None
+        self._sign_in_wait: threading.Event | None = None
         self._announcements = 0  # timers / reminders waiting for a quiet moment to speak
         self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
         self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
@@ -530,6 +579,7 @@ class Assistant:
             "paused": self._paused,
             "protocols": self.protocol_list(),
             "media": self._now_playing.to_dict() if self._now_playing else None,
+            "activity": list(self._activities)[-40:],
         }
 
     def boot_complete(self) -> None:
@@ -555,6 +605,17 @@ class Assistant:
     def shutdown(self) -> None:
         self._prewarm_stop.set()
         self._scheduler_stop.set()
+        if self._sign_in_wait is not None:
+            self._sign_in_wait.set()
+        try:
+            self.media._duck_depth = 0
+            self.media.restore()
+        except Exception:
+            log.debug("couldn't restore volumes", exc_info=True)
+        try:
+            self.config.update({"activity_history": list(self._activities)[-60:]})
+        except Exception:
+            log.debug("couldn't save the activity log", exc_info=True)
         run = self._protocol_run
         if run is not None:
             run["stop"].set()
@@ -570,6 +631,10 @@ class Assistant:
             entry["timer"].cancel()
         if self.wake is not None:
             self.wake.stop()
+        try:
+            self.winhelper.stop()
+        except Exception:
+            pass
         with self._turn_lock:
             if self._turn is not None:
                 self._turn.abort()
@@ -1003,50 +1068,419 @@ class Assistant:
             except Exception:
                 log.exception("Protocol scheduler hiccup")
 
+    # ================================================================== activity log (what JARVIS did, and whether it worked)
+    def _activity(self, kind: str, text: str, status: str = "ok", detail: str = "") -> dict:
+        """Record an action: status is ok (verified), unverified (done, couldn't check), failed, or waiting."""
+        item = {"id": next(self._activity_ids), "at": time.time(), "kind": kind, "text": text[:200], "status": status,
+                "detail": detail[:300], "persona": self.persona.name}
+        self._activities.append(item)
+        self.emit("activity_log", item=item)
+        return item
+
+    def activity_list(self) -> dict:
+        return {"items": list(self._activities), "health": self.health()}
+
+    def health(self) -> dict:
+        """What's working (Automation Center ▸ System health)."""
+        helper = self.winhelper.status()
+        caps = helper.get("caps") or {}
+        voice = self._voice_ok
+        return {
+            "neural_core": bool(self._ollama and self._ollama.online and self._ollama.model),
+            "model": (self._ollama.model if self._ollama else None),
+            "voice": voice is not False, "microphone": bool(self._mic.get("available")),
+            "wake_word": bool(self.wake is not None and getattr(self.wake, "running", False)),
+            "media_sessions": bool(caps.get("media")), "app_volumes": bool(caps.get("audio")),
+            "address_bar": bool(caps.get("uia")), "helper_errors": helper.get("errors") or {},
+            "browser": self.browser.status(), "ocr": bool(getattr(self.vision.ocr, "error", None) is None),
+            "google": bool(self.tools.google.configured), "internet": bool(self.tools.web_enabled),
+        }
+
+    def _foreground(self):
+        try:
+            return self.desktop.foreground()
+        except Exception:
+            return None
+
+    def _duck(self, on: bool) -> None:
+        """Lower (or restore) other apps' sound while JARVIS speaks, in order, off the audio thread."""
+        self._duck_jobs.put("duck" if on else "unduck")
+        if self._duck_worker is None or not self._duck_worker.is_alive():
+            self._duck_worker = threading.Thread(target=self._duck_loop, name="ducking", daemon=True)
+            self._duck_worker.start()
+
+    def _duck_loop(self) -> None:
+        while True:
+            try:
+                job = self._duck_jobs.get(timeout=30)
+            except queue.Empty:
+                return
+            try:
+                if job == "duck":
+                    self.media.duck(float(self.config.get("duck_level", 0.3)))
+                else:
+                    self.media.unduck()
+            except Exception:
+                log.debug("ducking hiccup", exc_info=True)
+
+    # ================================================================== the browser
+    def _open_site(self, turn: Turn, url: str, label: str, host: str = "", title: str = "", done: str = "") -> str:
+        """Open a page and only say it's open once the browser shows it."""
+        t = self.title
+        self._emit_turn(turn, "tool_activity", tool="browser", label=f"Opening {label}")
+        nav = self.browser.open(url, expect_host=host, expect_title=title)
+        self._tool_used(turn, "open_website", {"url": url})
+        if nav.ok and nav.verified:
+            self._activity("browser", f"Opened {label}", "ok", nav.url or nav.title)
+            return f"{done}, {t}." if done else f"{label[:1].upper() + label[1:]} is open, {t}."
+        if nav.ok:
+            self._activity("browser", f"Opened {label}", "unverified")
+            return f"Opening {label}, {t}."
+        if nav.blocked:
+            return self._blocked_reply(nav, label, url, host=host, title=title)
+        self._activity("browser", f"Opened {label} (still loading)", "unverified", nav.title)
+        return f"Opening {label}, {t}." + (" It's taking a while to load." if self.browser.watch else "")
+
+    def _blocked_reply(self, nav: NavResult, label: str, url: str = "", host: str = "", title: str = "") -> str:
+        """Explain what stopped the browser, and (where the user can fix it) wait for them and carry on."""
+        t = self.title
+        browser = nav.browser or self.browser.label()
+        host = host or ((url.split("/")[2] if "://" in url else "") if url else "")
+        if nav.state == AUTHENTICATION_REQUIRED:
+            account = self.config.get("google_user_email") or "your Google account"
+            self._wait_for_page(nav, label, url, host, title, "sign-in")
+            self._activity("browser", f"{label}: waiting for you to sign in", "waiting", nav.url or nav.title)
+            if url and not needs_account(url):
+                return (f"{browser} is showing a Google sign-in page instead of {label}, {t}. You don't need to sign in for {label}: "
+                        "close that page or sign in, and I'll carry on as soon as it's there.")
+            return (f"{label[:1].upper() + label[1:]} needs you to sign in to {account} first, {t}. Please sign in in {browser}; "
+                    "I'll carry on as soon as you're in. I never type passwords myself.")
+        if nav.state == PROFILE_SELECTION:
+            self._wait_for_page(nav, label, url, host, title, "profile", reopen=True)
+            self._activity("browser", f"{browser} is asking which profile to use", "waiting")
+            return f"{browser} is asking which profile to use, {t}. Pick yours and I'll open {label} straight after."
+        if nav.state == FIRST_RUN_SETUP:
+            self._wait_for_page(nav, label, url, host, title, "setup", reopen=True)
+            self._activity("browser", f"{browser} is showing its first-run setup", "waiting")
+            return f"{browser} is showing its first-run setup, {t}. Finish or skip it and I'll open {label} for you."
+        if nav.state == CONSENT:
+            self._wait_for_page(nav, label, url, host, title, "consent")
+            self._activity("browser", f"{label}: cookie consent page", "waiting")
+            return f"{label[:1].upper() + label[1:]} wants you to accept or reject cookies first, {t}. Once you've chosen, it'll load and I'll let you know."
+        if nav.state == OFFLINE:
+            self._activity("browser", f"Couldn't open {label}: offline", "failed", nav.title)
+            return f"{browser} says there's no internet connection, {t}, so {label} didn't load."
+        self._activity("browser", f"Couldn't open {label}", "failed", nav.title)
+        return f"{label[:1].upper() + label[1:]} didn't load, {t}: {browser} shows “{nav.title.split(' - ')[0]}”."
+
+    def _wait_for_page(self, nav: NavResult, label: str, url: str, host: str, title: str, why: str, reopen: bool = False) -> None:
+        """Wait (up to 5 minutes, in the background) for the user to clear the blocker, then confirm or carry on."""
+        if self._sign_in_wait is not None:
+            self._sign_in_wait.set()  # only one wait at a time: the newest request wins
+        cancel = threading.Event()
+        self._sign_in_wait = cancel
+        self.browser.waiting = {"label": label, "why": why, "since": time.time()}
+        self.emit("browser", **self.browser.status())
+
+        def run() -> None:
+            try:
+                if reopen:
+                    for _ in range(150):  # wait until the browser is usable, then open the page again (the picker drops it)
+                        if cancel.wait(2):
+                            return
+                        look = self.browser.look()
+                        if look.state not in (PROFILE_SELECTION, FIRST_RUN_SETUP, "NOT_RUNNING"):
+                            break
+                    if url:
+                        self.browser._launch(url, self.browser.key())
+                result = self.browser.wait_until(host, title, site_name(url) if url else label, timeout=300, cancel=cancel)
+                if cancel.is_set():
+                    return
+                if result.ok:
+                    self._activity("browser", f"{label} is open (after {why})", "ok", result.url or result.title)
+                    self.speak(f"Thank you, {self.title}. {label[:1].upper() + label[1:]} is open now.")
+                else:
+                    self._activity("browser", f"Stopped waiting for {label}", "failed", result.title)
+            finally:
+                if self._sign_in_wait is cancel:
+                    self._sign_in_wait = None
+                    self.browser.waiting = None
+                    self.emit("browser", **self.browser.status())
+
+        self._spawn(run, name="browser-wait")
+
+    def _open_browser(self, turn: Turn, which: str) -> str:
+        """'Open Chrome': bring the running one forward or start it, and report what it shows."""
+        t = self.title
+        key_before = self.browser.key()
+        nav = self.browser.launch_browser() if which in ("", key_before) else self._launch_other(which)
+        name = nav.browser or which.title()
+        if nav.ok:
+            self._activity("browser", f"{name} ready", "ok" if nav.verified else "unverified", nav.title)
+            return f"{name} is {'up' if 'RUNNING' in nav.transitions else 'open and ready'}, {t}."
+        if nav.blocked:
+            return self._blocked_reply(nav, name)
+        self._activity("browser", f"{name} didn't open", "failed")
+        return f"{name} didn't open within 15 seconds, {t}. It may still be starting."
+
+    def _launch_other(self, which: str) -> NavResult:
+        saved = self.config.get("link_browser")
+        try:
+            self.config.update({"link_browser": which}, persist=False)
+            return self.browser.launch_browser()
+        finally:
+            self.config.update({"link_browser": saved}, persist=False)
+
+    def browser_status(self) -> dict:
+        self.browser.look()
+        return {**self.browser.status(), "profiles": self.browser.profiles()}
+
     # ================================================================== music and media
+    def _youtube_keys(self, keys: list, times: int = 1) -> bool:
+        """Press YouTube shortcuts in its tab: switches to the YouTube tab (in any browser) first."""
+        vk = {"shift": 0x10, "left": 0x25, "right": 0x27, "up": 0x26, "down": 0x28, ".": 0xBE, ",": 0xBC, "0": 0x30}
+        codes = [vk.get(k, ord(k.upper()) if len(k) == 1 else 0) for k in keys]
+        if not all(codes):
+            return False
+        window = None
+        for w in self._safe_windows():
+            if (w.app or "").lower().removesuffix(".exe") in ("chrome", "msedge", "firefox", "brave", "opera", "vivaldi") and " - YouTube" in (w.title or ""):
+                window = w
+                break
+        if window is None:
+            try:
+                window = tabs.find_tab(self.desktop, "youtube", "browser")
+            except Exception:
+                window = None
+        if window is None:
+            return False
+        try:
+            self.desktop.bring_to_front(window)
+            time.sleep(0.25)
+            for _ in range(max(1, min(int(times), 30))):
+                self.desktop.press(codes, window=window)
+                time.sleep(0.08)
+            return True
+        except Exception:
+            log.debug("YouTube keys failed", exc_info=True)
+            return False
+
+    def _media_line(self, s) -> str:
+        return f"{s.spoken()} on {s.label}" if s.title else s.label
+
     def _media(self, turn: Turn, cmd: MediaCommand) -> str:
         t = self.title
-        current = now_playing(self._safe_windows())
+        hub = self.media
         if cmd.action == "now_playing":
-            if current is None or not current.title:
-                if current is not None:
-                    return f"Spotify is open but nothing's playing, {t}."
-                return f"I can't see anything playing right now, {t}. I can read what's on Spotify, YouTube or VLC."
-            return f"That's {current.spoken()}, on {current.app}, {t}."
-        if cmd.action == "play":
-            return self._play_media(turn, cmd, current)
-        if cmd.action == "pause" and current is not None and current.app == "Spotify" and not current.playing:
-            return f"Spotify is already paused, {t}."
-        if cmd.action == "resume" and current is not None and current.app == "Spotify" and current.playing:
-            return f"It's already playing, {t}: {current.spoken()}."
-        key = {"pause": "toggle", "resume": "toggle", "next": "next", "previous": "previous"}[cmd.action]
-        try:
-            osctl.media_key(key)
-        except osctl.OsControlError as exc:
-            return f"{exc} Sorry, {t}."
-        self._spawn(self._media_refresh, 1.2, name="media-refresh")
-        return {"pause": f"Paused, {t}.", "resume": f"Resuming, {t}.", "next": f"Skipping ahead, {t}.",
-                "previous": f"Going back a track, {t}."}[cmd.action]
+            s = hub.now_playing()
+            if s is None:
+                return f"Nothing's playing right now, {t}."
+            if not s.title:
+                return f"{s.label} is open, but nothing's playing, {t}."
+            where = ""
+            if s.position is not None and s.duration:
+                where = f", {describe_position(s.position)} of {describe_position(s.duration)}"
+            state = "" if s.playing else " (paused)"
+            self._activity("media", f"Now playing: {s.spoken()}", "ok")
+            return f"That's {s.spoken()}, on {s.label}{where}{state}, {t}."
+        if cmd.action in ("play",) and not cmd.vague:
+            return self._play_media(turn, cmd)
+        if cmd.action == "search":
+            return self._open_site(turn, youtube_search_url(cmd.query), f"YouTube results for {cmd.query}", host="youtube.com")
+        if cmd.action == "resume_history":
+            return self._resume_history(turn)
+        if cmd.action == "volume":
+            return self._media_volume(cmd)
+        if cmd.action in ("seek", "seek_to", "restart"):
+            return self._media_seek(cmd)
+        if cmd.action in ("fullscreen", "captions", "speed"):
+            return self._youtube_extra(cmd)
+        action = {"pause": "pause", "resume": "play", "play": "play", "next": "next", "previous": "previous", "stop": "stop"}[cmd.action]
+        out = hub.control(action, cmd.target)
+        if out.detail == "ambiguous":
+            self._pending_media = {"action": action, "choices": out.choices, "at": time.time()}
+            names = join_names([c.label for c in out.choices])
+            return f"{names} are both playing, {t}. Which one?"
+        if out.detail == "nothing":
+            if action == "play":
+                if cmd.target in ("", "music") and not cmd.query:  # "play music" with nothing paused: put something on
+                    return self._play_media(turn, MediaCommand("play", query="music", vague=True))
+                return f"There's nothing paused to resume, {t}."
+            if cmd.target and cmd.target not in ("all", "music"):
+                return f"I can't find {cmd.target.title() if cmd.target != 'youtube' else 'YouTube'} playing anything, {t}."
+            return f"Nothing's playing right now, {t}."
+        if out.detail == "already":
+            return f"It's already {'paused' if action == 'pause' else 'playing'}, {t}."
+        if out.detail == "no_helper":
+            return f"I can't reach the media controls on this system, {t}."
+        if out.detail == "unsupported":
+            if action in ("next", "previous") and out.sessions and out.sessions[0].site.startswith("YouTube"):
+                y = hub.youtube(["shift", "n" if action == "next" else "p"])
+                if y.ok:
+                    self._activity("media", f"{'Next' if action == 'next' else 'Previous'} on YouTube", "unverified")
+                    return f"{'Next' if action == 'next' else 'Previous'} video, {t}."
+            label = out.sessions[0].label if out.sessions else "That player"
+            return f"{label} doesn't let me {'skip' if action == 'next' else 'go back' if action == 'previous' else action} from outside, {t}."
+        if not out.ok:
+            label = out.sessions[0].label if out.sessions else "the player"
+            self._activity("media", f"{action.title()} {label}", "failed")
+            return f"I asked {label} to {action}, {t}, but it didn't respond."
+        names = join_names(sorted({s.label for s in out.sessions}))
+        status = "ok" if out.verified else "unverified"
+        self._activity("media", f"{action.title()}: {names}", status)
+        self._spawn(self._media_refresh, 0.2, name="media-refresh")
+        sure = "" if out.verified else " I can't confirm it from here, though."
+        if action == "pause":
+            return f"Paused {names}, {t}.{sure}" if cmd.query != "stop" else f"Stopped {names}, {t}.{sure}"
+        if action == "stop":
+            return f"Stopped {names}, {t}.{sure}"
+        if action == "play":
+            first = out.sessions[0]
+            return f"Resuming {self._media_line(first)}, {t}.{sure}"
+        now = next((hub._find(s, out.after) for s in out.sessions), None) if out.after else None
+        what = f" Now playing {now.spoken()}." if now is not None and now.title and now.title != out.sessions[0].title else ""
+        return f"{'Skipped' if action == 'next' else 'Back a track'}, {t}.{what}{sure}"
 
-    def _play_media(self, turn: Turn, cmd: MediaCommand, current: NowPlaying | None) -> str:
+    def _media_choice(self, text: str) -> str | None:
+        """The answer to "Spotify and YouTube are both playing. Which one?"."""
+        pending, self._pending_media = self._pending_media, None
+        if pending is None or time.time() - pending["at"] > 60:
+            return None
+        low = text.lower()
+        choices = pending["choices"]
+        if re.search(r"\b(?:both|all(?: of them)?|everything|each)\b", low):
+            picked = choices
+        else:
+            hint = hint_from(low)
+            picked = [c for c in choices if hint and (c.label.lower().startswith(hint) or c.process == hint or (hint == "video" and c.browser))]
+            if not picked:
+                ordinal = {"first": 0, "the first": 0, "second": 1, "the second": 1, "last": -1}
+                pos = next((v for k, v in ordinal.items() if re.search(r"\b" + k + r"\b", low)), None)
+                picked = [choices[pos]] if pos is not None and choices else []
+        if not picked:
+            return None
+        out = self.media.control(pending["action"], targets=picked)
+        names = join_names(sorted({c.label for c in picked}))
+        verb = {"pause": "Paused", "play": "Resumed", "next": "Skipped", "previous": "Went back on", "stop": "Stopped"}[pending["action"]]
+        self._activity("media", f"{verb} {names}", "ok" if out.verified else ("unverified" if out.ok else "failed"))
+        return f"{verb} {names}, {self.title}." if out.ok else f"{names} didn't respond, {self.title}."
+
+    def _media_volume(self, cmd: MediaCommand) -> str:
+        t = self.title
+        hub = self.media
+        target = None
+        found = hub.sessions()
+        if cmd.target and cmd.target != "music":
+            target = next((s for s in found if hint_from(cmd.target) and _media_hint(cmd.target)(s)), None)
+        if target is None:
+            target = next((s for s in found if s.playing), None) or hub.now_playing()
+        if target is not None and hub.can_mix():
+            if cmd.muted is not None:
+                res = hub.app_volume(target.process, muted=cmd.muted)
+            elif cmd.level is not None:
+                res = hub.app_volume(target.process, level=cmd.level / 100)
+            else:
+                res = hub.app_volume(target.process, delta=(cmd.amount or 20) / 100)
+            if res is not None:
+                self._activity("media", f"{target.label} volume → {round(res['after'] * 100)}%{' (muted)' if res['muted'] else ''}", "ok")
+                if cmd.muted is not None:
+                    return f"{'Muted' if cmd.muted else 'Unmuted'} {target.label}, {t}."
+                return f"{target.label} is at {round(res['after'] * 100)} percent now, {t}. My voice stays where it was."
+        # no per-app volume on this PC: the whole system instead, said plainly
+        try:
+            if cmd.muted is not None:
+                osctl.set_mute(cmd.muted)
+                return f"{'Muted' if cmd.muted else 'Unmuted'} the sound, {t}. (I can't mute just the music on this PC.)"
+            if cmd.level is not None:
+                osctl.set_volume(int(cmd.level))
+                return f"Volume set to {int(cmd.level)} percent, {t}."
+            osctl.change_volume(int(cmd.amount or 20) // 2)
+            return f"Volume {'up' if (cmd.amount or 0) > 0 else 'down'}, {t}."
+        except osctl.OsControlError as exc:
+            return f"I'm afraid {exc}"
+
+    def _media_seek(self, cmd: MediaCommand) -> str:
+        t = self.title
+        hub = self.media
+        found = hub.sessions()
+        s = next((x for x in found if x.playing), None) or hub.now_playing()
+        if s is None:
+            return f"Nothing's playing to {'restart' if cmd.action == 'restart' else 'skip through'}, {t}."
+        target = None
+        if cmd.action == "restart":
+            target = 0.0
+        elif cmd.action == "seek_to":
+            if cmd.query in ("middle", "end"):
+                if not s.duration:
+                    return f"I don't know how long it is, {t}."
+                target = s.duration / 2 if cmd.query == "middle" else max(0.0, s.duration - 5)
+            else:
+                target = cmd.amount or 0.0
+        elif s.position is not None:
+            target = max(0.0, s.position + (cmd.amount or 0))
+            if s.duration:
+                target = min(target, max(0.0, s.duration - 1))
+        if target is not None and "seek" in s.can and s.source == "sessions":
+            out = hub.control("seek", position=target, targets=[s])
+            if out.ok:
+                self._activity("media", f"{s.label}: jumped to {describe_position(target)}", "ok" if out.verified else "unverified")
+                if cmd.action == "restart":
+                    return f"Back to the start, {t}."
+                return f"Jumped to {describe_position(target)}, {t}."
+        if s.site.startswith("YouTube") or s.browser:
+            if cmd.action == "restart":
+                out = hub.youtube(["0"], verify="start", before=s)
+                done = "Back to the start"
+            elif cmd.action == "seek_to":
+                return f"YouTube didn't let me jump straight there, {t}. Try “skip forward 2 minutes”."
+            else:
+                amount = cmd.amount or 10
+                out = hub.youtube(["l" if amount > 0 else "j"], times=max(1, round(abs(amount) / 10)),
+                                  verify="forward" if amount > 0 else "back", before=s)
+                done = f"{'Forward' if amount > 0 else 'Back'} {describe_duration(int(abs(amount)))}"
+            if out.ok:
+                self._activity("media", f"YouTube: {done.lower()}", "ok" if out.verified else "unverified")
+                return f"{done}, {t}."
+            return f"I couldn't find the YouTube tab to do that, {t}."
+        return f"{s.label} doesn't let me move through it from outside, {t}."
+
+    def _youtube_extra(self, cmd: MediaCommand) -> str:
+        t = self.title
+        keys, label = {"fullscreen": (["f"], "Full screen" if cmd.on is not False else "Out of full screen"),
+                       "captions": (["c"], "Captions " + ("on" if cmd.on is not False else "off") if cmd.on is not None else "Captions toggled"),
+                       "speed": ([("shift"), "." if cmd.query == "up" else ","], "Faster" if cmd.query == "up" else "Slower")}[cmd.action]
+        if cmd.action == "speed" and cmd.query == "normal":
+            return f"YouTube has no shortcut for normal speed, {t}: say “slow it down” or “speed it up” to step back to it."
+        if not any((s.site.startswith("YouTube") for s in self.media.sessions())) and \
+                not any(" - YouTube" in (w.title or "") for w in self._safe_windows()):
+            return f"That works on a YouTube video, {t}, and I can't see one open."
+        out = self.media.youtube(keys)
+        if not out.ok:
+            return f"I couldn't find the YouTube tab, {t}."
+        self._activity("media", f"YouTube: {label.lower()}", "unverified")
+        return f"{label}, {t}."
+
+    def _play_media(self, turn: Turn, cmd: MediaCommand) -> str:
         t = self.title
         if not self.tools.web_enabled:
             return f"Internet access is switched off in Settings, {t}, so I can't fetch music."
+        hub = self.media
         service = cmd.service or self.config.get("music_service") or "youtube"
         query = cmd.query
+        found = hub.sessions()
         if cmd.vague:
-            if current is not None and current.app == "Spotify":
-                if current.playing:
-                    return f"Spotify is already playing {current.spoken()}, {t}."
-                osctl.media_key("toggle")
-                self._spawn(self._media_refresh, 1.5, name="media-refresh")
-                return f"Resuming Spotify, {t}."
-            query = "relaxing music mix" if service == "youtube" else "Daily Mix"
-        if current is not None and current.app == "Spotify" and current.playing and service == "youtube":
-            try:
-                osctl.media_key("toggle")  # don't play two things at once
-            except osctl.OsControlError:
-                pass
+            paused = [s for s in found if s.status == "paused" and s.title]
+            spotify = next((s for s in found if s.process == "spotify"), None)
+            if spotify is not None and spotify.playing:
+                return f"Spotify is already playing {spotify.spoken()}, {t}."
+            if paused:
+                out = hub.control("play", targets=[hub._prefer(paused)])
+                if out.ok:
+                    return f"Resuming {self._media_line(out.sessions[0])}, {t}."
+            query = self._favourite_music() or ("relaxing music mix" if service == "youtube" else "Daily Mix")
+        for s in found:  # don't play two things at once
+            if s.playing:
+                hub.control("pause", targets=[s])
         if service == "spotify":
             uri, web = spotify_targets(query)
             self._emit_turn(turn, "tool_activity", tool="media", label=f"Opening {query} in Spotify")
@@ -1056,50 +1490,166 @@ class Assistant:
             except Exception:
                 self.tools.open_website(web)
                 where = "Spotify's web player"
-            self._spawn(self._media_refresh, 3.0, name="media-refresh")
+            self._activity("media", f"Spotify search: {query}", "unverified")
+            self._remember_media({"title": query, "app": "Spotify", "query": query})
             return (f"I've searched {where} for {query}, {t}. Press play on the top result. "
                     "If you'd like me to start songs by myself, say “play it on YouTube”.")
         self._emit_turn(turn, "tool_activity", tool="media", label=f"Finding {query} on YouTube")
         try:
-            found = find_youtube_video(self.tools._client(), query)
+            found_video = find_youtube_video(self.tools._client(), query)
         except Exception:
             log.info("YouTube lookup for %r failed", query, exc_info=True)
-            found = None
+            found_video = None
         if turn.cancel.is_set():
             return ""
-        if found is None:
-            self.tools.open_website(youtube_search_url(query))
-            return f"I couldn't pick a video myself, {t}, so I've opened YouTube's results for {query}."
-        url, title = found
-        self.tools.open_website(url)
+        if found_video is None:
+            return self._open_site(turn, youtube_search_url(query), f"YouTube's results for {query}", host="youtube.com")
+        url, title = found_video
+        self._emit_turn(turn, "activity", label=f"Opening {title or query}")
+        nav = self.browser.open(url, expect_host="youtube.com", expect_title=title, wait=12.0)
         self._tool_used(turn, "open_website", {"url": url})
-        self._spawn(self._media_refresh, 4.0, name="media-refresh")
+        self._remember_media({"title": title or query, "app": "YouTube", "url": url, "query": query})
+        if nav.blocked:
+            return self._blocked_reply(nav, f"{title or query} on YouTube")
+        playing = self._await_playing(title, 10.0)
+        if playing is not None and playing.playing:
+            hub.remember(playing, "YouTube")
+            self._activity("media", f"Playing {title or query} on YouTube", "ok")
+            return f"Playing {title or query} on YouTube, {t}."
+        if playing is not None:  # opened but not started (autoplay blocked): press play
+            hub.remember(playing, "YouTube")
+            out = hub.control("play", targets=[playing])
+            if out.verified:
+                self._activity("media", f"Playing {title or query} on YouTube", "ok")
+                return f"Playing {title or query} on YouTube, {t}."
+        if hub.can_read():
+            self._activity("media", f"Opened {title or query} on YouTube (not confirmed playing)", "unverified")
+            return f"I've opened {title or query} on YouTube, {t}, but it hasn't started playing yet. Your browser may want a click first."
+        self._activity("media", f"Opened {title or query} on YouTube", "unverified")
         return f"Playing {title or query} on YouTube, {t}."
 
-    def media_control(self, action: str) -> dict:
-        """The HUD's ⏮ ⏯ ⏭ buttons."""
-        if action not in ("toggle", "next", "previous"):
-            return {"ok": False}
+    def _await_playing(self, title: str, wait: float):
+        """The media session for the video just opened, once Windows reports it (None if it never shows up)."""
+        if not self.media.can_read():
+            return None
+        want = re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip()
+        deadline = time.monotonic() + wait
+        best = None
+        while time.monotonic() < deadline:
+            for s in self.media.sessions():
+                have = re.sub(r"[^a-z0-9]+", " ", s.title.lower()).strip()
+                if s.browser and have and want and (have in want or want in have):
+                    best = s
+                    if s.playing:
+                        return s
+            time.sleep(0.4)
+        return best
+
+    def _favourite_music(self) -> str:
+        """Something the user said they like ("I love jazz" -> "jazz mix"), from long-term memory."""
         try:
-            osctl.media_key(action)
-        except osctl.OsControlError as exc:
-            return {"ok": False, "error": str(exc)}
-        self._spawn(self._media_refresh, 1.0, name="media-refresh")
-        return {"ok": True}
+            search = getattr(self.memory, "search", None) or getattr(getattr(self.memory, "engine", None), "search", None)
+            for m in (search("music I like favourite songs artists genre", limit=6) if search else []):
+                text = m.text if hasattr(m, "text") else str(m)
+                hit = re.search(r"\b(?:loves?|likes?|enjoys?|into|fan of|favou?rite (?:band|artist|singer|genre|music) is)\s+(?:listening to\s+)?(?P<what>[\w' &-]{3,40})", text, re.I)
+                if hit and re.search(r"music|jazz|rock|pop|rap|hip|classical|band|song|singer|lo-?fi|metal|country|r&b|indie|edm|house|techno|soul", text, re.I):
+                    what = hit.group("what").strip()
+                    return what if re.search(r"\b(?:mix|music|songs|playlist)\b", what, re.I) else f"{what} mix"
+        except Exception:
+            log.debug("couldn't look up music taste", exc_info=True)
+        return ""
+
+    def _remember_media(self, entry: dict) -> None:
+        history = [h for h in (self.config.get("media_history") or []) if isinstance(h, dict)]
+        entry = {**entry, "at": time.time()}
+        if history and history[-1].get("title") == entry.get("title"):
+            history[-1] = {**history[-1], **entry}
+        else:
+            history.append(entry)
+        try:
+            self.config.update({"media_history": history[-30:]})
+        except Exception:
+            log.debug("couldn't save media history", exc_info=True)
+
+    def _resume_history(self, turn: Turn) -> str:
+        t = self.title
+        hub = self.media
+        paused = [s for s in hub.sessions() if s.status == "paused" and s.title]
+        if paused:
+            out = hub.control("play", targets=[hub._prefer(paused)])
+            if out.ok:
+                return f"Picking up {self._media_line(out.sessions[0])}, {t}."
+        history = [h for h in (self.config.get("media_history") or []) if isinstance(h, dict) and h.get("title")]
+        if not history:
+            return f"I don't have a record of what you were listening to, {t}. Tell me what to play."
+        last = history[-1]
+        if last.get("url"):
+            url = last["url"]
+            if last.get("position") and "youtube.com/watch" in url and "&t=" not in url:
+                url += f"&t={int(last['position'])}s"
+            nav = self.browser.open(url, expect_host="youtube.com", expect_title=last["title"], wait=12.0)
+            if nav.blocked:
+                return self._blocked_reply(nav, last["title"])
+            self._activity("media", f"Back to {last['title']}", "ok" if nav.ok else "unverified")
+            return f"Back to {last['title']}, {t}."
+        if last.get("app") == "Spotify":
+            return self._play_media(turn, MediaCommand("play", query=last.get("query") or last["title"], service="spotify"))
+        return self._play_media(turn, MediaCommand("play", query=last.get("query") or last["title"], service="youtube"))
+
+    def media_control(self, action: str, key: str = "") -> dict:
+        """The HUD's ⏮ ⏯ ⏭ buttons (for one player, or whatever is playing)."""
+        if action not in ("toggle", "next", "previous", "play", "pause"):
+            return {"ok": False}
+        found = self.media.sessions()
+        targets = [s for s in found if s.key == key] if key else None
+        if action == "toggle" and targets:
+            action = "pause" if targets[0].playing else "play"
+        elif action == "toggle":
+            playing = [s for s in found if s.playing]
+            action, targets = ("pause", playing[:1]) if playing else ("play", None)
+        out = self.media.control(action, targets=targets)
+        self._spawn(self._media_refresh, 0.1, name="media-refresh")
+        return {"ok": out.ok, "verified": out.verified, "error": None if out.ok else (out.detail or "failed")}
+
+    def media_volume(self, key: str, level: float) -> dict:
+        s = next((x for x in self.media.sessions() if x.key == key), None)
+        if s is None or not self.media.can_mix():
+            return {"ok": False, "error": "App volume isn't available on this PC."}
+        res = self.media.app_volume(s.process, level=max(0.0, min(1.0, float(level))))
+        return {"ok": res is not None, **(res or {})}
 
     def _media_refresh(self, delay: float = 0.0) -> None:
         if delay:
             time.sleep(delay)
-        found = now_playing(self._safe_windows())
-        before = self._now_playing.to_dict() if self._now_playing else None
-        after = found.to_dict() if found and (found.title or found.app == "Spotify") else None
-        if before != after:
-            self._now_playing = found if after else None
-            self.emit("media", playing=after)
+        found = self.media.sessions()
+        mixer = {str(r.get("name") or "").lower(): r for r in self.media.mixer()} if found and self.media.can_mix() else {}
+        rows = []
+        for s in found:
+            d = s.to_dict()
+            vol = mixer.get(s.process)
+            if vol is not None:
+                d["volume"], d["muted"] = round(float(vol.get("volume") or 0), 2), bool(vol.get("muted"))
+            rows.append(d)
+        playing = next((s for s in found if s.playing), None) or (found[0] if found else None)
+        summary = playing.to_dict() if playing else None
+        snapshot = json.dumps([[r["key"], r["status"], r.get("volume")] for r in rows])
+        if snapshot != self._media_snapshot:
+            self._media_snapshot = snapshot
+            self._now_playing = playing
+            self.emit("media", playing=summary, sessions=rows, status=self.media.status())
+            if playing is not None and playing.playing and playing.title:
+                self._remember_media({"title": playing.title, "artist": playing.artist, "app": playing.label,
+                                      **({"position": playing.position} if playing.position else {})})
 
     def _media_watch(self) -> None:
-        """Keeps the HUD's now-playing strip current (window titles change when the song does)."""
-        while not self._scheduler_stop.wait(4):
+        """Keeps the HUD's now-playing strip and the Automation Center current."""
+        try:
+            restored = self.media.recover()
+            if restored:
+                log.info("Restored %d app volume(s) left lowered by a crash", restored)
+        except Exception:
+            log.debug("volume recovery failed", exc_info=True)
+        while not self._scheduler_stop.wait(3):
             try:
                 self._media_refresh()
             except Exception:
@@ -1954,10 +2504,24 @@ class Assistant:
             reply = self._google_request(turn, google, ready)  # "open the doc", "show me my budget sheet"...
             if reply:
                 return reply
+        search = _GOOGLE_SEARCH.match(text.strip())
+        if search and self.tools.web_enabled:
+            query = (search.group("q") or search.group("q2") or search.group("q3")).strip(" ?.!\"'")
+            return self._open_site(turn, "https://www.google.com/search?q=" + quote_plus(query), f"a Google search for {query}",
+                                   host="google.com", title=query, done=f"Here are Google's results for {query}")
         match = _OPEN_COMMAND.match(text.strip())
         if not match:
             return None
         target = match.group("target").strip(" \"'")
+        which = _BROWSER_NAMES.get(re.sub(r"^(?:the|my)\s+", "", target.lower()).strip())
+        if which is not None:
+            return self._open_browser(turn, which)
+        if re.fullmatch(r"(?:my\s+)?(?:favou?rite|usual)\s+(?:web\s*)?site", target, re.I):
+            fav = str(self.config.get("favorite_website") or "")
+            if not fav:
+                return (f"You haven't told me your favourite website yet, {self.title}. "
+                        "Say “my favourite website is …” and I'll remember it.")
+            target = fav
         site = self.tools.website_for(target) if self.tools.web_enabled else None
         explicit_url = bool(site) and "." in target
         if self.tools.files_enabled and not explicit_url:
@@ -1972,9 +2536,8 @@ class Assistant:
             if reply:
                 return reply
         if site:
-            self.tools.open_website(site)
-            self._tool_used(turn, "open_website", {"url": site})
-            return f"Opening {target}, {self.title}."
+            url = site if site.startswith("http") else "https://" + site
+            return self._open_site(turn, url, site_name(url) if "." not in target or "://" in target else target)
         return None
 
     def _weather_answer(self, turn: Turn, req) -> str | None:
@@ -2060,6 +2623,25 @@ class Assistant:
                 self._deliver(turn, [self._record_step(recording, text)], listen_after=lambda: self._recording is not None)
                 return
             self._recording = None
+        if self._pending_media is not None:
+            choice = self._media_choice(text)
+            if choice:
+                self._deliver(turn, [choice])
+                return
+        if _WHAT_PAGE.match(text.strip()):
+            look = self.browser.look()
+            if look.state == "NOT_RUNNING":
+                self._deliver(turn, [f"Your browser isn't open, {self.title}."])
+            else:
+                where = f" ({look.url})" if look.url else ""
+                self._deliver(turn, [f"You're on “{tab_title_of(look.title)}”{where}, {self.title}."])
+            return
+        fav = _FAVORITE_SITE.match(_bare(text))
+        if fav:
+            site = self.tools.website_for(fav.group("site").strip(" .")) or fav.group("site").strip(" .")
+            self.config.update({"favorite_website": site})
+            self._deliver(turn, [f"Noted, {self.title}. Say “open my favourite website” any time."])
+            return
         protocol_cmd = parse_protocol_command(_bare(text), find=self.protocols.find)
         if protocol_cmd is not None:
             turn.learn = False

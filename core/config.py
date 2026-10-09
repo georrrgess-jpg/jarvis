@@ -65,7 +65,13 @@ DEFAULTS: dict[str, Any] = {
     "user_title": "sir",
     "persona": "jarvis",  # jarvis | harper | friday | sage (see core/personas.py)
     "persona_theme": True,  # switching personality also switches the HUD colours
-    "music_service": "youtube",  # youtube | spotify: where "play <song>" goes (see core/media.py)
+    "music_service": "youtube",
+    "duck_media": True,  # lower other apps' sound while JARVIS speaks (needs Windows' per-app volume)
+    "duck_level": 0.3,  # ... to this fraction of their volume
+    "media_history": [],  # what was played lately, for "resume what I was listening to"
+    "browser_profile": "auto",  # which Chrome / Edge / Brave profile links open in ("auto" = the linked Google account's)
+    "favorite_website": "",  # "open my favourite website"
+    "activity_history": [],  # the last actions and whether they were verified (Automation Center)  # youtube | spotify: where "play <song>" goes (see core/media.py)
     "protocols": [],  # named lists of commands: [{id, name, steps, schedule, created, last_run}] (see core/protocols.py)
     "custom_personas": [],  # personalities the user made: [{id, name, description, voice, gender, color, address}]
     "persona_colors": {},  # the user's HUD colour for any personality: {persona id: "#RRGGBB"}
@@ -110,6 +116,7 @@ _RANGES: dict[str, tuple[float, float]] = {
     "patience": (0.0, 8.0),
     "watch_interval": (1.0, 10.0),
     "wake_sensitivity": (0.0, 1.0),
+    "duck_level": (0.05, 1.0),
 }
 
 _MAX_TEXT = {"weather_location": 80, "vision_exclusions": 1000, "custom_instructions": 2000, "user_title": 40}
@@ -136,6 +143,9 @@ def resource_path(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
+_SIZE_LIMITS = {"protocols": 600_000, "activity_history": 120_000, "media_history": 40_000, "custom_personas": 60_000}
+
+
 def _coerce(key: str, value: Any) -> Any:
     default = DEFAULTS[key]
     if isinstance(default, (list, dict)):
@@ -143,7 +153,7 @@ def _coerce(key: str, value: Any) -> Any:
             value = json.loads(value or ("[]" if isinstance(default, list) else "{}"))
         if not isinstance(value, type(default)):
             raise ValueError(f"{key} must be a {'list' if isinstance(default, list) else 'mapping'}")
-        if len(json.dumps(value)) > 20000:
+        if len(json.dumps(value)) > _SIZE_LIMITS.get(key, 20000):
             raise ValueError(f"{key} is too large")
         if key == "persona_colors":
             return {str(k)[:40]: (str(v).upper() if str(v).startswith("#") else str(v)) for k, v in value.items()

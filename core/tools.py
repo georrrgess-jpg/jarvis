@@ -828,6 +828,7 @@ class Toolbox:
         self._http = http
         self._launch = launcher
         self._launch_url = url_launcher or (lambda url: open_in_browser(url, str(config.get("link_browser") or "default")))
+        self.custom_url_launcher = url_launcher is not None
         self._host_ok = host_check
 
     # ---------------------------------------------------------------- availability

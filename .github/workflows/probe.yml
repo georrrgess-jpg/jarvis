@@ -1,10 +1,11 @@
-name: Windows helper probe
+name: Windows media & browser check
 
 on:
   push:
     paths:
-      - core/winhelper.py
+      - core/**
       - tests/windows_helper_probe.py
+      - tests/windows_media_check.py
       - .github/workflows/probe.yml
   workflow_dispatch:
 
@@ -13,16 +14,32 @@ permissions:
 
 jobs:
   probe:
-    name: Windows helper probe (media sessions, app volume, address bar)
+    name: Media sessions, browser readiness, YouTube (real Windows + Chrome)
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Probe
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Helper probe
         shell: pwsh
         env:
           PYTHONIOENCODING: utf-8
         run: python tests/windows_helper_probe.py
+      - name: Media and browser check
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          PYTHONIOENCODING: utf-8
+          SDL_AUDIODRIVER: dummy
+        run: python tests/windows_media_check.py media-check.json
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-check
+          path: media-check.json
+          if-no-files-found: warn

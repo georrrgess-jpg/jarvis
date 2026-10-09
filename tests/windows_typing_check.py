@@ -125,7 +125,15 @@ def main() -> int:
         check("protocol saved after approval", reply.startswith("Protocol Sign Off saved"), reply)
         reply = say("run sign off")
         check("protocol started by name", reply.startswith("Initiating the Sign Off protocol"), reply)
-        events.wait_for(lambda: any(p.get("status") in ("done", "stopped", "interrupted") for p in events.of("protocol")), 60)
+        # typing on screen always asks first: answer GO AHEAD each time, as the user would on the HUD
+        asked, deadline = 0, time.time() + 60
+        while time.time() < deadline and not any(p.get("status") in ("done", "stopped", "interrupted", "failed") for p in events.of("protocol")):
+            if assistant._protocol_confirm is not None:
+                asked += 1
+                assistant.protocol_answer(True)
+                time.sleep(0.3)
+            time.sleep(0.1)
+        check("protocol asked before each typing step", asked == 2, asked)
         time.sleep(0.8)
         outcome = [p.get("status") for p in events.of("protocol")][-1]
         check("protocol ran every step in order", outcome == "done" and typed().endswith("best wishesfrom your assistant"),

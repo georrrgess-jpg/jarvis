@@ -106,7 +106,7 @@ class WakeWordDetector:
         return scores
 
 
-LEARNED_PERSISTENCE = 3  # learned names need one more confident frame than the professionally trained "Hey Jarvis"
+LEARNED_PERSISTENCE = 4  # learned names need two more confident frames than the professionally trained "Hey Jarvis"
 
 
 def learned_threshold(calibrated: float, sensitivity: float) -> float:

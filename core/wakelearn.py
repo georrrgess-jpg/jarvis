@@ -34,7 +34,7 @@ import numpy as np
 log = logging.getLogger("jarvis.wakelearn")
 
 RATE = 16000
-PERSISTENCE = 3  # consecutive confident 80 ms frames before a learned name counts ("Hey Jarvis" uses 2)
+PERSISTENCE = 4  # consecutive confident 80 ms frames before a learned name counts ("Hey Jarvis" uses 2)
 WINDOW = 16  # embeddings per classifier input (16 x 80 ms = 1.28 s), as openWakeWord
 FORMAT_VERSION = 2
 NEGATIVES_VERSION = 5

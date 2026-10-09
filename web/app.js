@@ -671,6 +671,43 @@
       $('.dc-view', el).onclick = () => call('google_view', ev.doc_kind || 'doc', ev.id || ev.title);
       if (!ev.url) $('.dc-open', el).remove();
     },
+    proposal(p) {
+      $$('.proposal-card:not(.done)').forEach((c) => c.classList.add('done'));
+      const el = this.card('proposal-card', `
+        <div class="mc-row mc-headline"><span class="mail-kicker">NEW PROTOCOL</span><span class="mail-state">AWAITING YOUR APPROVAL</span></div>
+        <div class="pp-head">${icon(p.icon || 'bolt', 'pp-ic')}<div><div class="pp-name"></div><div class="pp-sub"></div></div></div>
+        <ol class="pp-steps">${(p.steps || []).map(() => '<li><span></span><em></em></li>').join('')}</ol>
+        <div class="pp-trig"></div>
+        <div class="mail-actions">
+          <button class="btn primary sm pp-save"><span>SAVE</span></button>
+          <button class="btn ghost sm pp-edit">EDIT</button>
+          <button class="btn ghost sm pp-cancel">CANCEL</button>
+          <span class="mail-note">Nothing is saved until you approve it. You can also just say “yes”.</span>
+        </div>`);
+      $('.pp-name', el).textContent = p.name || 'Untitled';
+      $('.pp-sub', el).textContent = `${(p.category || 'General').toUpperCase()} · ${(p.steps || []).length} STEP${(p.steps || []).length === 1 ? '' : 'S'}`;
+      $$('.pp-steps li', el).forEach((li, i) => {
+        const s = p.steps[i];
+        $('span', li).textContent = s.text;
+        $('em', li).textContent = [s.label, s.condition, s.risk ? 'asks you first' : ''].filter(Boolean).join(' · ');
+        li.classList.toggle('risk', !!s.risk);
+      });
+      const tr = p.triggers || {};
+      const how = [`“run ${p.name}”`, ...(p.phrases || []).map((x) => `“${x}”`)];
+      if (p.schedule && p.schedule.time) how.push(`at ${p.schedule.time}`);
+      if (tr.startup) how.push('when JARVIS starts');
+      if (tr.app) how.push(`when ${tr.app} opens`);
+      if (tr.hotkey) how.push(tr.hotkey);
+      $('.pp-trig', el).textContent = `Start it with: ${how.join(' · ')}`;
+      const finish = (label) => { el.classList.add('done'); $('.mail-state', el).textContent = label; $$('button', el).forEach((b) => { b.disabled = true; }); };
+      $('.pp-save', el).onclick = async () => {
+        const r = await call('protocol_proposal_answer', 'save');
+        if (r && r.ok) { finish('SAVED'); toast(r.message || 'Saved.', 'ok', 3500); }
+        else toast((r && r.message) || 'Could not save it.', 'error');
+      };
+      $('.pp-edit', el).onclick = () => { finish('OPENED IN EDITOR'); call('protocol_proposal_answer', 'edit'); };
+      $('.pp-cancel', el).onclick = () => { finish('CANCELLED'); call('protocol_proposal_answer', 'cancel'); };
+    },
     email(ev) {
       const el = this.card('mail-card', `
         <div class="mc-row mc-headline"><span class="mail-kicker">EMAIL DRAFT</span><span class="mail-state">AWAITING YOUR APPROVAL</span></div>
@@ -1886,55 +1923,123 @@
     },
   };
 
-  // ========================================================================= now playing
+  // ========================================================================= icons used by protocols and the Automation Center
+  const ICON_PATHS = {
+    bolt: '<path d="M13 2.5 5 13.5h6l-1 8 8-11h-6Z"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M2.5 12H5M19 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8"/>',
+    moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/>',
+    game: '<rect x="2.5" y="7" width="19" height="11" rx="4"/><path d="M7.5 10.5v4M5.5 12.5h4"/><circle cx="16" cy="11.5" r="1"/><circle cx="18" cy="13.8" r="1"/>',
+    code: '<path d="m8 7-5 5 5 5M16 7l5 5-5 5M13.5 4.5l-3 15"/>',
+    music: '<path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
+    film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 8h4M3 12h4M3 16h4M17 8h4M17 12h4M17 16h4"/>',
+    focus: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/>',
+    work: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8.5 7V5a1.5 1.5 0 0 1 1.5-1.5h4A1.5 1.5 0 0 1 15.5 5v2M3 12.5h18"/>',
+    home: '<path d="M3.5 11 12 4l8.5 7M6 9.5V20h12V9.5M10 20v-5h4v5"/>',
+    coffee: '<path d="M4 9h13v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5Z"/><path d="M17 10.5h1.5a2.5 2.5 0 0 1 0 5H17M8 3.5v2.5M12 3.5v2.5"/>',
+    rocket: '<path d="M12 2.5c3.5 2.5 5 6.5 4.5 11l-2.5 3h-4l-2.5-3C7 9 8.5 5 12 2.5Z"/><circle cx="12" cy="9.5" r="1.8"/><path d="M8 16.5 5.5 19M16 16.5l2.5 2.5M12 18v3.5"/>',
+    party: '<path d="M4 20 9.5 6.5l8 8Z"/><path d="M14 4.5v.01M19.5 9v.01M17 3l-1 2M21 7l-2 1M13.5 8.5c1-1.5 2.5-2 4-1.5"/>',
+    book: '<path d="M4 4.5h6a2 2 0 0 1 2 2V20a1.5 1.5 0 0 0-1.5-1.5H4ZM20 4.5h-6a2 2 0 0 0-2 2V20a1.5 1.5 0 0 1 1.5-1.5H20Z"/>',
+    heart: '<path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10C19.5 15.4 12 20 12 20Z"/>',
+    shield: '<path d="M12 3 4.5 6v5.5c0 4.5 3.2 8 7.5 9.5 4.3-1.5 7.5-5 7.5-9.5V6Z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/>',
+  };
+  const icon = (name, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON_PATHS[name] || ICON_PATHS.bolt}</svg>`;
+  const STATUS_MARK = { ok: '✓', done: '✓', unverified: '~', failed: '✗', skipped: '⤼', not_run: '–', pending: '○', running: '◌', stopped: '■', waiting: '…', interrupted: '■' };
+  const ago = (ts) => {
+    if (!ts) return '';
+    const s = Math.max(0, Date.now() / 1000 - ts);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+    return new Date(ts * 1000).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+  const clock = (sec) => (sec == null ? '' : `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`);
+
+  // ========================================================================= now playing (strip under the reactor)
   const Media = {
-    now: null,
-    update(ev) { this.set(ev.playing || null); },
+    now: null, sessions: [], status: {}, at: 0,
+    update(ev) {
+      if ('sessions' in ev) this.sessions = ev.sessions || [];
+      if (ev.status) this.status = ev.status;
+      this.at = Date.now();
+      this.set(ev.playing || null);
+      Center.media();
+    },
     set(np) {
       this.now = np;
       const el = $('#media-strip');
       el.classList.toggle('hidden', !np);
       if (!np) return;
-      el.classList.toggle('paused', !np.title || np.playing === false);
-      $('#media-app').textContent = (np.app || 'NOW PLAYING').toUpperCase();
+      el.classList.toggle('paused', !np.title || np.status !== 'playing');
+      $('#media-app').textContent = (np.label || np.app || 'NOW PLAYING').toUpperCase();
       $('#media-title').textContent = np.title ? (np.artist ? `${np.title} · ${np.artist}` : np.title) : 'paused';
-      el.title = np.title ? `${np.title}${np.artist ? ` by ${np.artist}` : ''} (${np.app})` : `${np.app}: nothing playing`;
+      el.title = np.title ? `${np.title}${np.artist ? ` by ${np.artist}` : ''} (${np.label || np.app}, ${np.status}) — click for all players` : `${np.app}: nothing playing`;
+      el.dataset.key = np.key || '';
+      this.tick();
+    },
+    position(s) {
+      if (s.position == null) return null;
+      const extra = s.status === 'playing' ? (Date.now() - this.at) / 1000 : 0;
+      return s.duration ? Math.min(s.duration, s.position + extra) : s.position + extra;
+    },
+    tick() {
+      const np = this.now;
+      const bar = $('#media-progress');
+      if (!np || !np.duration || np.position == null) { bar.style.width = '0'; } else bar.style.width = `${(100 * this.position(np)) / np.duration}%`;
+      Center.progress();
+    },
+    async control(action, key = '') {
+      call('play_sfx', 'click');
+      const r = await call('media_control', action, key);
+      if (r && !r.ok) toast(r.error === 'nothing' ? 'Nothing to control right now.' : `That player didn't respond (${r.error || 'failed'}).`, 'error');
+      else if (r && !r.verified) toast('Sent, but Windows didn\'t confirm the change.', 'info', 2500);
     },
     init() {
-      $$('#media-strip [data-media]').forEach((b) => (b.onclick = async () => {
-        call('play_sfx', 'click');
-        const r = await call('media_control', b.dataset.media);
-        if (r && !r.ok && r.error) toast(r.error, 'error');
-      }));
+      $$('#media-strip [data-media]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); this.control(b.dataset.media, $('#media-strip').dataset.key || ''); }));
+      $('#media-strip').onclick = () => Center.open('media');
+      setInterval(() => this.tick(), 1000);
     },
   };
 
   // ========================================================================= protocols
   const DAY_SHORT = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
   const DAY_LONG = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  const STEP_IDEAS = ['open Spotify', 'play some focus music', 'set the volume to 30', 'what\'s the weather today', 'wait 5 seconds',
-    'say Good morning, sir', 'open Gmail', 'mute', 'lock the computer', 'set a timer for 25 minutes'];
+  const STEP_IDEAS = ['open Discord', 'play some focus music', 'pause everything', 'turn the music down', 'what\'s the weather today',
+    'wait 5 seconds', 'say Good morning, sir', 'switch to Harper', 'set a timer for 25 minutes', 'open github.com'];
+  const COND_TYPES = [['', 'Always'], ['app_running', 'Only if an app is open'], ['app_not_running', 'Only if an app isn\'t open'],
+    ['time', 'Only between times'], ['weekday', 'Only on certain days'], ['previous', 'Only if the previous step…']];
   const Protocols = {
-    el: null, list: [], running: null, recording: null, editing: null, days: [0, 1, 2, 3, 4, 5, 6], deleteArmed: 0,
+    el: null, data: { protocols: [], templates: [], icons: [], categories: [] }, running: null, recording: null, proposal: null,
+    editing: null, steps: [], days: [0, 1, 2, 3, 4, 5, 6], deleteArmed: 0, view: 'mine', filter: 'All', query: '', iconSel: 'bolt',
     set(d) {
       if (!d) return;
-      this.list = d.protocols || [];
+      this.data = { ...this.data, ...d };
       this.running = d.running || null;
       this.recording = d.recording || null;
-      const badge = $('#protocols-badge');
-      badge.textContent = String(this.list.length);
-      badge.classList.toggle('hidden', !this.list.length);
+      const was = this.proposal && this.proposal.stage;
+      this.proposal = d.proposal || null;
+      if (this.proposal && this.proposal.stage === 'approve' && was !== 'approve') Chat.proposal(this.proposal);
+      if (!this.proposal) $$('.proposal-card').forEach((c) => c.classList.add('done'));
+      const n = (this.data.protocols || []).length;
+      $('#protocols-badge').textContent = String(n);
+      $('#protocols-badge').classList.toggle('hidden', !n);
       this.strip();
       if (this.el && !this.el.classList.contains('hidden') && $('#pr-form').classList.contains('hidden')) this.render();
+      Center.run();
     },
     progress(ev) {
-      if (ev.status === 'running' || ev.status === 'step') this.running = { id: ev.id, name: ev.name, index: ev.index, total: ev.total, step: ev.step };
-      else {
+      if (['running', 'step', 'step_done', 'confirm'].includes(ev.status)) {
+        this.running = { ...ev };
+      } else {
         this.running = null;
-        if (ev.status === 'done') toast(`${ev.name} protocol complete.`, 'ok', 3500);
-        else if (ev.status === 'stopped' || ev.status === 'interrupted') toast(`${ev.name} protocol stopped at step ${Math.max(1, (ev.index || 0) + 1)} of ${ev.total}.`, 'info', 4500);
+        if (!ev.ephemeral) {
+          const label = { done: 'complete', failed: 'stopped: a step failed', stopped: 'stopped', interrupted: 'stopped (you took over)' }[ev.status] || ev.status;
+          const bad = (ev.results || []).filter((r) => r.status === 'failed').length;
+          toast(`${ev.name} protocol ${label}${ev.status === 'done' && bad ? ` (${bad} step${bad === 1 ? '' : 's'} failed)` : ''}.`, ev.status === 'done' && !bad ? 'ok' : 'info', 4500);
+        }
+        Center.lastRun = ev;
       }
       this.strip();
+      Center.run();
       if (this.el && !this.el.classList.contains('hidden') && $('#pr-form').classList.contains('hidden')) this.render();
     },
     strip() {
@@ -1942,13 +2047,16 @@
       const r = this.running, rec = this.recording;
       el.classList.toggle('hidden', !r && !rec);
       el.classList.toggle('recording', !r && !!rec);
+      el.classList.toggle('asking', !!(r && r.confirm));
+      $('#protocol-confirm').classList.toggle('hidden', !(r && r.confirm));
       if (r) {
-        $('#protocol-kind').textContent = 'PROTOCOL';
-        $('#protocol-label').textContent = r.name;
+        $('#protocol-kind').textContent = r.ephemeral ? 'RUNNING' : 'PROTOCOL';
+        $('#protocol-label').textContent = r.ephemeral ? 'your request' : r.name;
         const n = Math.max(0, r.index);
-        $('#protocol-progress').textContent = r.index >= 0 ? `${n + 1}/${r.total} · ${r.step || ''}` : 'starting…';
+        $('#protocol-progress').textContent = r.confirm ? `step ${r.confirm.index + 1}: ${r.confirm.text} — go ahead?` : (r.index >= 0 ? `${n + 1}/${r.total} · ${r.step || ''}` : 'starting…');
         $('#protocol-stop').textContent = 'STOP';
-        $('#protocol-bar').style.width = r.total ? `${(100 * (n + (r.index >= 0 ? 0.5 : 0))) / r.total}%` : '0';
+        const done = (r.results || []).filter((x) => !['pending', 'running'].includes(x.status)).length;
+        $('#protocol-bar').style.width = r.total ? `${(100 * done) / r.total}%` : '0';
       } else if (rec) {
         $('#protocol-kind').textContent = 'RECORDING';
         $('#protocol-label').textContent = rec.name || 'new protocol';
@@ -1957,43 +2065,191 @@
         $('#protocol-bar').style.width = '0';
       }
     },
+    renderFilters() {
+      const cats = ['All', ...new Set((this.data.protocols || []).map((p) => p.category))];
+      $('#pr-filters').innerHTML = cats.map((c) => `<button type="button" role="tab" class="${c === this.filter ? 'on' : ''}" data-cat="${esc(c)}">${esc(c.toUpperCase())}</button>`).join('');
+      $$('#pr-filters button').forEach((b) => (b.onclick = () => { this.filter = b.dataset.cat; this.render(); }));
+    },
     render() {
+      $$('.pr-views button').forEach((b) => b.classList.toggle('on', b.dataset.view === this.view));
+      this.renderFilters();
       const list = $('#pr-list');
       list.innerHTML = '';
-      if (!this.list.length) {
-        list.innerHTML = '<div class="mm-empty">No protocols yet. Press <b>NEW PROTOCOL</b>, or say “create a protocol called Morning: open Spotify, then tell me the weather”.</div>';
+      const sug = (this.data.suggestions || [])[0];
+      $('#pr-suggest').classList.toggle('hidden', !sug || this.view !== 'mine');
+      if (sug) {
+        $('#pr-suggest').innerHTML = `<b>IDEA</b><span>You often say “${esc(sug.steps[0])}” and then “${esc(sug.steps[1])}”. Make it one protocol?</span><button class="btn sm" type="button">CREATE</button>`;
+        $('#pr-suggest button').onclick = () => this.edit(null, { steps: sug.steps.map((t) => ({ text: t })) });
+      }
+      if (this.view === 'templates') {
+        (this.data.templates || []).forEach((t) => {
+          const card = document.createElement('div');
+          card.className = 'pr-card template';
+          card.innerHTML = `<div class="pr-card-head">${icon(t.icon, 'pr-ic')}<div><div class="pr-name"></div><div class="pr-cat">${esc((t.category || '').toUpperCase())}</div></div></div>
+            <p class="pr-desc"></p><ol class="pr-steps">${t.steps.slice(0, 5).map(() => '<li></li>').join('')}</ol>
+            <div class="pr-card-foot"><span class="pr-phrase"></span><button class="btn sm primary add" type="button"><span>ADD</span></button></div>`;
+          $('.pr-name', card).textContent = t.name;
+          $('.pr-desc', card).textContent = t.description || '';
+          $$('.pr-steps li', card).forEach((li, i) => (li.textContent = t.steps[i]));
+          $('.pr-phrase', card).textContent = t.phrases && t.phrases[0] ? `“${t.phrases[0]}”` : '';
+          $('.add', card).onclick = async () => {
+            const r = await call('protocol_from_template', t.name);
+            if (r && r.ok) { toast(`Added ${r.protocol.name}. Edit it to pick your own apps.`, 'ok', 4000); this.view = 'mine'; const d = await call('protocol_list'); if (d) this.set(d); this.render(); }
+            else toast((r && r.error) || 'Could not add it.', 'error');
+          };
+          list.append(card);
+        });
         return;
       }
-      this.list.forEach((p) => {
-        const running = this.running && this.running.id === p.id;
-        const row = document.createElement('div');
-        row.className = `pr-item${running ? ' running' : ''}`;
-        const steps = p.steps.slice(0, 8).map((st, i) => `<li class="${running && this.running.index === i ? 'now' : ''}"></li>`).join('');
-        const meta = [`<span>${p.steps.length} step${p.steps.length === 1 ? '' : 's'}</span>`];
-        if (p.when) meta.push(`<span class="sched${p.schedule && p.schedule.enabled === false ? ' off' : ''}">runs ${esc(p.when)}</span>`);
-        if (p.last_run) { const d = new Date(p.last_run * 1000); meta.push(`<span>last run ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} ${fmtTime(d).slice(0, 5)}</span>`); }
-        row.innerHTML = `<div class="pr-main"><div><span class="pr-name"></span><span class="pr-say"></span></div><ol class="pr-steps">${steps}</ol><div class="pr-meta">${meta.join('')}</div></div>
-          <div class="pr-acts"><button class="btn sm primary run"><span>${running ? 'STOP' : 'RUN'}</span></button><button class="btn sm ghost edit">EDIT</button></div>`;
-        $('.pr-name', row).textContent = p.name;
-        $('.pr-say', row).textContent = `“run ${p.name}”`;
-        $$('.pr-steps li', row).forEach((li, i) => (li.textContent = p.steps[i]));
-        if (p.steps.length > 8) { const li = document.createElement('li'); li.textContent = `…and ${p.steps.length - 8} more`; li.style.listStyle = 'none'; $('.pr-steps', row).append(li); }
-        $('.run', row).onclick = async () => {
-          if (running) { call('protocol_stop'); return; }
-          const r = await call('protocol_run', p.id);
-          if (r && !r.ok) toast(r.error || 'Could not run it.', 'error'); else this.close();
-        };
-        $('.edit', row).onclick = () => this.edit(p);
-        $('.pr-name', row).ondblclick = () => this.edit(p);
-        list.append(row);
-      });
+      const q = this.query.trim().toLowerCase();
+      const items = (this.data.protocols || []).filter((p) => (this.filter === 'All' || p.category === this.filter)
+        && (!q || `${p.name} ${p.description} ${(p.phrases || []).join(' ')} ${p.steps.map((s) => s.text).join(' ')}`.toLowerCase().includes(q)));
+      if (!items.length) {
+        list.innerHTML = q || this.filter !== 'All'
+          ? '<div class="mm-empty">No protocols match.</div>'
+          : '<div class="mm-empty">No protocols yet. Press <b>NEW PROTOCOL</b>, pick one from <b>TEMPLATES</b>, or say “create a protocol called Morning: open Spotify, then tell me the weather”.</div>';
+        return;
+      }
+      items.forEach((p) => list.append(this.card(p)));
     },
-    count() {
-      const n = $('#pr-steps').value.split('\n').filter((l) => l.trim()).length;
-      $('#pr-count').textContent = `${n} step${n === 1 ? '' : 's'}`;
+    card(p) {
+      const running = this.running && this.running.id === p.id;
+      const last = (p.history || [])[p.history.length - 1];
+      const card = document.createElement('div');
+      card.className = `pr-card${running ? ' running' : ''}${p.enabled ? '' : ' off'}`;
+      const badges = [];
+      if (p.when) badges.push(`<span class="sched">⏰ ${esc(p.when)}</span>`);
+      if (p.triggers && p.triggers.startup) badges.push('<span>at start-up</span>');
+      if (p.triggers && p.triggers.app) badges.push(`<span>when ${esc(p.triggers.app)} opens</span>`);
+      if (p.triggers && p.triggers.hotkey) badges.push(`<span class="kbd">${esc(p.triggers.hotkey)}</span>`);
+      if (p.steps.some((s) => s.risk)) badges.push('<span class="warn" title="Some steps ask you before running">asks first</span>');
+      if (!p.enabled) badges.push('<span>off</span>');
+      const result = last ? `<span class="pr-last ${last.status}" title="${esc(new Date(last.at * 1000).toLocaleString())}">${STATUS_MARK[last.status === 'done' ? (last.steps.some((s) => s.status === 'failed') ? 'unverified' : 'ok') : 'failed'] || '•'} ${esc(last.status)} · ${ago(last.at)}</span>` : '<span class="pr-last never">never run</span>';
+      card.innerHTML = `<div class="pr-card-head">${icon(p.icon, 'pr-ic')}<div class="pr-head-text"><div class="pr-name"></div><div class="pr-cat">${esc((p.category || '').toUpperCase())} · ${p.steps.length} STEP${p.steps.length === 1 ? '' : 'S'}</div></div>${result}</div>
+        <p class="pr-desc"></p>
+        <ol class="pr-steps">${p.steps.slice(0, 6).map(() => '<li><span class="t"></span><em></em></li>').join('')}</ol>
+        <div class="pr-badges">${badges.join('')}</div>
+        <div class="pr-card-foot"><span class="pr-phrase"></span>
+          <button class="btn sm ghost hist" type="button" title="Last runs">HISTORY</button>
+          <button class="btn sm ghost edit" type="button">EDIT</button>
+          <button class="btn sm primary run" type="button"><span>${running ? 'STOP' : 'RUN'}</span></button></div>
+        <div class="pr-history hidden"></div>`;
+      $('.pr-name', card).textContent = p.name;
+      $('.pr-desc', card).textContent = p.description || '';
+      $$('.pr-steps li', card).forEach((li, i) => {
+        const s = p.steps[i];
+        $('.t', li).textContent = s.text;
+        $('em', li).textContent = [s.condition, s.risk ? 'asks first' : '', s.fallback ? `else ${s.fallback}` : ''].filter(Boolean).join(' · ');
+        li.classList.toggle('now', !!(running && this.running.index === i));
+        li.classList.toggle('disabled', s.enabled === false);
+      });
+      if (p.steps.length > 6) { const li = document.createElement('li'); li.className = 'more'; li.textContent = `…and ${p.steps.length - 6} more`; $('.pr-steps', card).append(li); }
+      $('.pr-phrase', card).textContent = `“run ${p.name}”${p.phrases && p.phrases.length ? ` · “${p.phrases[0]}”` : ''}`;
+      $('.run', card).onclick = async () => {
+        if (running) { call('protocol_stop'); return; }
+        const r = await call('protocol_run', p.id);
+        if (r && !r.ok) toast(r.error || 'Could not run it.', 'error'); else this.close();
+      };
+      $('.edit', card).onclick = () => this.edit(p);
+      $('.pr-name', card).ondblclick = () => this.edit(p);
+      $('.hist', card).onclick = () => {
+        const box = $('.pr-history', card);
+        if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+        box.innerHTML = (p.history || []).slice().reverse().slice(0, 5).map((h) => `<div class="pr-run"><b class="${esc(h.status)}">${esc(h.status.toUpperCase())}</b><span>${esc(new Date(h.at * 1000).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }))} · ${esc(h.trigger || '')} · ${h.seconds || 0}s</span>
+          <ol>${(h.steps || []).map((s) => `<li class="${esc(s.status)}"><i>${STATUS_MARK[s.status] || '•'}</i>${esc(s.text)}${s.detail && s.status !== 'ok' ? ` <em>${esc(s.detail)}</em>` : ''}</li>`).join('')}</ol></div>`).join('') || '<div class="mm-empty">Not run yet.</div>';
+        box.classList.remove('hidden');
+      };
+      return card;
+    },
+    // -- the editor
+    stepRow(s, i) {
+      const li = document.createElement('li');
+      li.className = 'pr-step';
+      const cond = s.when || {};
+      li.innerHTML = `<div class="pr-step-main"><span class="n">${i + 1}</span><input class="st-text" type="text" maxlength="300" aria-label="Step ${i + 1}">
+          <span class="st-label"></span>
+          <button type="button" class="mm-btn up" title="Move up" aria-label="Move up">↑</button><button type="button" class="mm-btn down" title="Move down" aria-label="Move down">↓</button>
+          <button type="button" class="mm-btn opts" title="Options" aria-label="Step options" aria-expanded="false">⚙</button><button type="button" class="mm-btn del" title="Remove" aria-label="Remove step">×</button></div>
+        <div class="pr-step-opts hidden">
+          <label>Run <select class="st-cond">${COND_TYPES.map(([v, l]) => `<option value="${v}"${(cond.type || '') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+          <input class="st-app" type="text" placeholder="app, e.g. Spotify" value="">
+          <span class="st-time"><input class="st-after" type="time"> to <input class="st-before" type="time"></span>
+          <span class="st-wd"></span>
+          <select class="st-prev"><option value="1">worked</option><option value="0">failed</option></select>
+          <label class="chk"><input type="checkbox" class="st-confirm"> Ask me first</label>
+          <label class="chk st-approve-l"><input type="checkbox" class="st-approved"> Don't ask (I trust it)</label>
+          <label>If it fails <select class="st-coe"><option value="">protocol default</option><option value="0">stop</option><option value="1">carry on</option></select></label>
+          <label>Retries <select class="st-retries"><option>0</option><option>1</option><option>2</option><option>3</option></select></label>
+          <label>Time limit <input class="st-timeout" type="number" min="1" max="600" step="1"> s</label>
+          <label class="grow">Otherwise try <input class="st-fallback" type="text" maxlength="300" placeholder="e.g. open YouTube"></label>
+          <label class="chk"><input type="checkbox" class="st-enabled"> On</label>
+        </div>`;
+      $('.st-text', li).value = s.text || '';
+      $('.st-label', li).textContent = s.label ? `${s.label}${s.risk ? ' · asks first' : ''}` : '';
+      $('.st-label', li).classList.toggle('risk', !!s.risk);
+      $('.st-app', li).value = cond.app || '';
+      $('.st-after', li).value = cond.after || '';
+      $('.st-before', li).value = cond.before || '';
+      $('.st-prev', li).value = cond.ok === false ? '0' : '1';
+      $('.st-confirm', li).checked = !!s.confirm;
+      $('.st-approved', li).checked = !!s.approved;
+      $('.st-approve-l', li).classList.toggle('hidden', !s.risk);
+      $('.st-coe', li).value = s.continue_on_error == null ? '' : (s.continue_on_error ? '1' : '0');
+      $('.st-retries', li).value = String(s.retries || 0);
+      $('.st-timeout', li).value = s.timeout || 90;
+      $('.st-fallback', li).value = s.fallback || '';
+      $('.st-enabled', li).checked = s.enabled !== false;
+      const days = cond.days || [];
+      $('.st-wd', li).innerHTML = DAY_SHORT.map((d, k) => `<label title="${DAY_LONG[k]}"><input type="checkbox" value="${k}"${days.includes(k) ? ' checked' : ''}>${d}</label>`).join('');
+      const showCond = () => {
+        const t = $('.st-cond', li).value;
+        $('.st-app', li).classList.toggle('hidden', !t.startsWith('app'));
+        $('.st-time', li).classList.toggle('hidden', t !== 'time');
+        $('.st-wd', li).classList.toggle('hidden', t !== 'weekday');
+        $('.st-prev', li).classList.toggle('hidden', t !== 'previous');
+      };
+      $('.st-cond', li).onchange = showCond;
+      showCond();
+      $('.opts', li).onclick = () => { const o = $('.pr-step-opts', li); o.classList.toggle('hidden'); $('.opts', li).setAttribute('aria-expanded', String(!o.classList.contains('hidden'))); };
+      if (s.when && s.when.type || s.confirm || s.fallback || s.retries || s.continue_on_error != null) $('.opts', li).classList.add('set');
+      $('.del', li).onclick = () => { this.readSteps(); this.steps.splice(i, 1); this.renderSteps(); };
+      $('.up', li).onclick = () => { this.readSteps(); if (i > 0) { [this.steps[i - 1], this.steps[i]] = [this.steps[i], this.steps[i - 1]]; this.renderSteps(); } };
+      $('.down', li).onclick = () => { this.readSteps(); if (i < this.steps.length - 1) { [this.steps[i + 1], this.steps[i]] = [this.steps[i], this.steps[i + 1]]; this.renderSteps(); } };
+      return li;
+    },
+    readSteps() {
+      this.steps = $$('#pr-steps-ed .pr-step').map((li, i) => {
+        const prev = this.steps[i] || {};
+        const t = $('.st-cond', li).value;
+        let when = {};
+        if (t === 'app_running' || t === 'app_not_running') when = $('.st-app', li).value.trim() ? { type: t, app: $('.st-app', li).value.trim() } : {};
+        else if (t === 'time') when = { type: 'time', ...($('.st-after', li).value ? { after: $('.st-after', li).value } : {}), ...($('.st-before', li).value ? { before: $('.st-before', li).value } : {}) };
+        else if (t === 'weekday') when = { type: 'weekday', days: $$('.st-wd input:checked', li).map((x) => Number(x.value)) };
+        else if (t === 'previous') when = { type: 'previous', ok: $('.st-prev', li).value === '1' };
+        const coe = $('.st-coe', li).value;
+        return { ...prev, text: $('.st-text', li).value.trim(), when, confirm: $('.st-confirm', li).checked, approved: $('.st-approved', li).checked,
+          continue_on_error: coe === '' ? null : coe === '1', retries: Number($('.st-retries', li).value) || 0,
+          timeout: Number($('.st-timeout', li).value) || 90, fallback: $('.st-fallback', li).value.trim(), enabled: $('.st-enabled', li).checked };
+      }).filter((s) => s.text);
+    },
+    renderSteps() {
+      const ol = $('#pr-steps-ed');
+      ol.innerHTML = '';
+      this.steps.forEach((s, i) => ol.append(this.stepRow(s, i)));
+      if (!this.steps.length) ol.innerHTML = '<li class="mm-empty">No steps yet. Add one below, e.g. “open Discord”.</li>';
+      $('#pr-count').textContent = `${this.steps.length} step${this.steps.length === 1 ? '' : 's'}`;
+    },
+    addStep(text) {
+      text = (text || '').trim();
+      if (!text) return;
+      this.readSteps();
+      this.steps.push({ text });
+      this.renderSteps();
+      $('#pr-add-step').value = '';
+      $('#pr-add-step').focus();
     },
     renderDays() {
-      $('#pr-days').innerHTML = DAY_SHORT.map((d, i) => `<button type="button" data-d="${i}" class="${this.days.includes(i) ? 'on' : ''}" title="${DAY_LONG[i]}">${d}</button>`).join('');
+      $('#pr-days').innerHTML = DAY_SHORT.map((d, i) => `<button type="button" data-d="${i}" class="${this.days.includes(i) ? 'on' : ''}" title="${DAY_LONG[i]}" aria-pressed="${this.days.includes(i)}">${d}</button>`).join('');
       $$('#pr-days button').forEach((b) => (b.onclick = () => {
         const d = Number(b.dataset.d);
         this.days = this.days.includes(d) ? this.days.filter((x) => x !== d) : [...this.days, d].sort();
@@ -2001,40 +2257,66 @@
         this.renderDays();
       }));
     },
+    renderIcons() {
+      $('#pr-icon-pick').innerHTML = (this.data.icons || Object.keys(ICON_PATHS)).map((n) => `<button type="button" role="radio" aria-checked="${n === this.iconSel}" class="${n === this.iconSel ? 'on' : ''}" data-icon="${n}" title="${n}">${icon(n)}</button>`).join('');
+      $$('#pr-icon-pick button').forEach((b) => (b.onclick = () => { this.iconSel = b.dataset.icon; this.renderIcons(); }));
+    },
     schedOn(on) { $('#pr-sched-on').checked = on; $('.pr-sched').classList.toggle('off', !on); },
-    edit(p = null) {
+    edit(p = null, preset = null) {
       this.editing = p;
+      const src = p || preset || {};
       $('#pr-browse').classList.add('hidden');
       $('#pr-form').classList.remove('hidden');
       $('#pr-title').textContent = p ? `Edit ${p.name}` : 'New protocol';
       $('#pr-kicker').textContent = p ? 'PROTOCOLS · EDIT' : 'PROTOCOLS · NEW';
-      $('#pr-name').value = p ? p.name : '';
-      $('#pr-steps').value = p ? p.steps.join('\n') : '';
-      $('#pr-error').textContent = '';
-      const sch = (p && p.schedule) || {};
+      $('#pr-name').value = src.name || '';
+      $('#pr-name-echo').textContent = src.name || '…';
+      $('#pr-desc').value = src.description || '';
+      $('#pr-category').innerHTML = (this.data.categories || ['General']).map((c) => `<option${c === (src.category || 'General') ? ' selected' : ''}>${esc(c)}</option>`).join('');
+      this.iconSel = src.icon || 'bolt';
+      this.renderIcons();
+      this.steps = (src.steps || []).map((s) => (typeof s === 'string' ? { text: s } : { ...s }));
+      this.renderSteps();
+      $('#pr-phrases').value = (src.phrases || []).join(', ');
+      const sch = src.schedule || {};
       this.schedOn(!!sch.time && sch.enabled !== false);
       $('#pr-time').value = sch.time || '07:30';
       this.days = (sch.days && sch.days.length) ? sch.days.slice() : [0, 1, 2, 3, 4, 5, 6];
       this.renderDays();
+      const tr = src.triggers || {};
+      $('#pr-startup').checked = !!tr.startup;
+      $('#pr-app').value = tr.app || '';
+      $('#pr-hotkey').value = tr.hotkey || '';
+      $('#pr-policy').value = src.on_failure || 'stop';
+      $('#pr-enabled').checked = src.enabled !== false;
+      $('#pr-error').textContent = '';
       $('#pr-delete').classList.toggle('hidden', !p);
       this.disarm();
-      this.count();
-      setTimeout(() => (p ? $('#pr-steps') : $('#pr-name')).focus(), 50);
+      setTimeout(() => (p ? $('#pr-add-step') : $('#pr-name')).focus(), 50);
     },
     back() {
       this.editing = null;
       $('#pr-form').classList.add('hidden');
       $('#pr-browse').classList.remove('hidden');
       $('#pr-title').textContent = 'Protocols';
-      $('#pr-kicker').textContent = 'PROTOCOLS · YOUR COMMAND SEQUENCES';
+      $('#pr-kicker').textContent = 'PROTOCOLS · YOUR AUTOMATIONS';
       this.render();
     },
-    async save(run = false) {
-      const data = { name: $('#pr-name').value.trim(), steps: $('#pr-steps').value };
+    collect() {
+      this.readSteps();
+      if ($('#pr-add-step').value.trim()) { this.steps.push({ text: $('#pr-add-step').value.trim() }); $('#pr-add-step').value = ''; }
+      const data = { name: $('#pr-name').value.trim(), steps: this.steps.map(({ label, kind, risk, condition, ...s }) => s), description: $('#pr-desc').value.trim(),
+        icon: this.iconSel, category: $('#pr-category').value, phrases: $('#pr-phrases').value.split(',').map((x) => x.trim()).filter(Boolean),
+        on_failure: $('#pr-policy').value, enabled: $('#pr-enabled').checked,
+        triggers: { startup: $('#pr-startup').checked, app: $('#pr-app').value.trim(), hotkey: $('#pr-hotkey').value.trim() },
+        schedule: $('#pr-sched-on').checked ? { time: $('#pr-time').value || '07:30', days: this.days, enabled: true } : {} };
       if (this.editing) data.id = this.editing.id;
-      data.schedule = $('#pr-sched-on').checked ? { time: $('#pr-time').value || '07:30', days: this.days, enabled: true } : {};
+      return data;
+    },
+    async save(run = false) {
+      const data = this.collect();
       const r = await call('protocol_save', data);
-      if (!r || !r.ok) { $('#pr-error').textContent = (r && r.error) || 'Could not save it.'; $('#pr-error').className = 'field-note warn'; return; }
+      if (!r || !r.ok) { $('#pr-error').textContent = (r && r.error) || 'Could not save it.'; $('#pr-error').className = 'field-note warn'; this.renderSteps(); return; }
       toast(`Protocol ${r.protocol.name} saved.`, 'ok', 2500);
       if (run) {
         const go = await call('protocol_run', r.protocol.id);
@@ -2063,12 +2345,12 @@
       if (fresh) this.set(fresh);
       this.back();
     },
-    async open(create = false) {
+    async open(create = false, preset = null) {
       this.el.classList.remove('hidden');
       call('play_sfx', 'click');
       const d = await call('protocol_list');
       if (d) this.set(d);
-      if (create) this.edit(null); else this.back();
+      if (create || preset) this.edit(null, preset); else this.back();
     },
     close() { this.el.classList.add('hidden'); this.disarm(); },
     init() {
@@ -2081,21 +2363,168 @@
       $('#pr-form').onsubmit = (e) => { e.preventDefault(); this.save(false); };
       $('#pr-save-run').onclick = () => this.save(true);
       $('#pr-delete').onclick = () => this.remove();
-      $('#pr-steps').oninput = () => this.count();
+      $('#pr-search').oninput = (e) => { this.query = e.target.value; this.render(); };
+      $$('.pr-views button').forEach((b) => (b.onclick = () => { this.view = b.dataset.view; this.render(); }));
+      $('#pr-name').oninput = (e) => ($('#pr-name-echo').textContent = e.target.value || '…');
+      $('#pr-add-btn').onclick = () => this.addStep($('#pr-add-step').value);
+      $('#pr-add-step').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); this.addStep(e.target.value); } };
       $('#pr-sched-on').onchange = (e) => this.schedOn(e.target.checked);
-      $('#pr-ideas').innerHTML = '<span>IDEAS:</span>' + STEP_IDEAS.map((i) => `<button type="button"></button>`).join('');
-      $$('#pr-ideas button').forEach((b, i) => {
-        b.textContent = STEP_IDEAS[i];
-        b.onclick = () => {
-          const ta = $('#pr-steps');
-          ta.value = (ta.value.trim() ? ta.value.replace(/\s*$/, '\n') : '') + STEP_IDEAS[i];
-          this.count(); ta.focus();
-        };
-      });
+      $('#pr-hotkey').onkeydown = (e) => {
+        e.preventDefault();
+        if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Escape') { e.target.value = ''; return; }
+        const mods = [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Win'].filter(Boolean);
+        const key = /^[a-z0-9]$/i.test(e.key) ? e.key.toUpperCase() : (/^F([1-9]|1[0-2])$/.test(e.key) ? e.key : '');
+        if (key && mods.some((m) => m !== 'Shift')) e.target.value = [...mods, key].join('+');
+      };
+      $('#pr-ideas').innerHTML = '<span>IDEAS:</span>' + STEP_IDEAS.map(() => '<button type="button"></button>').join('');
+      $$('#pr-ideas button').forEach((b, i) => { b.textContent = STEP_IDEAS[i]; b.onclick = () => this.addStep(STEP_IDEAS[i]); });
       $('#protocol-stop').onclick = () => {
         if (this.running) call('protocol_stop');
         else if (this.recording) call('send_text', 'cancel');
       };
+      $('#protocol-yes').onclick = () => call('protocol_answer', true);
+      $('#protocol-no').onclick = () => call('protocol_answer', false);
+      $('#protocol-strip').addEventListener('click', (e) => { if (!e.target.closest('button')) Center.open('run'); });
+    },
+  };
+
+  // ========================================================================= media & automation center
+  const Center = {
+    el: null, items: [], health: null, browser: null, lastRun: null, kind: 'all', query: '', unseen: 0,
+    open(focus = '') {
+      this.el.classList.remove('hidden');
+      call('play_sfx', 'click');
+      this.unseen = 0; this.badge();
+      this.refresh();
+      if (focus) setTimeout(() => { const p = $(`.ac-${focus}`, this.el); if (p) p.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 60);
+    },
+    close() { this.el.classList.add('hidden'); },
+    shown() { return this.el && !this.el.classList.contains('hidden'); },
+    async refresh() {
+      const [act, br] = await Promise.all([call('activity_list'), call('browser_status')]);
+      if (act) { this.items = act.items || []; this.health = act.health || null; }
+      if (br) this.browser = br;
+      this.media(); this.browserPanel(); this.run(); this.healthPanel(); this.log();
+    },
+    add(item) {
+      this.items.push(item);
+      if (this.items.length > 150) this.items.shift();
+      if (!this.shown() && item.kind !== 'command' && item.status === 'failed') { this.unseen++; this.badge(); }
+      if (this.shown()) this.log();
+    },
+    badge() { const b = $('#center-badge'); b.textContent = String(this.unseen); b.classList.toggle('hidden', !this.unseen); },
+    media() {
+      if (!this.el) return;
+      const box = $('#ac-sessions');
+      const st = Media.status || {};
+      $('#ac-media-src').textContent = st.sessions ? 'Windows media sessions' : (st.keys ? 'media keys + window titles' : '');
+      const list = Media.sessions || [];
+      if (!list.length) { box.innerHTML = '<div class="mm-empty">Nothing is playing. Say “play some jazz” or “resume what I was listening to”.</div>'; return; }
+      box.innerHTML = '';
+      list.forEach((s) => {
+        const row = document.createElement('div');
+        row.className = `ac-session ${s.status}`;
+        row.dataset.key = s.key;
+        const can = new Set(s.can || []);
+        row.innerHTML = `<div class="ac-s-main"><b class="ac-s-app"></b><div class="ac-s-title"></div><div class="ac-s-sub"></div>
+            <div class="ac-s-bar"><i></i></div></div>
+          <div class="ac-s-ctl">
+            <button type="button" class="mm-btn" data-a="previous" title="Previous" ${can.has('previous') || s.source === 'window' ? '' : 'disabled'}>⏮</button>
+            <button type="button" class="mm-btn big" data-a="toggle" title="${s.status === 'playing' ? 'Pause' : 'Play'}">${s.status === 'playing' ? '⏸' : '▶'}</button>
+            <button type="button" class="mm-btn" data-a="next" title="Next" ${can.has('next') || s.source === 'window' ? '' : 'disabled'}>⏭</button>
+          </div>
+          ${s.volume != null ? '<label class="ac-s-vol" title="This app\'s own volume">🔊<input type="range" min="0" max="100" step="1"></label>' : ''}`;
+        $('.ac-s-app', row).textContent = `${(s.label || s.app).toUpperCase()} · ${s.status.toUpperCase()}${s.muted ? ' · MUTED' : ''}`;
+        $('.ac-s-title', row).textContent = s.title || '(no title)';
+        $('.ac-s-sub', row).textContent = [s.artist, s.duration ? `${clock(Media.position(s))} / ${clock(s.duration)}` : ''].filter(Boolean).join(' · ');
+        $$('[data-a]', row).forEach((b) => (b.onclick = () => Media.control(b.dataset.a, s.key)));
+        const vol = $('.ac-s-vol input', row);
+        if (vol) { vol.value = Math.round((s.volume || 0) * 100); vol.onchange = () => call('media_volume', s.key, Number(vol.value) / 100); }
+        box.append(row);
+      });
+      this.progress();
+    },
+    progress() {
+      if (!this.shown()) return;
+      $$('#ac-sessions .ac-session').forEach((row) => {
+        const s = (Media.sessions || []).find((x) => x.key === row.dataset.key);
+        if (!s) return;
+        const pos = Media.position(s);
+        $('.ac-s-bar i', row).style.width = s.duration && pos != null ? `${(100 * pos) / s.duration}%` : '0';
+        $('.ac-s-sub', row).textContent = [s.artist, s.duration ? `${clock(pos)} / ${clock(s.duration)}` : ''].filter(Boolean).join(' · ');
+      });
+    },
+    browserPanel() {
+      if (!this.el) return;
+      const b = this.browser;
+      const box = $('#ac-browser');
+      if (!b) { box.innerHTML = '<div class="mm-empty">—</div>'; return; }
+      const names = { NOT_RUNNING: 'not running', READY: 'ready', PAGE_READY: 'page loaded', PAGE_LOADING: 'loading', AUTHENTICATION_REQUIRED: 'needs you to sign in',
+        PROFILE_SELECTION: 'asking which profile', FIRST_RUN_SETUP: 'first-run setup', CONSENT_REQUIRED: 'cookie consent', OFFLINE: 'offline', ERROR: 'error page',
+        LAUNCHING: 'starting', NAVIGATING: 'navigating' };
+      const bad = ['AUTHENTICATION_REQUIRED', 'PROFILE_SELECTION', 'FIRST_RUN_SETUP', 'CONSENT_REQUIRED', 'OFFLINE', 'ERROR'].includes(b.state);
+      box.innerHTML = `<div class="ac-b-state ${bad ? 'bad' : b.state === 'NOT_RUNNING' ? 'off' : 'ok'}"><b></b><span></span></div>
+        <div class="ac-b-tab"></div><div class="ac-b-url"></div>
+        ${b.waiting ? '<div class="ac-b-wait"></div>' : ''}
+        <label class="ac-b-prof">Profile <select></select></label>
+        <div class="ac-b-note"></div>`;
+      $('.ac-b-state b', box).textContent = (b.browser || 'Browser').toUpperCase();
+      $('.ac-b-state span', box).textContent = names[b.state] || b.state.toLowerCase();
+      $('.ac-b-tab', box).textContent = b.title || '';
+      $('.ac-b-url', box).textContent = b.url || '';
+      if (b.waiting) $('.ac-b-wait', box).textContent = `Waiting for you: ${b.waiting.label} (${b.waiting.why}). I'll carry on by myself once it's done.`;
+      const sel = $('.ac-b-prof select', box);
+      const profs = b.profiles || [];
+      sel.innerHTML = `<option value="auto">Automatic${b.profile ? ` (${esc(b.profile.name)}${b.profile.email ? ' · ' + esc(b.profile.email) : ''})` : ''}</option>` +
+        profs.map((p) => `<option value="${esc(p.directory)}">${esc(p.name)}${p.email ? ' · ' + esc(p.email) : ''}</option>`).join('');
+      sel.value = (S.settings && S.settings.browser_profile) || 'auto';
+      if (sel.value === '') sel.value = 'auto';
+      sel.onchange = async () => { const r = await call('browser_set_profile', sel.value); if (r) { this.browser = r; S.settings.browser_profile = sel.value; this.browserPanel(); } };
+      $('.ac-b-prof', box).classList.toggle('hidden', !profs.length);
+      $('.ac-b-note', box).textContent = b.address_bar ? 'Reading the address bar to confirm pages loaded.' : 'Confirming pages from window titles.';
+    },
+    run() {
+      if (!this.el) return;
+      const r = Protocols.running || this.lastRun;
+      const box = $('#ac-timeline');
+      if (!r) { $('#ac-run-name').textContent = ''; box.innerHTML = '<div class="mm-empty">No automation running. Say “run Morning”, or try two things at once: “pause the music and switch to Harper”.</div>'; return; }
+      const live = !!Protocols.running;
+      $('#ac-run-name').textContent = `${r.ephemeral ? 'your request' : r.name}${live ? ' · running' : ` · ${r.status || ''}`}`;
+      const results = r.results || (r.steps || []).map((t) => ({ text: t, status: 'pending' }));
+      box.innerHTML = results.map((x, i) => `<div class="ac-step ${esc(x.status)}"><i>${STATUS_MARK[x.status] || '•'}</i><div><b>${i + 1}. ${esc(x.text)}</b>${x.detail && x.status !== 'ok' ? `<em>${esc(x.detail)}</em>` : ''}</div>${x.seconds != null ? `<span>${x.seconds}s</span>` : ''}</div>`).join('')
+        + (live && r.confirm ? `<div class="ac-confirm"><span>Step ${r.confirm.index + 1} ${esc(r.confirm.why ? `${r.confirm.why}.` : 'needs your OK.')} Go ahead?</span><button class="btn sm primary" data-yes="1"><span>GO AHEAD</span></button><button class="btn sm ghost" data-yes="0">SKIP</button></div>` : '')
+        + (live ? '<button class="btn sm ghost danger ac-stop" type="button">STOP</button>' : '');
+      $$('[data-yes]', box).forEach((b) => (b.onclick = () => call('protocol_answer', b.dataset.yes === '1')));
+      const stop = $('.ac-stop', box);
+      if (stop) stop.onclick = () => call('protocol_stop');
+    },
+    healthPanel() {
+      if (!this.el) return;
+      const h = this.health;
+      const box = $('#ac-health');
+      if (!h) { box.innerHTML = ''; return; }
+      const rows = [['Neural core', h.neural_core, h.model || 'offline'], ['Voice', h.voice, ''], ['Microphone', h.microphone, ''], ['Wake word', h.wake_word, ''],
+        ['Media sessions', h.media_sessions, h.media_sessions ? 'verified control' : 'media keys only'], ['App volumes', h.app_volumes, h.app_volumes ? '' : ((h.helper_errors || {}).audio || 'unavailable')],
+        ['Address bar', h.address_bar, ''], ['Screen reading', h.ocr, ''], ['Google link', h.google, ''], ['Internet tools', h.internet, '']];
+      box.innerHTML = rows.map(([k, ok, note]) => `<div class="ac-h ${ok ? 'ok' : 'bad'}" title="${esc(note || '')}"><i></i><b>${esc(k)}</b><span>${esc(ok ? (note && note !== 'offline' ? note : 'OK') : (note ? String(note).slice(0, 40) : 'off'))}</span></div>`).join('');
+    },
+    log() {
+      if (!this.el) return;
+      const kinds = ['all', 'command', 'media', 'browser', 'app', 'protocol'];
+      $('#ac-log-kinds').innerHTML = kinds.map((k) => `<button type="button" class="${k === this.kind ? 'on' : ''}" data-k="${k}">${k.toUpperCase()}</button>`).join('');
+      $$('#ac-log-kinds button').forEach((b) => (b.onclick = () => { this.kind = b.dataset.k; this.log(); }));
+      const q = this.query.trim().toLowerCase();
+      const items = this.items.filter((a) => (this.kind === 'all' || a.kind === this.kind) && (!q || `${a.text} ${a.detail}`.toLowerCase().includes(q))).slice(-80).reverse();
+      $('#ac-log').innerHTML = items.length ? items.map((a) => `<li class="${esc(a.status)} k-${esc(a.kind)}"><i title="${esc(a.status)}">${a.kind === 'command' ? '›' : (STATUS_MARK[a.status] || '•')}</i><b></b><span>${esc(fmtTime(new Date(a.at * 1000)).slice(0, 5))}</span><em></em></li>`).join('') : '<li class="mm-empty">Nothing yet.</li>';
+      $$('#ac-log li', this.el).forEach((li, i) => { if (!items[i]) return; $('b', li).textContent = items[i].text; $('em', li).textContent = items[i].detail || ''; });
+    },
+    init() {
+      this.el = $('#center');
+      $('#btn-center').onclick = () => (this.shown() ? this.close() : this.open());
+      $('#ac-close').onclick = () => this.close();
+      this.el.addEventListener('click', (e) => { if (e.target === this.el) this.close(); });
+      $('#ac-log-search').oninput = (e) => { this.query = e.target.value; this.log(); };
+      setInterval(() => { if (this.shown()) { call('activity_list').then((a) => { if (a) { this.health = a.health; this.healthPanel(); } }); } }, 8000);
     },
   };
 
@@ -2159,6 +2588,9 @@
       case 'protocols': Protocols.set(ev); break;
       case 'protocol': Protocols.progress(ev); break;
       case 'media': Media.update(ev); break;
+      case 'activity_log': Center.add(ev.item); break;
+      case 'browser': { const { type, ...b } = ev; Center.browser = { ...(Center.browser || {}), ...b }; Center.browserPanel(); break; }
+      case 'protocol_edit': Protocols.open(false, ev.protocol); break;
       default: break;
     }
   }
@@ -2309,12 +2741,13 @@
     const typing = () => /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
     window.addEventListener('keydown', (e) => {
       if (!S.booted) return;
-      const modalOpen = ['#reader', '#google', '#memory', '#personas', '#persona-edit', '#wake-teach', '#protocols'].some((id) => !$(id).classList.contains('hidden'));
+      const modalOpen = ['#reader', '#google', '#memory', '#personas', '#persona-edit', '#wake-teach', '#protocols', '#center'].some((id) => !$(id).classList.contains('hidden'));
       if (e.code === 'Space' && !typing() && !modalOpen) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
         if (!$('#persona-edit').classList.contains('hidden')) PersonaEditor.close();
         else if (!$('#wake-teach').classList.contains('hidden')) WakeTeach.close();
         else if (!$('#memory').classList.contains('hidden')) MemoryCore.close();
+        else if (Center.shown()) Center.close();
         else if (!$('#protocols').classList.contains('hidden')) { if (!$('#pr-form').classList.contains('hidden')) Protocols.back(); else Protocols.close(); }
         else if (!$('#personas').classList.contains('hidden')) Personas.close();
         else if (!$('#reader').classList.contains('hidden')) Reader.close();
@@ -2330,6 +2763,7 @@
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); Settings.toggle(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); MemoryCore.el.classList.contains('hidden') ? MemoryCore.open() : MemoryCore.close(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'r') { e.preventDefault(); Protocols.el.classList.contains('hidden') ? Protocols.open() : Protocols.close(); }
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); Center.shown() ? Center.close() : Center.open(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); Personas.el.classList.contains('hidden') ? Personas.open() : Personas.close(); }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); call('vision_look', ''); }
     });
@@ -2347,6 +2781,7 @@
     MemoryCore.init();
     Protocols.init();
     Media.init();
+    Center.init();
     bindControls();
     Hud.clock();
     setInterval(() => Hud.clock(), 1000);
@@ -2389,6 +2824,7 @@
     if (p.memory) MemoryCore.stats(p.memory);
     if (p.protocols) Protocols.set(p.protocols);
     if (p.media) Media.set(p.media);
+    if (p.activity) Center.items = p.activity.slice();
     Telemetry.start();
 
     call('play_sfx', 'boot');

@@ -230,6 +230,15 @@ def test_seeking(media_env):
     assert assistant.desktop.pressed[-3:] == [(ord("J"),)] * 3
 
 
+def test_a_seek_the_player_ignores_is_not_claimed(media_env):
+    """Seen on real Windows: Chrome accepts the request for a plain page but the position never moves."""
+    assistant, events, keys, opened, helper = media_env
+    helper.add("Chrome", "Podcast episode", position=30.0, ignore=True)
+    reply = ask(assistant, events, "skip forward 20 seconds")
+    assert reply == "I asked Chrome to jump to 0:50, sir, but it didn't confirm the change."
+    assert assistant._activities[-1]["status"] == "unverified"
+
+
 def test_youtube_shortcuts(media_env):
     assistant, events, keys, opened, helper = media_env
     assistant.desktop.list = [Window(1, "Lecture - YouTube - Google Chrome", "chrome.exe")]

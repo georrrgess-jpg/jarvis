@@ -134,12 +134,49 @@ window.createJarvisMock = function createJarvisMock() {
     'Here is a quick example:\n```python\nprint("Hello from J.A.R.V.I.S.")\n```\nShall I explain it further?',
   ];
 
+  const step = (text, extra = {}) => ({ text, when: {}, confirm: false, approved: false, continue_on_error: null, retries: 0, timeout: 90, fallback: '', enabled: true,
+    label: /^open /i.test(text) ? 'Open app / file' : /^say /i.test(text) ? 'Say' : /^wait /i.test(text) ? 'Wait' : /play|pause|music/i.test(text) ? 'Media' : 'Ask JARVIS',
+    risk: /^close |send |delete /i.test(text) ? 'closes programs' : '', ...extra });
+  const hist = (status, ago, steps) => ({ at: now - ago, status, trigger: 'voice', seconds: 9, steps: steps.map((t, i) => ({ text: t, status: i === 1 && status === 'failed' ? 'failed' : (i === 2 ? 'unverified' : 'ok'), detail: i === 1 && status === 'failed' ? "Spotify didn't open" : '' })) });
   let protocols = [
-    { id: 'p1', name: 'Morning', steps: ['open Spotify', 'play some focus music', "what's the weather today", 'say Good morning, sir', 'open Gmail'],
-      schedule: { time: '07:30', days: [0, 1, 2, 3, 4], enabled: true }, created: now, last_run: now - 86000 },
-    { id: 'p2', name: 'House Party', steps: ['play party hits on YouTube', 'set the volume to 80', 'say Let\'s get this party started'], schedule: {}, created: now, last_run: 0 },
+    { id: 'p1', name: 'Morning', icon: 'sun', category: 'Morning', description: 'Music, weather and email to start the day.', phrases: ['good morning jarvis'], enabled: true, on_failure: 'continue',
+      steps: [step('open Spotify'), step('play some focus music'), step("what's the weather today"), step('say Good morning, sir'), step('open Gmail', { when: { type: 'weekday', days: [0, 1, 2, 3, 4] }, condition: 'on weekdays' })],
+      schedule: { time: '07:30', days: [0, 1, 2, 3, 4], enabled: true }, triggers: { startup: false, app: '', hotkey: '' }, created: now, last_run: now - 86000,
+      history: [hist('done', 86000, ['open Spotify', 'play some focus music', "what's the weather today", 'say Good morning, sir', 'open Gmail'])] },
+    { id: 'p2', name: 'Gaming Mode', icon: 'game', category: 'Gaming', description: 'Discord up, music down, Steam open.', phrases: ['game time'], enabled: true, on_failure: 'stop',
+      steps: [step('open Discord'), step('turn the music down'), step('open Steam'), step('close Chrome', { confirm: true, risk: 'closes programs' })],
+      schedule: {}, triggers: { startup: false, app: '', hotkey: 'Ctrl+Alt+G' }, created: now, last_run: now - 4000,
+      history: [hist('failed', 4000, ['open Discord', 'turn the music down', 'open Steam'])] },
+    { id: 'p3', name: 'House Party', icon: 'party', category: 'Entertainment', description: '', phrases: [], enabled: false, on_failure: 'stop',
+      steps: [step('play party hits on YouTube'), step('set the volume to 80'), step("say Let's get this party started")], schedule: {}, triggers: {}, created: now, last_run: 0, history: [] },
   ];
-  const protoList = () => ({ protocols: protocols.map((p) => ({ ...p, when: p.schedule && p.schedule.time ? `on weekdays at ${p.schedule.time}` : '' })), running: null, recording: null });
+  const ICONS = ['bolt', 'sun', 'moon', 'game', 'code', 'music', 'film', 'focus', 'work', 'home', 'coffee', 'rocket', 'party', 'book', 'heart', 'shield'];
+  const CATS = ['General', 'Morning', 'Work', 'Development', 'Gaming', 'Entertainment', 'Focus', 'Home', 'Evening'];
+  const TEMPLATES = [
+    { name: 'Development', icon: 'code', category: 'Development', description: 'Editor, terminal and docs, music low.', steps: ['open VS Code', 'open Windows Terminal', 'open github.com', 'play some lo-fi music', 'set the music volume to 30%'], phrases: ['time to code'] },
+    { name: 'Focus', icon: 'focus', category: 'Focus', description: 'A 25-minute focus block.', steps: ['pause everything', 'set a timer for 25 minutes', 'say Focus mode on'], phrases: ['focus mode'] },
+    { name: 'Wind Down', icon: 'moon', category: 'Evening', description: 'Quiet music, a reminder to sleep.', steps: ['play some calm piano music', 'set the music volume to 25%', 'remind me in 45 minutes to go to bed'], phrases: [] },
+  ];
+  let proposal = null;
+  const protoList = () => ({ protocols: protocols.map((p) => ({ ...p, when: p.schedule && p.schedule.time ? `on weekdays at ${p.schedule.time}` : '' })), running: null, recording: null,
+    proposal, templates: TEMPLATES, icons: ICONS, categories: CATS, suggestions: [{ steps: ['open Discord', 'play some focus music'], count: 4 }] });
+  const sessions = [
+    { key: 'spotify', app: 'Spotify', label: 'Spotify', process: 'spotify', title: 'Bohemian Rhapsody (Remastered 2011)', artist: 'Queen', status: 'playing', position: 72, duration: 354, can: ['play', 'pause', 'next', 'previous'], source: 'session', volume: 0.8, muted: false },
+    { key: 'chrome:youtube', app: 'Chrome', label: 'YouTube', process: 'chrome', title: 'Lo-fi beats to study to', artist: 'Lofi Girl', status: 'paused', position: 1260, duration: null, can: ['play', 'pause'], source: 'session', volume: 1, muted: false },
+  ];
+  const t0 = now;
+  const activity = [
+    { at: t0 - 400, kind: 'command', text: 'play bohemian rhapsody on spotify', status: 'ok', detail: 'voice' },
+    { at: t0 - 398, kind: 'media', text: 'Playing Bohemian Rhapsody on Spotify', status: 'ok', detail: 'Windows reports playing' },
+    { at: t0 - 300, kind: 'command', text: 'open gmail', status: 'ok', detail: 'voice' },
+    { at: t0 - 296, kind: 'browser', text: 'Gmail: waiting for you to sign in', status: 'waiting', detail: 'accounts.google.com' },
+    { at: t0 - 200, kind: 'protocol', text: 'Gaming Mode: open Steam', status: 'failed', detail: "Steam didn't open within 90 s" },
+    { at: t0 - 100, kind: 'media', text: 'Paused YouTube', status: 'unverified', detail: 'sent the media key; Windows did not confirm' },
+  ];
+  const browser = { state: 'AUTHENTICATION_REQUIRED', title: 'Sign in - Google Accounts', url: 'https://accounts.google.com/v3/signin/identifier', browser: 'Chrome',
+    profile: { name: 'Tony', email: 'tony@example.com', directory: 'Default' }, waiting: { label: 'Gmail', why: 'Google sign-in' }, history: [], address_bar: true,
+    profiles: [{ name: 'Tony', email: 'tony@example.com', directory: 'Default' }, { name: 'Work', email: 'tony@stark.example', directory: 'Profile 1' }] };
+  const health = { neural_core: true, model: 'llama3.2', voice: true, microphone: true, wake_word: true, media_sessions: true, app_volumes: true, address_bar: true, helper_errors: {}, ocr: true, google: false, internet: true };
 
   return {
     ui_ready: async () => ({
@@ -151,13 +188,13 @@ window.createJarvisMock = function createJarvisMock() {
       window: { frameless: true },
       wake: { enabled: true, active: true, phrase: settings.persona === 'harper' ? 'Hey Harper' : 'Hey Jarvis', phrases: ['Hey Jarvis'], reason: null }, vision: mockVision,
       persona: personaInfo(), personas: listPersonas(), memory: memStats(), protocols: protoList(),
-      media: { title: 'Bohemian Rhapsody (Remastered 2011)', artist: 'Queen', app: 'Spotify', playing: true },
+      media: sessions[0], activity: activity.slice(),
       restored: params.has('restored') ? [{ role: 'user', text: 'Any ideas for the bakery website homepage?', ts: now - 3000 },
         { role: 'assistant', text: 'Lead with a big photo of the bread, the opening hours and a "call to order" button. Want me to sketch a layout?', ts: now - 2990 }] : [],
     }),
-    boot_complete: async () => reply(online && models.length
+    boot_complete: async () => (setTimeout(() => emit({ type: 'media', playing: sessions[0], sessions: sessions.map((x) => ({ ...x })), status: { sessions: true, mixer: true, keys: true } }), 200), reply(online && models.length
       ? 'Good evening, sir. All systems are online. How may I help?'
-      : "Good evening, sir. I'm afraid my neural core is offline. I've put instructions on screen to bring it online.", true),
+      : "Good evening, sir. I'm afraid my neural core is offline. I've put instructions on screen to bring it online.", true)),
     play_sfx: async () => {},
     send_text: async (text) => {
       cancelAll();
@@ -170,6 +207,15 @@ window.createJarvisMock = function createJarvisMock() {
         emit([{ type: 'persona', ...personaInfo() }, { type: 'settings', ...settings }]);
         reply({ harper: "Hi Tony, Harper here! It's so nice to talk with you. What's on your mind?", jarvis: 'At your service, sir. J.A.R.V.I.S. is back online.',
           friday: 'F.R.I.D.A.Y. here, boss. What are we working on?', sage: 'Hello, Tony. Sage here. What would you like to understand today?' }[settings.persona], true);
+        return true;
+      }
+      if (/^(?:create|make) a protocol/i.test(text)) {
+        emit({ type: 'user_message', id: `u${++seq}`, text, source: 'text' });
+        proposal = { name: 'Game Night', icon: 'game', category: 'Gaming', description: 'Discord, then the game.', phrases: [], enabled: true, on_failure: 'stop',
+          steps: [step('open Discord'), step('turn the music down'), step('open Rocket League'), step('close Chrome', { risk: 'closes programs' })],
+          schedule: {}, triggers: { hotkey: 'Ctrl+Alt+N' }, stage: 'approve', question: '' };
+        emit({ type: 'protocols', ...protoList() });
+        reply("Here's Game Night: open Discord, turn the music down, open Rocket League, then close Chrome, which will ask you first. Shall I save it?", true);
         return true;
       }
       const rem = text.match(/^(?:please )?remember (?:that )?(.+)$/i);
@@ -308,12 +354,14 @@ window.createJarvisMock = function createJarvisMock() {
     persona_preview: async () => {},
     protocol_list: async () => protoList(),
     protocol_save: async (d) => {
-      const steps = (Array.isArray(d.steps) ? d.steps : String(d.steps || '').split('\n')).map((x) => x.trim()).filter(Boolean);
+      const steps = (Array.isArray(d.steps) ? d.steps : String(d.steps || '').split('\n')).map((x) => (typeof x === 'string' ? step(x.trim()) : step(x.text.trim(), x))).filter((x) => x.text);
       if (!String(d.name || '').trim()) return { ok: false, error: 'Give the protocol a name.' };
       if (!steps.length) return { ok: false, error: 'A protocol needs at least one step.' };
       let p = protocols.find((x) => x.id === d.id) || protocols.find((x) => x.name.toLowerCase() === d.name.trim().toLowerCase());
       if (!p) { p = { id: `p${Date.now()}`, created: Date.now() / 1000, last_run: 0 }; protocols.push(p); }
-      Object.assign(p, { name: d.name.trim(), steps, schedule: d.schedule || {} });
+      Object.assign(p, { history: [], icon: 'bolt', category: 'General', description: '', phrases: [], triggers: {}, enabled: true, on_failure: 'stop' }, p.history ? { history: p.history } : {},
+        { name: d.name.trim(), steps, schedule: d.schedule || {}, icon: d.icon || 'bolt', category: d.category || 'General', description: d.description || '', phrases: d.phrases || [],
+          triggers: d.triggers || {}, enabled: d.enabled !== false, on_failure: d.on_failure || 'stop' });
       setTimeout(() => emit({ type: 'protocols', ...protoList() }), 0);
       return { ok: true, protocol: p };
     },
@@ -322,12 +370,46 @@ window.createJarvisMock = function createJarvisMock() {
     protocol_run: async (id) => {
       const p = protocols.find((x) => x.id === id);
       p.last_run = Date.now() / 1000;
-      p.steps.forEach((step, i) => setTimeout(() => emit({ type: 'protocol', status: 'step', id, name: p.name, index: i, total: p.steps.length, step }), 600 + i * 1600));
-      setTimeout(() => emit({ type: 'protocol', status: 'done', id, name: p.name, index: p.steps.length - 1, total: p.steps.length }), 600 + p.steps.length * 1600);
+      const texts = p.steps.map((x) => x.text);
+      const results = texts.map((t) => ({ text: t, status: 'pending' }));
+      const base = { type: 'protocol', id, name: p.name, total: texts.length, steps: texts };
+      texts.forEach((t, i) => setTimeout(() => {
+        results[i].status = 'running';
+        emit({ ...base, status: 'step', index: i, step: t, results: results.map((r) => ({ ...r })) });
+        setTimeout(() => { results[i].status = i === 2 ? 'unverified' : 'ok'; results[i].seconds = 1.2; }, 1200);
+      }, 600 + i * 1600));
+      setTimeout(() => {
+        emit({ ...base, status: 'done', index: texts.length - 1, results });
+        emit({ type: 'activity_log', item: { at: Date.now() / 1000, kind: 'protocol', text: `${p.name} finished`, status: 'ok', detail: `${texts.length} steps` } });
+      }, 600 + texts.length * 1600);
       return { ok: true };
     },
     protocol_stop: async () => ({ ok: true }),
-    media_control: async () => ({ ok: true }),
+    protocol_answer: async () => ({ ok: true }),
+    protocol_from_template: async (name) => {
+      const t = TEMPLATES.find((x) => x.name === name);
+      const p = { ...t, id: `p${Date.now()}`, steps: t.steps.map((x) => step(x)), schedule: {}, triggers: {}, enabled: true, on_failure: 'stop', history: [], created: Date.now() / 1000, last_run: 0 };
+      protocols.push(p);
+      return { ok: true, protocol: p };
+    },
+    protocol_proposal_answer: async (action) => {
+      const p = proposal;
+      proposal = null;
+      if (action === 'save' && p) { const { stage, question, ...rest } = p; protocols.push({ ...rest, id: `p${Date.now()}`, history: [], created: Date.now() / 1000, last_run: 0 }); }
+      if (action === 'edit' && p) setTimeout(() => emit({ type: 'protocol_edit', protocol: p }), 0);
+      setTimeout(() => emit({ type: 'protocols', ...protoList() }), 0);
+      return { ok: true, message: action === 'save' ? `Protocol ${p.name} saved, sir.` : '' };
+    },
+    media_control: async (action, key) => {
+      const s = sessions.find((x) => x.key === key) || sessions[0];
+      s.status = action === 'pause' || (action === 'toggle' && s.status === 'playing') ? 'paused' : 'playing';
+      setTimeout(() => emit({ type: 'media', playing: sessions.find((x) => x.status === 'playing') || sessions[0], sessions: sessions.map((x) => ({ ...x })), status: { sessions: true, mixer: true, keys: true } }), 50);
+      return { ok: true, verified: true };
+    },
+    media_volume: async (key, level) => { const s = sessions.find((x) => x.key === key); if (s) s.volume = level; return { ok: true, volume: level }; },
+    activity_list: async () => ({ items: activity.slice(), health }),
+    browser_status: async () => ({ ...browser }),
+    browser_set_profile: async (dir) => { settings.browser_profile = dir; return { ...browser }; },
     memory_list: async () => ({ memories: memories.slice(), episodes: episodes.slice(), stats: memStats() }),
     memory_add: async (kind, text) => { const m = mem(++memId, kind, text.replace(/\bI\b/g, 'You'), { source: 'manual' }); memories.unshift(m); memChanged(); return { ok: true, memory: m, status: 'added' }; },
     memory_update: async (id, fields) => {

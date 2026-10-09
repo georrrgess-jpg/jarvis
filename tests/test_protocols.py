@@ -430,3 +430,22 @@ def test_app_trigger(make, monkeypatch):
     wait_done(events)
     assert any("Steam just opened" in s for s in assistant.tts.spoken)
     assert assistant.protocols.find("steam time").history[-1]["trigger"] == "app"
+
+
+def test_several_things_in_one_sentence(make):
+    assistant, events = make()
+    reply_before = len(events.of("assistant_end"))
+    assistant.submit_text("what's 6 times 7, switch to Harper, and then tell me a story about dragons")
+    wait_done(events, 40)
+    steps = [p["text"] for p in events.of("user_message") if p["source"] == "protocol"]
+    assert steps == ["what's 6 times 7", "switch to Harper", "tell me a story about dragons"]
+    assert assistant.persona.id == "harper" and assistant.protocols.all() == []  # nothing saved
+    assert any("42" in s for s in assistant.tts.spoken)
+    assistant.config.update({"persona": "jarvis"})
+
+
+def test_fallback_in_one_sentence(make):
+    assistant, events = make()
+    assert assistant._compound("open Spotify, but use YouTube if Spotify isn't available")[0].fallback == "open YouTube"
+    assert assistant._compound("open Spotify and open Notepad") is None  # the quick chain handles that
+    assert assistant._compound("tell me a joke and make it funny") is None

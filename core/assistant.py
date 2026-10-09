@@ -150,6 +150,7 @@ def _guess_category(name: str, steps) -> str:
     return _CATEGORY_OF.get(_guess_icon(name, steps), "General")
 
 
+_OPEN_ONLY_CHAIN = re.compile(r"^(?:(?:open|launch|start|play|fire up|boot up)\s+[^,]+?(?:\s*(?:,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+)|$))+$", re.I)
 _GOOGLE_SEARCH = re.compile(r"^(?:(?:please|can you|could you)\s+)*(?:(?:search|look)\s+(?:on\s+)?google\s+for\s+(?P<q>.+)|google\s+(?:search\s+)?for\s+(?P<q2>.+)|"
                             r"(?:search\s+for|look\s+up|search)\s+(?P<q3>.+?)\s+on\s+google)$", re.I)
 _BROWSER_NAMES = {"chrome": "chrome", "google chrome": "chrome", "browser": "", "web browser": "", "internet": "", "edge": "edge",
@@ -1491,6 +1492,26 @@ class Assistant:
         if p is not None and self._protocol_run is None:
             self._spawn(lambda: self._auto_run(p, "hotkey", self._protocol_intro(p)), name="protocol-hotkey")
 
+    def _compound(self, text: str) -> list | None:
+        """'Pause the music, switch to Harper, and tell me what we were working on' -> three steps, run in order.
+        Also 'open Spotify, but use YouTube if Spotify isn't available' -> one step with a fallback."""
+        t = _bare(text).strip()
+        if len(t) > 400 or _OPEN_ONLY_CHAIN.match(t):
+            return None  # "open X and open Y" stays the quick chain
+        pieces = split_steps(t)
+        steps = [structured_step(p) for p in pieces]
+        if len(steps) == 1 and steps[0].fallback:
+            steps[0].approved = True
+            return steps
+        if len(steps) < 2 or len(steps) > 8:
+            return None
+        kinds = [self._understand(st.text)[1] for st in steps]
+        if kinds[0] == "ai" or sum(k != "ai" for k in kinds) < 1 or all(k == "open" for k in kinds):
+            return None
+        for st in steps:
+            st.approved = True  # the user asked for it in so many words; email etc. still confirm themselves
+        return steps
+
     # -- "you keep doing these together": protocol ideas from the command history
     def _protocol_suggestions(self) -> list[dict]:
         cmds = [a for a in self._activities if a.get("kind") == "command"]
@@ -1857,11 +1878,15 @@ class Assistant:
                 target = min(target, max(0.0, s.duration - 1))
         if target is not None and "seek" in s.can and s.source == "sessions":
             out = hub.control("seek", position=target, targets=[s])
-            if out.ok:
-                self._activity("media", f"{s.label}: jumped to {describe_position(target)}", "ok" if out.verified else "unverified")
+            if out.ok and out.verified:
+                self._activity("media", f"{s.label}: jumped to {describe_position(target)}", "ok")
                 if cmd.action == "restart":
                     return f"Back to the start, {t}."
                 return f"Jumped to {describe_position(target)}, {t}."
+            if out.ok and not s.site.startswith("YouTube"):
+                # the player took the request but its position didn't move: say so rather than claim it worked
+                self._activity("media", f"{s.label}: jump to {describe_position(target)}", "unverified", "the player didn't confirm the new position")
+                return f"I asked {s.label} to jump to {describe_position(target)}, {t}, but it didn't confirm the change."
         if s.site.startswith("YouTube") or s.browser:
             if cmd.action == "restart":
                 out = hub.youtube(["0"], verify="start", before=s)
@@ -2629,6 +2654,40 @@ class Assistant:
         except Exception:
             return []
 
+    def _confirm_opened(self, name: str, kind: str = "") -> str:
+        """Only say an app is open once its window shows; otherwise keep an eye on it and log how it went."""
+        t = self.title
+        wait = 4.0 if sys.platform == "win32" else 0.0
+        deadline = time.monotonic() + wait
+        while True:
+            if self._find_app_window(name):
+                self._activity("app", f"Opened {name}", "ok", kind)
+                return f"{name} is open, {t}."
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.3)
+        if sys.platform != "win32":
+            self._activity("app", f"Opened {name}", "unverified", kind)
+        else:
+            threading.Thread(target=self._watch_launch, args=(name, kind), name="launch-watch", daemon=True).start()
+        return f"Opening {name}, {t}."
+
+    def _find_app_window(self, name: str) -> bool:
+        try:
+            return bool(self._app_windows(name))
+        except Exception:
+            return False
+
+    def _watch_launch(self, name: str, kind: str, wait: float = 45.0) -> None:
+        """Slow starters (games, big editors): record whether the window ever appeared, without talking over the user."""
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if self._find_app_window(name):
+                self._activity("app", f"Opened {name}", "ok", f"{kind}, window appeared")
+                return
+            time.sleep(1.0)
+        self._activity("app", f"Opened {name}", "unverified", f"no {name} window appeared within {int(wait)} s")
+
     def _app_windows(self, name: str) -> list:
         """Open windows that belong to the app the user named ("Spotify", "Word", "file explorer")."""
         want = re.sub(r"[^a-z0-9]", "", name.lower())
@@ -2963,7 +3022,7 @@ class Assistant:
             try:
                 result = self.tools.open_target(target, min_score=70)
                 self._tool_used(turn, "open_file", {"query": target})
-                return f"Opening {result['name']}, {self.title}."
+                return self._confirm_opened(result["name"], result.get("kind", ""))
             except ToolError:
                 pass
         if google and google.name and not site:  # no such file on this PC: maybe it's in Google Drive
@@ -3147,6 +3206,12 @@ class Assistant:
         doc_cmd = parse_doc_command(text)
         if doc_cmd is not None and self._doc_command_applies(doc_cmd, text):
             self._deliver(turn, self._doc_command(turn, text, doc_cmd, lang), language=lang.code if lang else None, working=True)
+            return
+
+        compound = self._compound(text) if source != "protocol" and self._protocol_run is None else None
+        if compound:
+            self._finish_turn(turn)  # each part speaks for itself
+            self._start_protocol(Protocol(id="request", name="your request", steps=compound), trigger=source, ephemeral=True)
             return
 
         early = parse_quick(text)

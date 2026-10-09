@@ -131,14 +131,26 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+_PLACEHOLDER_TITLES = {"", "untitled", "new tab", "loading", "loading...", "loading…", "about:blank"}
+
+
+def still_loading(look: Look) -> bool:
+    """Chrome shows "Untitled" or the bare address as the tab title until the page itself has a title."""
+    t = tab_title(look.title).strip().lower()
+    if t in _PLACEHOLDER_TITLES:
+        return True
+    u = look.url.lower().split("://")[-1].rstrip("/")
+    return bool(u and t.split("://")[-1].rstrip("/") in (u, u.removeprefix("www."))) or bool(re.fullmatch(r"[\w.-]+\.[a-z]{2,}(?::\d+)?(?:/\S*)?", t))
+
+
 def matches(look: Look, expect_host: str = "", expect_title: str = "", expect_site: str = "") -> bool:
-    """Has the active tab become the page we asked for?"""
+    """Has the active tab become the page we asked for (and finished loading it)?"""
     u = look.url.lower()
     if u and expect_host:
         host = (urlparse(u if "://" in u else "https://" + u).hostname or "").removeprefix("www.")
         want = expect_host.lower().removeprefix("www.")
         if host == want or host.endswith("." + want):
-            return look.state not in BLOCKERS
+            return look.state not in BLOCKERS and not still_loading(look)
     t = _norm(tab_title(look.title))
     if expect_title:
         want = _norm(expect_title)
@@ -394,6 +406,7 @@ class BrowserManager:
             return NavResult(True, NAVIGATING, browser=self.label(key), transitions=transitions)  # nothing to watch here
         last = Look(LAUNCHING)
         blocker_since = None
+        seen_match, seen_at = "", 0.0  # account pages (Gmail, Drive) redirect to sign-in after a moment: the match has to hold for 1.5 s
         while self._clock() - started < wait:
             self._sleep(0.4)
             look = self.look(key)
@@ -404,6 +417,10 @@ class BrowserManager:
                 continue  # still starting
             changed = not before or before.get(getattr(look.window, "hwnd", None)) != look.title
             if matches(look, host, expect_title, site):
+                if account and (seen_match != f"{look.url}|{look.title}" or self._clock() - seen_at < 1.5):
+                    if seen_match != f"{look.url}|{look.title}":
+                        seen_match, seen_at = f"{look.url}|{look.title}", self._clock()
+                    continue
                 return self._done(NavResult(True, PAGE_READY, look.title, look.url, True, self.label(key), self._clock() - started, transitions + [PAGE_READY]))
             if look.state in BLOCKERS and (changed or look.state in (PROFILE_SELECTION, FIRST_RUN_SETUP)):
                 if look.state == AUTHENTICATION_REQUIRED and not account:
@@ -415,6 +432,7 @@ class BrowserManager:
                         blocker_since = self._clock()
                         continue  # error pages can flash up during redirects
                 return self._done(NavResult(False, look.state, look.title, look.url, True, self.label(key), self._clock() - started, transitions))
+            seen_match = ""
         state = last.state if last.state in BLOCKERS else PAGE_LOADING
         return self._done(NavResult(False, state, last.title, last.url, False, self.label(key), self._clock() - started, transitions))
 

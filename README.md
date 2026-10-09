@@ -15,15 +15,29 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
 
 ## Features
 
-- **Protocols: your own command sequences.** Teach JARVIS a list of commands once and run it by name:
-  - **Make one by voice in one go**: "create a protocol called Morning: open Spotify, then what's the weather, then open Gmail".
-  - **Or step by step**: "create a new protocol called Work Mode", then say each step ("open Slack", "set the volume to 20", "wait 5 seconds", "say Let's get to work") and "done" to save ("scratch that" removes the last step, "cancel" throws it away).
-  - **Or on screen**: the protocols button in the title bar (<kbd>Ctrl</kbd>+<kbd>R</kbd>) lists them; **NEW PROTOCOL** opens an editor with one command per line, step ideas, and RUN / EDIT / DELETE (with undo).
-  - **Run it**: "Jarvis, run Morning", "initiate the house party protocol", "execute Work Mode", or the RUN button. Each step goes through JARVIS exactly as if you'd said it, so anything works as a step: opening apps and sites, music, volume, weather, timers, typing, documents, emails, questions. `wait 10 seconds` pauses and `say …` speaks. A PROTOCOL strip shows which step it's on, with a STOP button.
-  - **Manage it**: "add open Discord to the Morning protocol", "remove the last step from Morning", "what's in the Morning protocol?", "rename the Morning protocol to Sunrise", "list my protocols", "delete the House Party protocol", "stop the protocol". A step like "run the Lights protocol" runs another protocol's steps in place.
-  - **Schedule it**: "schedule the Morning protocol for 7:30 every weekday", "run the Night protocol at 11 pm on Fridays", or the *Run it by itself at* switch in the editor. "Don't run the Morning protocol automatically" turns that off.
-  - Talking to JARVIS (or pressing <kbd>Esc</kbd>) while a protocol runs stops it; a timer going off only pauses it.
-- **Music and media**: "play Bohemian Rhapsody" finds the top YouTube result (free, no key) and starts it; "play lo-fi beats on Spotify" opens Spotify's search (or set Settings ▸ Google ▸ *Play music on* to Spotify). "Pause", "resume", "next song", "skip", "go back a song" and "stop the music" use the media keys, so they work with Spotify, YouTube in any browser, VLC and Windows players. "What's playing?" / "who sings this?" reads it from Spotify, YouTube, YouTube Music or VLC. A NOW PLAYING strip under the reactor shows the track with ⏮ ⏯ ⏭ buttons.
+- **Media & Automation Center** (the pulse button in the title bar, <kbd>Ctrl</kbd>+<kbd>J</kbd>): one place that shows everything JARVIS is doing and whether it actually worked.
+  - **Media**: every player Windows knows about (Spotify, YouTube and YouTube Music in any browser, VLC, the Windows players) with its title, progress bar, ⏮ ⏯ ⏭ and, where Windows allows, its own volume slider.
+  - **Browser**: which browser and Chrome profile JARVIS uses, the page it's on, and whether it's ready, loading, or waiting for you (sign-in, profile picker, cookie consent). Pick the profile here if you have several.
+  - **Automation**: a live timeline of the protocol or multi-step request that's running, each step marked ✓ verified, ~ done but unconfirmed, or ✗ failed (with why), and GO AHEAD / SKIP for steps that need your OK.
+  - **System health** (neural core, voice, microphone, media sessions, app volumes, address bar, screen reading, Google link) and a searchable **activity log** of every command and its outcome.
+- **JARVIS checks before it says "done"**: pausing, playing, skipping and seeking are confirmed from what Windows' media controls report afterwards; a web page is only "open" once the browser's own address bar and tab show it (it notices Google sign-in pages, profile pickers, first-run screens, consent pages, offline and error pages); an app is only "open" once its window appears. When it can't confirm something it says so ("I asked Chrome to jump to 0:50, but it didn't confirm the change") instead of pretending.
+- **Music and media control**:
+  - **Play**: "play Bohemian Rhapsody" finds the top YouTube result (free, no key), opens it and confirms it's actually playing (pressing play if the browser blocked autoplay); "play lo-fi beats on Spotify" opens Spotify's search (or set Settings ▸ Google ▸ *Play music on* to Spotify). "Play my favourite music", "resume what I was listening to earlier".
+  - **Control**: "pause", "resume", "stop", "next song", "previous", "pause YouTube", "resume the video", "pause Spotify", "pause everything", "stop all media", "restart the song", "skip forward 30 seconds", "go back 10 seconds", "jump to 2 minutes", "what's playing?". JARVIS talks to Windows' media sessions directly, so it controls the right player (and says which), and remembers what you last used so "pause it" and "turn it up" just work. If two players could be meant, it asks which.
+  - **Volume per app**: "turn the music down", "set Spotify to 30%", "mute YouTube", "unmute the music" change only that app's volume, not the whole PC.
+  - **YouTube**: "full screen", "captions on", "speed it up", "skip forward" use YouTube's own shortcuts in its tab (whichever browser, whichever tab).
+  - **Ducking**: other apps' sound dips while JARVIS speaks and comes back afterwards (Settings ▸ Google ▸ *Lower music while I speak*). If you change a volume yourself meanwhile, yours is kept; if JARVIS ever closes mid-sentence, the volumes are put back next time it starts.
+  - A NOW PLAYING strip under the reactor shows the track with a progress line and ⏮ ⏯ ⏭; click it for the Media Center.
+- **Chrome that's ready when JARVIS says so**: "open Chrome" starts it (straight into the profile that's signed in to your linked Google account, so no "who's using Chrome?" picker) and waits until it's usable. "Open Gmail" on a signed-out browser says "please sign in", waits (up to 5 minutes) while you do, then carries on by itself: "Thank you, sir. Gmail is open now." Public sites (YouTube, Wikipedia, Google Search) never wait for an account. "Google cats", "what page am I on?", "open my favourite website". JARVIS **never types passwords, never bypasses sign-in or browser security, and never attaches a debugger to your Chrome**: it reads only the tab title and the address bar through Windows' accessibility interface, and web page content can never tell it to do anything.
+- **Several things at once**: "pause the music and switch to Harper", "open Discord, then play some lo-fi and set a timer for 25 minutes" runs as a short sequence with the same live timeline and checks as a protocol.
+- **Protocols: your own automations.** Teach JARVIS a routine once and run it by name, phrase, schedule, shortcut or event:
+  - **Describe it**: "create a protocol called Game Night that opens Discord, turns the music down and launches my game". JARVIS asks about anything vague ("which game?"), shows the finished protocol as a card, and **saves it only when you say yes** (or press SAVE / EDIT / CANCEL).
+  - **Or step by step**: "create a new protocol called Work Mode", then say each step and "done" to save ("scratch that" removes the last step, "cancel" throws it away).
+  - **Or on screen** (<kbd>Ctrl</kbd>+<kbd>R</kbd>): cards with icons, categories, search and filters, last result and run history; **TEMPLATES** (Gaming Mode, Development, Entertainment, Focus, Morning Briefing, Wind Down) to start from; an editor with an icon picker, reorderable steps and per-step options: *only if an app is open / isn't open*, *only between times*, *only on certain days*, *only if the previous step worked/failed*, *ask me first*, retries, a time limit, an *otherwise try …* fallback, and whether a failure stops the protocol or carries on. Plain-English steps work too: "if Spotify is open, pause the music", "on weekdays, open Slack", "open Steam, otherwise open the Xbox app".
+  - **Start it**: "run Morning", "initiate Gaming Mode", your own phrases ("game time"), a keyboard shortcut that works anywhere (e.g. <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd>), a schedule ("schedule Morning for 7:30 every weekday"), when JARVIS starts, or when an app opens ("when Steam opens"). "Run Development, but don't open Discord" skips a step. A protocol never runs twice at once.
+  - **Every step is checked**, not just sent: the timeline marks each one verified, unconfirmed or failed, and the protocol keeps a history of its last runs. Talking to JARVIS (or <kbd>Esc</kbd>) stops a running protocol; a timer going off only pauses it.
+  - **Safety**: steps that send, email, delete, buy, close programs, shut down, click/type on screen or run commands **always ask first** ("Step 4 closes programs. Go ahead?"), and protocols started by a schedule, start-up or an app never run those steps unattended. JARVIS may *suggest* a protocol when it notices you often do two things together, but it never creates or runs one without you.
+  - Your existing protocols are upgraded automatically; a backup of the old file is kept in `%APPDATA%\JARVIS\backups`.
 - **Arc-reactor core** on Canvas: rotating tick rings, coils, a 96-bar circular spectrum, shock-wave rings on voice peaks, particles and live HUD read-outs. Colour follows the speech state machine **IDLE → LISTENING → THINKING → SPEAKING** (cyan, aqua, amber, ice blue).
 - **Audio-reactive visualisers**: real FFT bands from the microphone while listening and from JARVIS's own voice while speaking (each clip is analysed once in Python and played back in sync in the UI), plus an oscilloscope waveform.
 - **Streaming replies**: tokens stream into the comms log with a typewriter effect, and JARVIS starts speaking after the first sentence instead of waiting for the full answer.
@@ -123,8 +137,12 @@ core/
   wakelearn.py      teaching the wake-word listener a new name: synthetic voices, augmentation, a tiny numpy network
   wakewords.py      learned wake words: background training, recording your voice, models in %APPDATA%
   tabs.py           browser tabs by voice: find a tab by its title, close, reopen, new, next/previous, close others
-  protocols.py      protocols: your named command lists, storing them, schedules, "run Morning" and the other spoken commands
-  media.py          music: "play X" (top YouTube result / Spotify search), media keys, "what's playing?" from window titles
+  protocols.py      protocols: structured steps (conditions, confirmations, retries, fallbacks), triggers, templates, history, migration
+  hotkeys.py        system-wide keyboard shortcuts that start protocols
+  media.py          understanding media requests ("pause YouTube", "skip forward 30 seconds"), YouTube search, Spotify
+  mediahub.py       verified media control through Windows' media sessions, per-app volume, ducking, YouTube shortcuts
+  browser.py        browser readiness: profiles, sign-in / picker / consent detection, verified navigation, waiting for you
+  winhelper.py      one persistent PowerShell helper: media sessions (WinRT), app volumes (Core Audio), the address bar (UI Automation)
   docops.py         multi-step document requests ("rename it to X, then type out Y") and "type out ..." anywhere
   docs_keys.py      renaming and typing in a Google Doc open in the browser, by keyboard
   monitors.py       which screen is which ("main", "other", "left", "monitor 2") and moving windows between them
@@ -167,7 +185,7 @@ build.py            automated PyInstaller build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                  # 950+ tests; no microphone, speakers or network needed
+python -m pytest -q                  # 1000 tests; no microphone, speakers or network needed
 python -m tests.mock_ollama          # fake Ollama on :11434 for UI work without a model
 ```
 

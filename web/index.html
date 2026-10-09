@@ -59,6 +59,10 @@
       <button class="wb" id="btn-persona" title="Personality (Ctrl+P)" aria-label="Choose a personality">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.2c.9 1.3 2 1.9 3.4 1.9s2.5-.6 3.4-1.9"/><path d="M9.2 9.6h.01M14.8 9.6h.01" stroke-width="2.4" stroke-linecap="round"/></svg>
       </button>
+      <button class="wb" id="btn-center" title="Media &amp; Automation Center (Ctrl+J)" aria-label="Open the Media and Automation Center">
+        <svg viewBox="0 0 24 24"><path d="M3 12h3.5l2.5-6 4 12 2.5-6H21"/></svg>
+        <i class="wb-badge hidden" id="center-badge"></i>
+      </button>
       <button class="wb" id="btn-protocols" title="Protocols (Ctrl+R)" aria-label="Open your protocols">
         <svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><path d="M3.5 4.5 6.5 6.5 3.5 8.5Z" fill="currentColor" stroke-linejoin="round"/><path d="M4 12h1.5M4 17.5h1.5"/></svg>
         <i class="wb-badge hidden" id="protocols-badge"></i>
@@ -156,7 +160,7 @@
       </div>
       <div id="media-strip" class="hidden" aria-live="polite">
         <svg viewBox="0 0 24 24"><path d="M9 18V5.5l11-2V16"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>
-        <b id="media-app">NOW PLAYING</b><span id="media-title"></span>
+        <b id="media-app">NOW PLAYING</b><span id="media-title"></span><i id="media-progress" aria-hidden="true"></i>
         <button type="button" data-media="previous" title="Previous track" aria-label="Previous track"><svg viewBox="0 0 24 24"><path d="M6 5v14M18 5 9 12l9 7Z"/></svg></button>
         <button type="button" data-media="toggle" title="Play / pause" aria-label="Play or pause"><svg viewBox="0 0 24 24"><path d="M7 5v14l6-7Z"/><path d="M15.5 6v12M19 6v12"/></svg></button>
         <button type="button" data-media="next" title="Next track" aria-label="Next track"><svg viewBox="0 0 24 24"><path d="M18 5v14M6 5l9 7-9 7Z"/></svg></button>
@@ -164,6 +168,7 @@
       <div id="protocol-strip" class="hidden" aria-live="polite">
         <svg viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><path d="M3.5 4.5 6.5 6.5 3.5 8.5Z" fill="currentColor"/></svg>
         <b id="protocol-kind">PROTOCOL</b><span id="protocol-label"></span><em id="protocol-progress"></em>
+        <span class="ps-confirm hidden" id="protocol-confirm"><button type="button" id="protocol-yes">GO AHEAD</button><button type="button" id="protocol-no">SKIP</button></span>
         <button id="protocol-stop" type="button">STOP</button><i id="protocol-bar"></i>
       </div>
       <canvas id="wave"></canvas>
@@ -364,29 +369,65 @@
     <div class="modal-card cyan protocol-card">
       <div class="mc-corner tl"></div><div class="mc-corner br"></div>
       <div class="rd-head">
-        <div><div class="mc-kicker" id="pr-kicker">PROTOCOLS · YOUR COMMAND SEQUENCES</div><h2 id="pr-title">Protocols</h2></div>
+        <div><div class="mc-kicker" id="pr-kicker">PROTOCOLS · YOUR AUTOMATIONS</div><h2 id="pr-title">Protocols</h2></div>
         <button class="wb" id="pr-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
       </div>
       <div id="pr-browse">
-        <p class="mc-lead">A protocol is a list of commands I carry out in order when you say <b>“Jarvis, run Morning”</b>. Anything you can ask me works as a step.</p>
-        <div class="pr-list" id="pr-list"></div>
+        <div class="pr-toolbar">
+          <input id="pr-search" class="url-input" type="search" placeholder="Search protocols…" spellcheck="false" aria-label="Search protocols">
+          <div class="pr-filters" id="pr-filters" role="tablist" aria-label="Category"></div>
+          <div class="pr-views" role="tablist">
+            <button data-view="mine" class="on" type="button">MINE</button><button data-view="templates" type="button">TEMPLATES</button>
+          </div>
+        </div>
+        <div class="pr-suggest hidden" id="pr-suggest"></div>
+        <div class="pr-grid" id="pr-list"></div>
         <div class="mc-actions">
           <button class="btn primary" id="pr-new"><span>NEW PROTOCOL</span></button>
           <span class="mm-spacer"></span>
           <button class="btn ghost" id="pr-done">CLOSE</button>
         </div>
       </div>
-      <form id="pr-form" class="pe-form hidden" autocomplete="off">
-        <label class="field"><span>Name</span><input id="pr-name" type="text" maxlength="40" placeholder="e.g. Morning, Work Mode, House Party" required></label>
-        <label class="field"><span>Steps · one command per line <output id="pr-count">0 steps</output></span>
-          <textarea id="pr-steps" rows="8" spellcheck="true" placeholder="open Spotify&#10;play some focus music&#10;set the volume to 30&#10;wait 5 seconds&#10;say Good morning, sir&#10;what's the weather today"></textarea></label>
-        <div class="pe-ideas" id="pr-ideas"></div>
-        <div class="pr-sched">
-          <label class="toggle"><input type="checkbox" id="pr-sched-on"><i></i><span>Run it by itself at</span></label>
-          <input id="pr-time" type="time" value="07:30" aria-label="Time">
-          <div class="pr-days" id="pr-days" role="group" aria-label="Days"></div>
+      <form id="pr-form" class="pe-form pr-editor hidden" autocomplete="off">
+        <div class="pr-ed-top">
+          <div class="pr-icon-pick" id="pr-icon-pick" role="radiogroup" aria-label="Icon"></div>
+          <div class="pr-ed-main">
+            <label class="field"><span>Name</span><input id="pr-name" type="text" maxlength="40" placeholder="e.g. Gaming Mode" required></label>
+            <div class="pr-row">
+              <label class="field"><span>Category</span><select id="pr-category"></select></label>
+              <label class="field grow"><span>Description</span><input id="pr-desc" type="text" maxlength="300" placeholder="What it's for (optional)"></label>
+            </div>
+          </div>
         </div>
-        <p class="field-note" id="pr-error"></p>
+        <div class="field"><span>Steps <output id="pr-count">0 steps</output></span>
+          <ol class="pr-steps-ed" id="pr-steps-ed"></ol>
+          <div class="pr-add-row">
+            <input id="pr-add-step" class="url-input" type="text" maxlength="300" placeholder="Add a step: anything you'd say to me, e.g. “open Discord” or “wait 5 seconds”" aria-label="New step">
+            <button type="button" class="btn sm" id="pr-add-btn"><span>ADD</span></button>
+          </div>
+          <div class="pe-ideas" id="pr-ideas"></div>
+        </div>
+        <details class="pr-section" open>
+          <summary>Start it by</summary>
+          <label class="field"><span>Phrases <small>(besides “run <span id="pr-name-echo">…</span>”), comma-separated</small></span>
+            <input id="pr-phrases" type="text" maxlength="300" placeholder="activate gaming mode, game time"></label>
+          <div class="pr-sched">
+            <label class="toggle"><input type="checkbox" id="pr-sched-on"><i></i><span>Run it by itself at</span></label>
+            <input id="pr-time" type="time" value="07:30" aria-label="Time">
+            <div class="pr-days" id="pr-days" role="group" aria-label="Days"></div>
+          </div>
+          <div class="pr-row">
+            <label class="toggle"><input type="checkbox" id="pr-startup"><i></i><span>When JARVIS starts</span></label>
+            <label class="field grow"><span>When this app opens</span><input id="pr-app" type="text" maxlength="60" placeholder="e.g. Steam"></label>
+            <label class="field"><span>Shortcut</span><input id="pr-hotkey" type="text" maxlength="30" placeholder="press keys…" readonly title="Click, then press e.g. Ctrl+Alt+G (Backspace clears)"></label>
+          </div>
+        </details>
+        <details class="pr-section">
+          <summary>If a step fails</summary>
+          <label class="field"><span>Then</span><select id="pr-policy"><option value="stop">Stop the protocol (later steps may depend on it)</option><option value="continue">Carry on with the next step</option></select></label>
+          <label class="toggle"><input type="checkbox" id="pr-enabled" checked><i></i><span>Protocol switched on</span></label>
+        </details>
+        <p class="field-note" id="pr-error" role="alert"></p>
         <div class="mc-actions">
           <button class="btn primary" type="submit" id="pr-save"><span>SAVE</span></button>
           <button class="btn" type="button" id="pr-save-run"><span>SAVE &amp; RUN</span></button>
@@ -395,7 +436,44 @@
           <button class="btn ghost danger hidden" type="button" id="pr-delete">DELETE</button>
         </div>
       </form>
-      <div class="mc-foot">Say “create a protocol called Morning”, “run Morning”, “add open Gmail to the Morning protocol”, “schedule the Morning protocol for 7:30 on weekdays” or “stop the protocol”.</div>
+      <div class="mc-foot">Say “create a protocol called Game Night that opens Discord and launches my game”, “run Gaming Mode”, “start Development, but don't open Discord”, or “stop the protocol”. Steps that send, delete, close or buy things always ask you first, and never run unattended.</div>
+    </div>
+  </div>
+
+  <!-- ======================================================= automation center -->
+  <div id="center" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="ac-title">
+    <div class="modal-card cyan center-card">
+      <div class="mc-corner tl"></div><div class="mc-corner br"></div>
+      <div class="rd-head">
+        <div><div class="mc-kicker">MEDIA &amp; AUTOMATION CENTER · EVERYTHING JARVIS IS DOING</div><h2 id="ac-title">Automation Center</h2></div>
+        <button class="wb" id="ac-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <div class="ac-grid">
+        <section class="ac-panel ac-media" aria-labelledby="ac-media-h">
+          <h3 id="ac-media-h">MEDIA <em id="ac-media-src"></em></h3>
+          <div id="ac-sessions" class="ac-sessions"></div>
+        </section>
+        <section class="ac-panel ac-browser" aria-labelledby="ac-browser-h">
+          <h3 id="ac-browser-h">BROWSER</h3>
+          <div id="ac-browser"></div>
+        </section>
+        <section class="ac-panel ac-run" aria-labelledby="ac-run-h">
+          <h3 id="ac-run-h">AUTOMATION <em id="ac-run-name"></em></h3>
+          <div id="ac-timeline" class="ac-timeline"></div>
+        </section>
+        <section class="ac-panel ac-health" aria-labelledby="ac-health-h">
+          <h3 id="ac-health-h">SYSTEM HEALTH</h3>
+          <div id="ac-health" class="ac-health-grid"></div>
+        </section>
+        <section class="ac-panel ac-log" aria-labelledby="ac-log-h">
+          <h3 id="ac-log-h">ACTIVITY <em>✓ verified · ~ done, unconfirmed · ✗ failed</em></h3>
+          <div class="ac-log-tools">
+            <input id="ac-log-search" class="url-input" type="search" placeholder="Search what JARVIS did…" aria-label="Search the activity">
+            <div class="ac-log-kinds" id="ac-log-kinds"></div>
+          </div>
+          <ol id="ac-log" class="ac-log-list"></ol>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -501,6 +579,7 @@
           </select>
         </label>
         <p class="field-note">Pick the browser you're signed in to Google with. Or say “show it here” and JARVIS displays your file itself.</p>
+        <label class="toggle"><input type="checkbox" data-key="duck_media"><i></i><span>Lower music while I speak (restored afterwards)</span></label>
         <label class="field"><span>Play music on</span>
           <select data-key="music_service" id="set-music">
             <option value="youtube">YouTube (starts the song for you)</option><option value="spotify">Spotify (opens the search)</option>

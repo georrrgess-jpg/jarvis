@@ -3,8 +3,9 @@
 * Chrome (temporary profile) is started by JARVIS itself ("open chrome") and must be reported ready.
 * A public site ("open wikipedia") must be confirmed open from the browser's own window / address bar.
 * "open gmail" on a browser that isn't signed in must be recognised as needing a sign-in, not reported open.
-* Two local pages play tones with Media Session titles; "what's playing", "pause the music", "resume",
-  "skip forward 20 seconds" and "pause everything" must change what Windows itself reports.
+* Two local pages play tones with Media Session titles, one in Chrome and one in Edge (two tabs of one browser share a single
+  Windows media session); "what's playing", "pause the music", "resume", "skip forward 20 seconds" and "pause everything"
+  must change what Windows itself reports.
 * "play <song>" must find the real top YouTube result, open it, and confirm it is playing.
 
     python tests/windows_media_check.py report.json
@@ -32,8 +33,14 @@ sys.path.insert(0, str(ROOT))
 PAGE = """<!doctype html><title>{title} - Media Page</title><h1>{title}</h1>
 <audio id="a" src="tone{n}.wav" loop autoplay></audio>
 <script>
+const a = document.getElementById('a');
 navigator.mediaSession.metadata = new MediaMetadata({{title: '{title}', artist: '{artist}', album: 'CI'}});
-document.getElementById('a').play().catch(e => document.title = 'blocked ' + e);
+// what real players (YouTube, Spotify web) do: let Windows' media controls move through the track
+navigator.mediaSession.setActionHandler('seekto', (d) => {{ a.currentTime = d.seekTime; }});
+navigator.mediaSession.setActionHandler('play', () => a.play());
+navigator.mediaSession.setActionHandler('pause', () => a.pause());
+a.addEventListener('timeupdate', () => {{ if (a.duration) navigator.mediaSession.setPositionState({{duration: a.duration, position: a.currentTime, playbackRate: 1}}); }});
+a.play().catch(e => document.title = 'blocked ' + e);
 </script>"""
 
 
@@ -100,6 +107,7 @@ def main() -> int:
 
     try:
         assistant.start()
+        assistant.winhelper.available()  # it starts in the background; wait for it here
         caps = assistant.winhelper.status()
         check("Windows helper: media sessions and address bar available", caps["caps"].get("media") and caps["caps"].get("uia"), caps)
 
@@ -139,8 +147,12 @@ def main() -> int:
         check("'skip forward 20 seconds' moves the position", before is not None and after is not None and after >= before + 15,
               {"reply": reply, "before": before, "after": after})
 
-        nav = assistant.browser.open(f"{base}/p2.html", expect_title="Second Song")
-        for _ in range(40):
+        edge = next((p for p in (Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft/Edge/Application/msedge.exe",
+                                  Path(os.environ.get("ProgramFiles", "")) / "Microsoft/Edge/Application/msedge.exe") if p.exists()), None)
+        check("Microsoft Edge is installed (second player)", edge is not None, str(edge))
+        subprocess.Popen([str(edge), f"--user-data-dir={work / 'edge'}", "--no-first-run", "--no-default-browser-check",
+                          "--autoplay-policy=no-user-gesture-required", f"{base}/p2.html"])
+        for _ in range(60):
             if windows_status("Second Song") == "playing":
                 break
             time.sleep(0.25)
@@ -165,7 +177,8 @@ def main() -> int:
         report["browser"] = assistant.browser.status()
         assistant.shutdown()
         mock.stop()
-        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
+        for exe in ("chrome.exe", "msedge.exe"):
+            subprocess.run(["taskkill", "/F", "/IM", exe], capture_output=True)
         report["ok"] = not failures
         report_path.write_text(json.dumps(report, indent=2, default=str))
     print("ALL MEDIA AND BROWSER CHECKS PASSED" if not failures else f"FAILED: {failures}", flush=True)

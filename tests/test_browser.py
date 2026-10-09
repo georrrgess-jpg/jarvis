@@ -120,6 +120,24 @@ def test_a_stray_sign_in_page_doesnt_block_a_public_site(config):
     assert nav.ok and nav.state == bm.PAGE_READY
 
 
+def test_a_page_still_loading_is_not_reported_open(config):
+    """Real Chrome: the tab is "Untitled" (or shows the bare address) while the address bar already has the new URL."""
+    assert bm.still_loading(bm.Look(bm.READY, "Untitled - Google Chrome", "127.0.0.1:5000/p1.html"))
+    assert bm.still_loading(bm.Look(bm.READY, "mail.google.com/mail/ - Google Chrome", "mail.google.com/mail/"))
+    assert not bm.still_loading(bm.Look(bm.READY, "Inbox (3) - me@gmail.com - Gmail - Google Chrome", "mail.google.com/mail/u/0/#inbox"))
+    assert not matches(bm.Look(bm.READY, "Untitled - Google Chrome", "mail.google.com/mail/"), "mail.google.com")
+
+
+def test_gmail_redirecting_to_sign_in_is_not_reported_open(config):
+    """Seen on the Windows CI: a signed-out Gmail first shows mail.google.com in the address bar, then redirects to the sign-up page."""
+    screen = Screen([(1, [(9, "New Tab - Google Chrome", "chrome.exe")]), (2, [(9, "Gmail - Google Chrome", "chrome.exe")]),
+                     (4, [(9, "Gmail: Private and Secure Email | Google Workspace - Google Chrome", "chrome.exe")])])
+    url = lambda: "mail.google.com/mail/u/0/" if screen.looks < 4 else "workspace.google.com/intl/en/gmail/"  # noqa: E731
+    m, _ = manager(config, screen, urls={9: url})
+    nav = m.open("https://mail.google.com/mail/", wait=6)
+    assert not nav.ok and nav.state == bm.AUTHENTICATION_REQUIRED
+
+
 def test_profile_picker_and_first_run(config):
     m, _ = manager(config, Screen([(1, [(1, "Who's using Chrome?", "chrome.exe")])]))
     assert m.open("https://www.youtube.com", wait=3).state == bm.PROFILE_SELECTION
@@ -221,3 +239,16 @@ def test_favourite_website(jarvis):
     ask(assistant, events, "my favourite website is github.com")
     assert ask(assistant, events, "open my favourite website") == "Opening GitHub, sir."
     assert launched[-1] == "https://github.com"
+
+
+def test_an_app_is_only_called_open_once_its_window_shows(jarvis):
+    assistant, events, _ = jarvis
+    wins = []
+    assistant.desktop = type("D", (), {"windows": lambda self: list(wins), "foreground": lambda self: None,
+                                       "bring_to_front": lambda self, w: None, "monitors": lambda self: []})()
+    assistant.tools.open_target = lambda target, **k: {"name": "Discord", "kind": "app"}
+    assert ask(assistant, events, "open discord") == "Opening Discord, sir."  # launched, but no window yet: not claimed
+    assert assistant._activities[-1]["status"] == "unverified"
+    wins.append(Window(5, "Friends - Discord", "Discord.exe"))
+    assert ask(assistant, events, "open discord") == "Discord is open, sir."
+    assert assistant._activities[-1]["status"] == "ok" and assistant._activities[-1]["kind"] == "app"

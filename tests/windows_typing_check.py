@@ -119,14 +119,14 @@ def main() -> int:
         check("typed exact dictated words", typed().endswith("see you at five") and typed().startswith(before[:40]), {"reply": reply, "end": typed()[-40:]})
 
         # a protocol made by voice, run by name, whose steps type into the same real app
-        reply = say("create a protocol called Sign Off: type the words: best wishes, then wait 1 second, then type the words: from JARVIS")
+        reply = say("create a protocol called Sign Off: type the words: best wishes, then wait 1 second, then type the words: from your assistant")
         check("protocol created by voice", reply.startswith("Protocol Sign Off created") and "3 steps" in reply, reply)
         reply = say("run sign off")
         check("protocol started by name", reply.startswith("Initiating the Sign Off protocol"), reply)
         events.wait_for(lambda: any(p.get("status") in ("done", "stopped", "interrupted") for p in events.of("protocol")), 60)
         time.sleep(0.8)
         outcome = [p.get("status") for p in events.of("protocol")][-1]
-        check("protocol ran every step in order", outcome == "done" and typed().endswith("best wishesfrom JARVIS"),
+        check("protocol ran every step in order", outcome == "done" and typed().endswith("best wishesfrom your assistant"),
               {"outcome": outcome, "end": typed()[-40:]})
     except Exception as exc:  # noqa: BLE001
         import traceback

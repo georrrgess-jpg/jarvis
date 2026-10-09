@@ -80,6 +80,21 @@ def main() -> int:
     run("weekend forecast", lambda: weather.answer(parse_weather("what's the forecast for this weekend in Paris"), "sir"),
         lambda r: "Saturday" in r and "Sunday" in r)
 
+    from core.media import find_youtube_video
+    import httpx
+
+    with httpx.Client(timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36"}) as client:
+        for attempt in range(3):
+            try:
+                found = find_youtube_video(client, "Rick Astley Never Gonna Give You Up")
+                check("YouTube: finds the top video for a song (no API key)", bool(found) and "watch?v=" in found[0] and found[1],
+                      {"url": found[0], "title": found[1]} if found else None)
+                break
+            except httpx.HTTPError as exc:
+                if attempt == 2:
+                    check("YouTube: finds the top video for a song (no API key)", False, f"unreachable: {exc}")
+                time.sleep(10)
+
     config.update({"stt_engine": "google", "auto_language": False})
     stt = SpeechInput(config)
     noise = np.random.default_rng(0).normal(0, 300, 16000 * 2).astype(np.int16).tobytes()

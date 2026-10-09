@@ -70,11 +70,12 @@ _CALC_LEAD = re.compile(_LEAD + r"(?:what(?:'s| is| are)|calculate|compute|work 
 def _words_to_digits(text: str) -> str:
     """'twenty five' -> '25', 'two hundred and fifty' -> '250'."""
     tokens = re.findall(r"[\w.%']+|[+\-*/^()=]", text)
-    out, total, current, in_number = [], 0, 0, False
+    out, total, current, in_number, last_big = [], 0, 0, False, False
     for tok in tokens + [""]:
         low = tok.lower()
         if low in _NUMBER_WORDS and (low not in ("hundred", "thousand", "million") or in_number):
             value = _NUMBER_WORDS[low]
+            last_big = value >= 100
             if value == 100:
                 current = max(current, 1) * 100
             elif value >= 1000:
@@ -84,7 +85,7 @@ def _words_to_digits(text: str) -> str:
                 current += value
             in_number = True
             continue
-        if low == "and" and in_number:
+        if low == "and" and in_number and last_big:  # "two hundred and fifty", but not "two times three and four"
             continue
         if in_number:
             out.append(str(total + current))
@@ -119,6 +120,9 @@ def calculate(text: str) -> str | None:
     if not t or not re.search(r"\d|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|"
                               r"hundred|thousand|million)\b", t):
         return None
+    bare = re.fullmatch(r"(\d+)([/-])(\d+)(?:-\d+)*", t)
+    if bare and (bare.group(2) == "-" or bare.group(1) == bare.group(3) or int(bare.group(1)) % max(1, int(bare.group(3)))):
+        return None  # "9/11", "24/7", "50/50", "7-11", "4-4-2": dates, names and scores, not sums
     t = t.replace(",", "") if re.search(r"\d,\d{3}", t) else t
     t = _words_to_digits(t)
     root = re.fullmatch(r"(?:the )?square root of ([\d.]+)", t)
@@ -168,12 +172,19 @@ _VOLUME_DOWN = re.compile(_LEAD + r"(?:turn (?:it |the volume |the sound |the mu
 _VOLUME_SET = re.compile(_LEAD + r"(?:set |put |change )?(?:the )?(?:volume|sound)(?: level)?(?: (?:to|at))?\s*(?P<n>\d{1,3})\s*(?:%|percent)?" + _END, re.I)
 _VOLUME_MAX = re.compile(_LEAD + r"(?:(?:max(?:imum)?|full|maximum) (?:volume|sound)|volume (?:to )?(?:max|full|maximum)|turn it all the way up)" + _END, re.I)
 _MUTE = re.compile(_LEAD + r"(?:mute|unmute|(?:un)?mute (?:the )?(?:sound|volume|audio|computer|pc|it)|silence the (?:computer|pc)|be quiet please)" + _END, re.I)
-_TIMER = re.compile(_LEAD + r"(?:set |start |create |put on |begin )?(?:a |an |the )?(?P<kind>timer|alarm|countdown|stopwatch)?\s*(?:for|of)?\s*"
-                    r"(?P<dur>(?:(?:\d+(?:\.\d+)?|an?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty five|sixty|half(?: an?)?)\s*"
-                    r"(?:and a half\s*)?(?:hours?|hrs?|minutes?|mins?|seconds?|secs?)\s*(?:and\s*)?)+)" + _END, re.I)
-_TIMER_VERB = re.compile(_LEAD + r"(?:set|start|create|put on|begin)\s+(?:a |an |the )?(?:timer|alarm|countdown)", re.I)
-_REMIND = re.compile(_LEAD + r"remind me (?:in (?P<dur>.+?) )?to (?P<what>.+?)(?: in (?P<dur2>(?:\d+|an?|one|two|three|five|ten|fifteen|twenty|thirty|half an?)\s*(?:hours?|minutes?|mins?|seconds?|secs?).*?))?"
-                     r"(?: at (?P<clock>\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)))?" + _END, re.I)
+_UNIT_WORD = r"(?:hours?|hrs?|minutes?|mins?|seconds?|secs?)"
+_DUR = r"(?:\d+(?:\.\d+)?\s*" + _UNIT_WORD + r"\s*(?:and\s*|,\s*)?)+"
+_CLOCK = r"(?:\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)?|noon|midday|midnight)"
+_TIMER = re.compile(_LEAD + r"(?:(?:set|start|create|put on|begin|make)\s+)?(?:me\s+)?(?:a |an |the )?(?:(?P<kind>timer|alarm|countdown|stopwatch)\s*)?(?:for|of|in)?\s*"
+                    r"(?P<dur>" + _DUR + r")(?:\s*(?P<kind2>timer|alarm|countdown))?" + _END, re.I)
+_TIMER_VERB = re.compile(_LEAD + r"(?:set|start|create|put on|begin|make)\s+(?:me\s+)?(?:a |an |the )?(?:timer|alarm|countdown)", re.I)
+_REMIND = [
+    re.compile(_LEAD + r"remind me (?:in (?P<dur>" + _DUR + r") )?(?:at (?P<clock0>" + _CLOCK + r") )?(?:to |that |about )(?P<what>.+?)"
+               r"(?: in (?P<dur2>" + _DUR + r"))?(?: at (?P<clock>" + _CLOCK + r"))?(?: (?:today|tonight|this (?:morning|afternoon|evening)))?" + _END, re.I),
+    re.compile(_LEAD + r"(?:set|create|make|add) (?:me )?(?:a |an )?reminder (?:(?:for|in) (?P<dur>" + _DUR + r")|(?:for|at) (?P<clock>" + _CLOCK + r"))"
+               r"(?: (?:to|that|about) (?P<what>.+?))?" + _END, re.I),
+    re.compile(_LEAD + r"(?:set|create|make|add) (?:me )?(?:a |an )?reminder (?:to|that|about) (?P<what>.+?) (?:(?:in|for) (?P<dur>" + _DUR + r")|at (?P<clock>" + _CLOCK + r"))" + _END, re.I),
+]
 _TIMER_CANCEL = re.compile(_LEAD + r"(?:cancel|stop|clear|delete|remove|turn off|dismiss)\s+(?:my |the |all |all my |all the )?(?:timers?|alarms?|reminders?|countdowns?)" + _END, re.I)
 _TIMER_STATUS = re.compile(_LEAD + r"(?:how (?:long|much time) (?:is )?left(?: on (?:my|the) (?:timer|alarm))?|(?:what|which) timers? (?:do i have|are (?:running|set))|how(?:'s| is) (?:my|the) timer(?: doing)?|"
                            r"(?:check|show|list) (?:my |the )?(?:timers?|alarms?|reminders?)|time (?:left|remaining))" + _END, re.I)
@@ -185,25 +196,33 @@ _DICE = re.compile(_LEAD + r"(?:roll (?:a |the )?(?:(?P<n>\d+)[- ]?sided )?(?:di
 _RANDOM = re.compile(_LEAD + r"(?:pick|give me|choose|say) (?:a )?(?:random )?number (?:between|from) (?P<a>\d+) (?:and|to) (?P<b>\d+)" + _END, re.I)
 
 _UNIT = {"hour": 3600, "hr": 3600, "minute": 60, "min": 60, "second": 1, "sec": 1}
-_WORD_NUM = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-             "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "forty five": 45, "sixty": 60}
+_ONES = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
+_SMALL = {**_ONES, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+          "seventeen": 17, "eighteen": 18, "nineteen": 19}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+
+
+def spoken_numbers(text: str) -> str:
+    """'twenty-five minutes' -> '25 minutes', 'two and a half hours' -> '2.5 hours', 'five pm' -> '5 pm'."""
+    t = re.sub(r"\b(" + "|".join(_TENS) + r")[\s-]+(" + "|".join(_ONES) + r")\b",
+               lambda m: str(_TENS[m.group(1).lower()] + _ONES[m.group(2).lower()]), text, flags=re.I)
+    t = re.sub(r"\b(" + "|".join(list(_SMALL) + list(_TENS)) + r")\b", lambda m: str({**_SMALL, **_TENS}[m.group(1).lower()]), t, flags=re.I)
+    t = re.sub(r"\b(?:an?|1)\s+(" + _UNIT_WORD + r")\s+and\s+a\s+half\b", r"1.5 \1", t, flags=re.I)  # "an hour and a half"
+    t = re.sub(r"\b(\d+)\s+(" + _UNIT_WORD + r")\s+and\s+a\s+half\b", lambda m: f"{int(m.group(1)) + 0.5:g} {m.group(2)}", t, flags=re.I)
+    t = re.sub(r"\b(\d+)\s+and\s+a\s+half\s+(" + _UNIT_WORD + r")", lambda m: f"{int(m.group(1)) + 0.5:g} {m.group(2)}", t, flags=re.I)
+    t = re.sub(r"\bhalf\s+an?\s+(hour|minute)\b", lambda m: "30 minutes" if m.group(1).lower() == "hour" else "30 seconds", t, flags=re.I)
+    t = re.sub(r"\ba\s+quarter\s+of\s+an\s+hour\b|\bquarter\s+of\s+an\s+hour\b", "15 minutes", t, flags=re.I)
+    t = re.sub(r"\b(?:an?)\s+(" + _UNIT_WORD + r")", r"1 \1", t, flags=re.I)
+    return re.sub(r"(\d+)\s*-\s*(" + _UNIT_WORD + r")", r"\1 \2", t, flags=re.I)  # "5-minute timer"
 
 
 def parse_duration(text: str) -> int | None:
-    """'5 minutes', 'half an hour', 'an hour and a half', '2 hours 30 minutes' -> seconds."""
-    t = (text or "").lower().strip()
+    """'5 minutes', 'half an hour', 'an hour and a half', 'twenty-five minutes', '2 hours 30 minutes' -> seconds."""
+    t = spoken_numbers((text or "").lower().strip())
     total = 0.0
     found = False
-    if re.search(r"\ban hour and a half\b|\bone and a half hours?\b", t):
-        return 5400
-    if re.search(r"\bhalf an? hour\b", t):
-        return 1800
-    if re.search(r"\bhalf a minute\b", t):
-        return 30
-    for number, unit in re.findall(r"(\d+(?:\.\d+)?|forty five|an?|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|sixty)\s*"
-                                   r"(hours?|hrs?|minutes?|mins?|seconds?|secs?)", t):
-        value = float(number) if re.fullmatch(r"\d+(?:\.\d+)?", number) else _WORD_NUM[number]
-        total += value * _UNIT[unit.rstrip("s")]
+    for number, unit in re.findall(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b", t):
+        total += float(number) * _UNIT[unit.rstrip("s")]
         found = True
     return int(total) if found and total > 0 else None
 
@@ -234,12 +253,20 @@ def parse_quick(text: str) -> Quick | None:
         return Quick("timer_cancel")
     if _TIMER_STATUS.match(t):
         return Quick("timer_status")
-    remind = _REMIND.match(t)
-    if remind and (remind.group("dur") or remind.group("dur2") or remind.group("clock")):
-        seconds = parse_duration(remind.group("dur") or remind.group("dur2") or "")
-        return Quick("timer", {"seconds": seconds, "clock": remind.group("clock"), "label": remind.group("what").strip(" .,!"), "reminder": True})
-    timer = _TIMER.match(t)
-    if timer and (timer.group("kind") or _TIMER_VERB.match(t) or re.match(_LEAD + r"(?:in|for) ", t)) and timer.group("kind") != "stopwatch":
+    n = spoken_numbers(t)
+    for pattern in _REMIND:
+        remind = pattern.match(n)
+        if not remind:
+            continue
+        g = remind.groupdict()
+        dur = g.get("dur") or g.get("dur2")
+        clock = g.get("clock") or g.get("clock0")
+        if dur or clock:
+            return Quick("timer", {"seconds": parse_duration(dur) if dur else None, "clock": clock,
+                                   "label": (g.get("what") or "").strip(" .,!"), "reminder": True})
+    timer = _TIMER.match(n)
+    kind = (timer.group("kind") or timer.group("kind2")) if timer else None
+    if timer and (kind or _TIMER_VERB.match(n) or re.match(_LEAD + r"(?:in|for) ", n)) and kind != "stopwatch":
         seconds = parse_duration(timer.group("dur"))
         if seconds:
             return Quick("timer", {"seconds": seconds, "label": "", "reminder": False})

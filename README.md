@@ -15,6 +15,15 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
 
 ## Features
 
+- **Protocols: your own command sequences.** Teach JARVIS a list of commands once and run it by name:
+  - **Make one by voice in one go**: "create a protocol called Morning: open Spotify, then what's the weather, then open Gmail".
+  - **Or step by step**: "create a new protocol called Work Mode", then say each step ("open Slack", "set the volume to 20", "wait 5 seconds", "say Let's get to work") and "done" to save ("scratch that" removes the last step, "cancel" throws it away).
+  - **Or on screen**: the protocols button in the title bar (<kbd>Ctrl</kbd>+<kbd>R</kbd>) lists them; **NEW PROTOCOL** opens an editor with one command per line, step ideas, and RUN / EDIT / DELETE (with undo).
+  - **Run it**: "Jarvis, run Morning", "initiate the house party protocol", "execute Work Mode", or the RUN button. Each step goes through JARVIS exactly as if you'd said it, so anything works as a step: opening apps and sites, music, volume, weather, timers, typing, documents, emails, questions. `wait 10 seconds` pauses and `say …` speaks. A PROTOCOL strip shows which step it's on, with a STOP button.
+  - **Manage it**: "add open Discord to the Morning protocol", "remove the last step from Morning", "what's in the Morning protocol?", "rename the Morning protocol to Sunrise", "list my protocols", "delete the House Party protocol", "stop the protocol". A step like "run the Lights protocol" runs another protocol's steps in place.
+  - **Schedule it**: "schedule the Morning protocol for 7:30 every weekday", "run the Night protocol at 11 pm on Fridays", or the *Run it by itself at* switch in the editor. "Don't run the Morning protocol automatically" turns that off.
+  - Talking to JARVIS (or pressing <kbd>Esc</kbd>) while a protocol runs stops it; a timer going off only pauses it.
+- **Music and media**: "play Bohemian Rhapsody" finds the top YouTube result (free, no key) and starts it; "play lo-fi beats on Spotify" opens Spotify's search (or set Settings ▸ Google ▸ *Play music on* to Spotify). "Pause", "resume", "next song", "skip", "go back a song" and "stop the music" use the media keys, so they work with Spotify, YouTube in any browser, VLC and Windows players. "What's playing?" / "who sings this?" reads it from Spotify, YouTube, YouTube Music or VLC. A NOW PLAYING strip under the reactor shows the track with ⏮ ⏯ ⏭ buttons.
 - **Arc-reactor core** on Canvas: rotating tick rings, coils, a 96-bar circular spectrum, shock-wave rings on voice peaks, particles and live HUD read-outs. Colour follows the speech state machine **IDLE → LISTENING → THINKING → SPEAKING** (cyan, aqua, amber, ice blue).
 - **Audio-reactive visualisers**: real FFT bands from the microphone while listening and from JARVIS's own voice while speaking (each clip is analysed once in Python and played back in sync in the UI), plus an oscilloscope waveform.
 - **Streaming replies**: tokens stream into the comms log with a typewriter effect, and JARVIS starts speaking after the first sentence instead of waiting for the full answer.
@@ -26,7 +35,7 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
 - **Opens your Google files by name**: "open my Messi doc", "open the budget spreadsheet", "open my latest presentation", "open it" (the one just made), "what docs do I have?". Links open as your linked Google account (so they don't land on the wrong-account or login page), in the browser you choose in Settings ▸ Google ▸ *Open links in*. If your browser asks you to sign in, say **"show it here"** (or press **VIEW** on the file card): JARVIS reads the file from your Google account and shows it in its own reader window, no browser and no sign-in needed. "Read my Messi doc to me" reads it aloud.
 - **Email**: "email Sarah saying I'll be ten minutes late", "send my boss an email asking for Friday off", "email it to Tom" (shares the doc JARVIS just wrote). JARVIS writes the email, finds the address from your Gmail history, shows the draft in an editable card and asks "Shall I send it?". **Nothing is sent until you say yes or press Send.** Without the Google link, the draft opens in Gmail for you to send.
 - **Patient, not pushy**: when you pause, JARVIS quietly checks what it heard. A finished sentence is answered right away; if you trail off ("open the…", "email John and…", "um…") it says "take your time" and keeps listening (Settings ▸ Voice input ▸ *Patience*, up to 8 extra seconds), and whatever you add simply continues the same request. Long dictation (up to 45 s) and a 10 s head start before you begin speaking are allowed.
-- **Instant answers, no waiting for the model**: greetings and thanks, arithmetic ("what's 15 percent of 240", "twenty five times four"), battery / CPU / memory / disk status, volume and mute ("volume up", "set the volume to 40"), timers and reminders ("set a timer for 5 minutes", "remind me in 10 minutes to call Mum", "how long is left?"), screenshots, "show desktop", "lock the computer", coin flips, dice and jokes. They work even when Ollama is off. Chained requests ("open Spotify and then open Notepad") run in order, and the voice starts at the first comma of a long answer instead of waiting for the full stop.
+- **Instant answers, no waiting for the model**: greetings and thanks, arithmetic ("what's 15 percent of 240", "twenty five times four"), battery / CPU / memory / disk status, volume and mute ("volume up", "set the volume to 40", "unmute"), timers and reminders ("set a 5 minute timer", "set a timer for an hour and a half", "remind me in 10 minutes to call Mum", "remind me at 5 pm to feed the cat", "remind me to call Mum at 17:30", "how long is left?"; a timer that goes off waits until JARVIS has finished what it's doing), screenshots, "show desktop", "lock the computer", coin flips, dice and jokes. They work even when Ollama is off. Chained requests ("open Spotify and then open Notepad") run in order, and the voice starts at the first comma of a long answer instead of waiting for the full stop.
 - **Sees your screen, watches it, and can act on it** (all local and free):
   - **Look**: "what's on my screen?", "what does this error mean?", "summarise this article", "translate this page", "is this website safe?" or press the eye button. JARVIS captures the app you're working in (even when its own HUD covers it), reads its text with Windows' built-in OCR and asks a local vision model running on your GPU through Ollama. Say **"install vision"** (or Settings ▸ Vision ▸ Download) once to get Qwen2.5-VL (~6 GB). Without it, JARVIS still answers from the text it reads.
   - **Watch**: "tell me when my download finishes", "let me know if an error appears", "watch my screen" (speaks up about errors, finished tasks, new messages). An amber WATCHING strip with a STOP button shows whenever it's watching; "stop watching" ends it.
@@ -114,6 +123,8 @@ core/
   wakelearn.py      teaching the wake-word listener a new name: synthetic voices, augmentation, a tiny numpy network
   wakewords.py      learned wake words: background training, recording your voice, models in %APPDATA%
   tabs.py           browser tabs by voice: find a tab by its title, close, reopen, new, next/previous, close others
+  protocols.py      protocols: your named command lists, storing them, schedules, "run Morning" and the other spoken commands
+  media.py          music: "play X" (top YouTube result / Spotify search), media keys, "what's playing?" from window titles
   docops.py         multi-step document requests ("rename it to X, then type out Y") and "type out ..." anywhere
   docs_keys.py      renaming and typing in a Google Doc open in the browser, by keyboard
   monitors.py       which screen is which ("main", "other", "left", "monitor 2") and moving windows between them
@@ -132,7 +143,7 @@ core/
   browsers.py       opening links in the chosen browser, as the linked Google account
   patience.py       does the sentence sound finished? (decides whether to keep listening)
   quick.py          instant skills: small talk, sums, status, volume, timers (no model)
-  osctl.py          volume, screenshots, show desktop, lock screen
+  osctl.py          volume, mute, media keys, screenshots, show desktop, lock screen
   screen.py         window tracking, PrintWindow capture, SendInput mouse/keyboard (Win32 via ctypes)
   ocr.py            Windows built-in OCR through a persistent PowerShell helper (Tesseract fallback)
   vision.py         look / locate (text, numbered marks, grid) / watch / act on top of a local vision model
@@ -156,7 +167,7 @@ build.py            automated PyInstaller build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                  # 550+ tests; no microphone, speakers or network needed
+python -m pytest -q                  # 950+ tests; no microphone, speakers or network needed
 python -m tests.mock_ollama          # fake Ollama on :11434 for UI work without a model
 ```
 

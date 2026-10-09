@@ -90,6 +90,7 @@ def find_tab(desktop, wanted: str, key: str = "browser", current: Window | None 
     for window in windows:
         desktop.bring_to_front(window)
         start = (desktop.window_info(window.hwnd) or window).title
+        seen = [start]
         for _ in range(MAX_TABS):
             desktop.press([VK_CONTROL, VK_TAB], window=window)
             time.sleep(settle)
@@ -98,8 +99,13 @@ def find_tab(desktop, wanted: str, key: str = "browser", current: Window | None 
                 break
             if _matches(info.title, wanted):
                 return info
-            if info.title == start:
-                break  # back where we started: it isn't in this window
+            seen.append(info.title)
+            # back where we started? Two tabs can share a title ("New Tab"), so only stop once the order repeats too
+            if len(seen) > 2 and seen[-2] == start and seen[-1] == seen[1]:
+                desktop.press([VK_CONTROL, VK_SHIFT, VK_TAB], window=window)  # one past the start: step back, leave it as it was
+                break
+            if len(seen) == 2 and info.title == start:
+                break  # only one tab
     return None
 
 
@@ -171,13 +177,17 @@ def close_other_tabs(desktop, key: str = "browser", current: Window | None = Non
     desktop.bring_to_front(window)
     keep = (desktop.window_info(window.hwnd) or window).title
     closed = 0
-    desktop.press([VK_CONTROL, VK_TAB], window=window)
-    time.sleep(settle)
     for _ in range(MAX_TABS):
+        desktop.press([VK_CONTROL, VK_TAB], window=window)  # the tab to the right (or, from the last one, the first)
+        time.sleep(settle)
         info = desktop.window_info(window.hwnd)
         if info is None or info.title == keep:
-            break  # back on the one we keep: everything else is gone
-        desktop.press([VK_CONTROL, VK_W], window=window)  # the browser then shows the next tab, which we close in turn
-        time.sleep(settle)
-        closed += 1
+            break  # Ctrl+Tab stays put: only the one we keep is left
+        for _ in range(MAX_TABS):
+            desktop.press([VK_CONTROL, VK_W], window=window)  # the browser then shows a neighbour, which we close in turn
+            time.sleep(settle)
+            closed += 1
+            info = desktop.window_info(window.hwnd)
+            if info is None or info.title == keep:
+                break  # back on the one we keep; tabs to its left (if any) come next
     return closed

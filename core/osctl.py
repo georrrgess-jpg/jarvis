@@ -99,6 +99,22 @@ def media_key(action: str, platform: str | None = None, runner=subprocess.run, u
     raise OsControlError("I can't control media playback on this system.")
 
 
+def set_mute(on: bool, platform: str | None = None, runner=subprocess.run, user32=None) -> None:
+    """Mute or unmute (not toggle). On Windows a volume-up then volume-down unmutes and keeps the level."""
+    platform = platform or sys.platform
+    if platform == "win32":
+        _press([VK_VOLUME_UP], user32)
+        _press([VK_VOLUME_DOWN], user32)
+        if on:
+            _press([VK_VOLUME_MUTE], user32)
+    elif shutil.which("pactl") or runner is not subprocess.run:
+        runner(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1" if on else "0"], check=False, capture_output=True)
+    elif shutil.which("amixer"):
+        runner(["amixer", "-q", "sset", "Master", "mute" if on else "unmute"], check=False, capture_output=True)
+    else:
+        raise OsControlError("I can't control the volume on this system.")
+
+
 def screenshots_folder() -> Path:
     base = Path.home() / "Pictures"
     folder = base / "Screenshots" if base.is_dir() else Path.home()

@@ -144,19 +144,38 @@ def _quick_small_talk():
     return _SMALL_TALK
 
 
-def _seconds_until(clock: str) -> int | None:
-    """'6 pm' / '6:30 pm' -> seconds until the next time the clock shows that."""
-    m = re.match(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\s*$", clock or "", re.I)
-    if not m:
-        return None
-    hour, minute = int(m.group(1)) % 12, int(m.group(2) or 0)
-    if m.group(3).lower() == "p":
-        hour += 12
-    now = datetime.now()
-    due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if due <= now:
-        due = due.replace(day=now.day) + __import__("datetime").timedelta(days=1)
-    return int((due - now).total_seconds())
+def _seconds_until(clock: str, now: datetime | None = None) -> int | None:
+    """'6 pm' / '6:30pm' / '17:30' / 'noon' / '5' -> seconds until the clock next shows that ('5' means whichever 5 o'clock comes first)."""
+    from datetime import timedelta
+
+    c = (clock or "").strip().lower()
+    now = now or datetime.now()
+    if c in ("noon", "midday"):
+        options = [(12, 0)]
+    elif c == "midnight":
+        options = [(0, 0)]
+    else:
+        m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?m\.?)?$", c)
+        if not m:
+            return None
+        hour, minute = int(m.group(1)), int(m.group(2) or 0)
+        if hour > 23 or minute > 59:
+            return None
+        if m.group(3):
+            if hour > 12:
+                return None
+            options = [(hour % 12 + (12 if m.group(3) == "p" else 0), minute)]
+        elif hour > 12 or hour == 0 or m.group(2) and hour >= 13:
+            options = [(hour, minute)]
+        else:
+            options = [(hour % 12, minute), (hour % 12 + 12, minute)]
+    best = None
+    for hour, minute in options:
+        due = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if due <= now:
+            due += timedelta(days=1)
+        best = due if best is None or due < best else best
+    return int((best - now).total_seconds())
 
 
 def _view_event(data: dict, file_id: str | None) -> dict:
@@ -355,6 +374,7 @@ class Assistant:
         self._recording: dict | None = None  # a protocol being dictated step by step: {name, steps, at, id}
         self._scheduler_stop = threading.Event()
         self._now_playing: NowPlaying | None = None
+        self._announcements = 0  # timers / reminders waiting for a quiet moment to speak
         self._restored: list[dict] = []  # the end of the last conversation, carried on after a restart
         self.memory = MemoryEngine(config, self.llm, on_event=lambda kind, payload: self.emit(kind, **payload))
         self.weather = Weather(config, self.memory)
@@ -760,6 +780,13 @@ class Assistant:
                         outcome = "stopped"
                         break
                     continue
+                waited = time.monotonic()
+                while self._announcements and not stop.is_set() and time.monotonic() - waited < 30:
+                    time.sleep(0.05)  # a timer went off during the last step: it speaks first
+                with self._turn_lock:
+                    speaking = self._turn is not None and self._turn.kind == "announce"
+                if speaking:
+                    self._wait_for_quiet(stop)  # a timer or reminder is being announced: don't cut it off
                 turn = self._new_turn("protocol")
                 turn.learn = False
                 run["turn"], run["interrupted_by"] = turn, None
@@ -1264,7 +1291,7 @@ class Assistant:
         parts = [p.strip() for p in _CHAIN_SPLIT.split(text.strip()) if p.strip()]
         if len(parts) < 2 or len(parts) > 5:
             return None
-        replies = []
+        replies, understood = [], 0
         for part in parts:
             if turn.cancel.is_set():
                 break
@@ -1272,7 +1299,10 @@ class Assistant:
             if reply is None:
                 replies.append(f"I couldn't work out '{part}', {self.title}.")
                 continue
+            understood += 1
             replies.append(reply)
+        if not understood:
+            return None  # "open the pod bay doors and start the engine": the model can answer that
         suffix = f", {self.title}."
         return " ".join(r[: -len(suffix)] + "." if i < len(replies) - 1 and r.endswith(suffix) else r for i, r in enumerate(replies))
 
@@ -1747,8 +1777,9 @@ class Assistant:
     def _quick_volume(self, turn: Turn, q: Quick, title: str) -> str:
         try:
             if q.args.get("mute"):
-                osctl.toggle_mute()
-                return f"Toggling the sound, {title}."
+                on = q.args.get("word") != "unmute"
+                osctl.set_mute(on)
+                return f"{'Muted' if on else 'Sound back on'}, {title}."
             if "set" in q.args:
                 osctl.set_volume(q.args["set"])
                 return f"Volume set to {q.args['set']} percent, {title}."
@@ -1799,7 +1830,10 @@ class Assistant:
         self._emit_timers()
         span = describe_duration(seconds)
         if label:
-            return f"Very well, {title}. I'll remind you to {label} in {span}."
+            when = f"at {clock}" if clock and not q.args.get("seconds") else f"in {span}"
+            return f"Very well, {title}. I'll remind you to {_you(label)} {when}."
+        if q.args.get("reminder"):
+            return f"Reminder set for {span} from now, {title}."
         return f"Timer set for {span}, {title}."
 
     def _quick_timer_cancel(self, turn: Turn, q: Quick, title: str) -> str:
@@ -1834,20 +1868,30 @@ class Assistant:
             return
         self._emit_timers()
         label, title = entry["label"], self.title
-        message = f"A reminder, {title}: {label}." if label else f"Your {describe_duration(entry['seconds'])} timer is up, {title}."
-        self.emit("notice", level="info", text=("Reminder: " + label) if label else "Timer finished.")
+        message = (f"A reminder, {title}: {_you(label)}." if label else
+                   f"Time's up, {title}. Your timer for {describe_duration(entry['seconds'])} has finished.")
+        self.emit("notice", level="info", text=("Reminder: " + _you(label)) if label else "Timer finished.")
         self.sfx.play("notify")
-        deadline = time.monotonic() + 90
-        while self.state.state != State.IDLE and time.monotonic() < deadline:  # never talk over a conversation
-            time.sleep(0.5)
-        if not self._prewarm_stop.is_set():
-            self.speak(message, delay=0.4)
+        with self._turn_lock:
+            self._announcements += 1  # a running protocol pauses between steps to let this through
+        try:
+            deadline = time.monotonic() + 1800
+            while time.monotonic() < deadline and not self._prewarm_stop.is_set():  # never cut off a conversation or a task
+                with self._turn_lock:
+                    if self._turn is None:
+                        break
+                time.sleep(0.2)
+            if not self._prewarm_stop.is_set():
+                self.speak(message, delay=0.4)
+        finally:
+            with self._turn_lock:
+                self._announcements -= 1
 
     def _prewarm_phrases(self) -> list[str]:
         title = self.title
         phrases = [f"Good morning, {title}. How may I help?", f"Good afternoon, {title}. How may I help?", f"Good evening, {title}. How may I help?",
                    f"At your service, {title}.", f"Hello, {title}. What can I do for you?", f"Done, {title}.", f"Very well, {title}.",
-                   f"Standing by, {title}.", f"Volume up, {title}.", f"Volume down, {title}.", f"Toggling the sound, {title}.",
+                   f"Standing by, {title}.", f"Volume up, {title}.", f"Volume down, {title}.", f"Muted, {title}.", f"Sound back on, {title}.",
                    f"Desktop cleared, {title}.", f"Heads, {title}.", f"Tails, {title}.", f"Timer set for 5 minutes, {title}.",
                    f"Timer set for 10 minutes, {title}.", f"You have no timers running, {title}.", f"Shall I send it?",
                    f"I couldn't find that, {title}.", f"Opening Spotify, {title}.", f"Opening Chrome, {title}.", f"Opening Notepad, {title}."]
@@ -2004,7 +2048,7 @@ class Assistant:
             turn.learn = False
             self._deliver(turn, [self.pause_listening()])
             return
-        if _RESUME_LISTENING.match(_bare(text)) and (self._paused or source == "text"):
+        if _RESUME_LISTENING.match(_bare(text)) and (self._paused or (source == "text" and not re.match(r"^\W*unmute\b", _bare(text), re.I))):
             turn.learn = False
             self._deliver(turn, [self.resume_listening()])
             return
@@ -2063,6 +2107,12 @@ class Assistant:
             self._deliver(turn, self._doc_command(turn, text, doc_cmd, lang), language=lang.code if lang else None, working=True)
             return
 
+        early = parse_quick(text)
+        if early is not None and early.kind in ("desktop", "status", "lock", "screenshot", "timer", "timer_cancel", "timer_status"):
+            reply = self._quick(turn, text)  # "show me the desktop" / "run a diagnostic" aren't apps to open
+            if reply:
+                self._deliver(turn, [reply])
+                return
         media = parse_media(text)
         if media is not None and media.action != "play":
             self._deliver(turn, [self._media(turn, media)])

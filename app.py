@@ -770,6 +770,14 @@ def run_selftest(report_path: str | None) -> int:
 
         from core.docops import parse_doc_command
 
+        from core.media import parse_media
+        from core.protocols import parse_protocol_command
+
+        morning = parse_protocol_command("create a protocol called Morning: open Spotify, then what's the weather")
+        song = parse_media("play Bohemian Rhapsody on YouTube")
+        if not (morning and morning.action == "create" and morning.steps == ["open Spotify", "what's the weather"]
+                and song and song.query == "Bohemian Rhapsody" and song.service == "youtube"):
+            raise RuntimeError("protocol / music understanding misbehaved")
         pizza = parse_doc_command("rename the Google Doc to Pizza recipe and then type out a pizza recipe")
         if not (pizza and [s.action for s in pizza.steps] == ["rename", "write"] and parse_act("close tap").action == "close_tab"):
             raise RuntimeError("document steps / tab understanding misbehaved")

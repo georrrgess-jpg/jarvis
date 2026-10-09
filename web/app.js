@@ -656,13 +656,14 @@
       });
     },
     document(ev) {
-      const slides = ev.doc_kind === 'slides';
+      const slides = ev.doc_kind === 'slides', sheet = ev.doc_kind === 'sheet';
       const icon = slides
         ? '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="12" rx="1.5"/><path d="M8 20h8M12 17v3M7 9h6M7 12h10"/></svg>'
-        : '<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4M9 11h6M9 14h6M9 17h4"/></svg>';
-      const el = this.card(`doc-card ${slides ? 'slides' : 'doc'}`, `
+        : sheet ? '<svg viewBox="0 0 24 24"><rect x="4" y="3.5" width="16" height="17" rx="1.5"/><path d="M4 9h16M4 14.5h16M10 9v11.5"/></svg>'
+          : '<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4M9 11h6M9 14h6M9 17h4"/></svg>';
+      const el = this.card(`doc-card ${slides ? 'slides' : sheet ? 'sheet' : 'doc'}`, `
         <div class="dc-icon">${icon}</div>
-        <div class="dc-main"><div class="dc-kicker">${slides ? 'GOOGLE SLIDES' : 'GOOGLE DOC'} · SAVED</div><div class="dc-title"></div></div>
+        <div class="dc-main"><div class="dc-kicker">${slides ? 'GOOGLE SLIDES' : sheet ? 'GOOGLE SHEET' : 'GOOGLE DOC'} · SAVED</div><div class="dc-title"></div></div>
         <div class="dc-btns"><button class="btn ghost sm dc-view" title="Read it here, no browser or sign-in needed">VIEW</button>
         <button class="btn ghost sm dc-open">OPEN ↗</button></div>`);
       $('.dc-title', el).textContent = ev.title || 'Untitled';

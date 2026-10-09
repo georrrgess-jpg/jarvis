@@ -1,7 +1,8 @@
 """Real-desktop check of JARVIS's typing (run by the Windows CI job).
 
 A small text editor is put in front; the real Assistant (with a stand-in language model that writes a pizza
-recipe) is asked "type out a pizza recipe that I can make" and "type the words: see you at five". The editor
+recipe) is asked "type out a pizza recipe that I can make" and "type the words: see you at five", then a protocol made by voice
+types into it too. The editor
 reports exactly what arrived, so nothing is assumed.
 
     python tests/windows_typing_check.py report.json
@@ -116,6 +117,17 @@ def main() -> int:
         reply = say("type the words: see you at five")
         time.sleep(0.8)
         check("typed exact dictated words", typed().endswith("see you at five") and typed().startswith(before[:40]), {"reply": reply, "end": typed()[-40:]})
+
+        # a protocol made by voice, run by name, whose steps type into the same real app
+        reply = say("create a protocol called Sign Off: type the words: best wishes, then wait 1 second, then type the words: from JARVIS")
+        check("protocol created by voice", reply.startswith("Protocol Sign Off created") and "3 steps" in reply, reply)
+        reply = say("run sign off")
+        check("protocol started by name", reply.startswith("Initiating the Sign Off protocol"), reply)
+        events.wait_for(lambda: any(p.get("status") in ("done", "stopped", "interrupted") for p in events.of("protocol")), 60)
+        time.sleep(0.8)
+        outcome = [p.get("status") for p in events.of("protocol")][-1]
+        check("protocol ran every step in order", outcome == "done" and typed().endswith("best wishesfrom JARVIS"),
+              {"outcome": outcome, "end": typed()[-40:]})
     except Exception as exc:  # noqa: BLE001
         import traceback
 

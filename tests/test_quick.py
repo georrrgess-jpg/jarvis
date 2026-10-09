@@ -109,7 +109,7 @@ def jarvis(config, mock_ollama, monkeypatch):
     events, calls = Events(), []
     monkeypatch.setattr(osctl, "change_volume", lambda delta: calls.append(("volume", delta)))
     monkeypatch.setattr(osctl, "set_volume", lambda n: calls.append(("set", n)))
-    monkeypatch.setattr(osctl, "toggle_mute", lambda: calls.append(("mute",)))
+    monkeypatch.setattr(osctl, "set_mute", lambda on: calls.append(("mute",) if on else ("unmute",)))
     monkeypatch.setattr(osctl, "take_screenshot", lambda: "C:/Pictures/Screenshots/JARVIS.png")
     assistant = Assistant(config, events, tts=FakeTTS())
     assistant.start()
@@ -174,7 +174,8 @@ def test_volume_commands(jarvis):
     say("turn it down")
     say("set the volume to 40")
     say("mute")
-    assert calls == [("volume", 10), ("volume", -10), ("set", 40), ("mute",)]
+    say("unmute the sound")
+    assert calls == [("volume", 10), ("volume", -10), ("set", 40), ("mute",), ("unmute",)]
     assert not model_calls(mock)
 
 
@@ -219,3 +220,104 @@ def test_common_phrases_are_prewarmed_in_the_voice_cache(config, mock_ollama):
     assistant = Assistant(config, Events(), tts=tts)
     phrases = assistant._prewarm_phrases()
     assert "Done, sir." in phrases and any("You're most welcome" in p for p in phrases) and len(set(phrases)) == len(phrases)
+
+
+# ----------------------------------------------------------------------------- fixes: timers, reminders, sums
+@pytest.mark.parametrize("text, seconds", [
+    ("set a 5 minute timer", 300), ("10 minute timer", 600), ("set a timer for an hour and a half", 5400),
+    ("set a timer for 2 and a half minutes", 150), ("timer for two and a half hours", 9000), ("set a timer for twelve minutes", 720),
+    ("set a timer for twenty five minutes", 1500), ("set a timer for forty-five minutes", 2700), ("in 10 minutes", 600),
+    ("set a timer for half an hour", 1800), ("set a 5-minute timer", 300),
+])
+def test_more_timer_phrasings(text, seconds):
+    q = parse_quick(text)
+    assert q.kind == "timer" and q.args["seconds"] == seconds
+
+
+@pytest.mark.parametrize("text, label, seconds, clock", [
+    ("remind me at 5pm to call mum", "call mum", None, "5pm"), ("remind me at 17:30 to call mum", "call mum", None, "17:30"),
+    ("remind me to call mum at 17:30", "call mum", None, "17:30"), ("remind me to call mum at 5", "call mum", None, "5"),
+    ("remind me to call mum at five pm", "call mum", None, "5 pm"), ("remind me to go to bed in four hours", "go to bed", 14400, None),
+    ("set a reminder for 10 minutes", "", 600, None), ("set a reminder to stretch in 1 hour", "stretch", 3600, None),
+    ("remind me in 20 minutes to check the oven", "check the oven", 1200, None), ("set a reminder at 7am to take my pills", "take my pills", None, "7am"),
+])
+def test_reminder_phrasings(text, label, seconds, clock):
+    q = parse_quick(text)
+    assert q.kind == "timer" and q.args["label"] == label and q.args["seconds"] == seconds and q.args["clock"] == clock
+
+
+def test_clock_times():
+    from datetime import datetime
+
+    from core.assistant import _seconds_until
+    two_pm = datetime(2026, 10, 9, 14, 0, 0)
+    assert _seconds_until("5", two_pm) == 3 * 3600  # 5 pm comes before 5 am
+    assert _seconds_until("5pm", two_pm) == 3 * 3600
+    assert _seconds_until("17:30", two_pm) == 3 * 3600 + 1800
+    assert _seconds_until("9 am", two_pm) == 19 * 3600  # tomorrow morning
+    assert _seconds_until("noon", two_pm) == 22 * 3600
+    assert _seconds_until("25:00", two_pm) is None and _seconds_until("13pm", two_pm) is None
+
+
+@pytest.mark.parametrize("text", ["what is 9/11", "what is 24/7", "what's 50/50", "what's 7-11", "what is 4-4-2", "what is 3-0"])
+def test_dates_and_scores_are_not_sums(text):
+    assert calculate(text) is None
+
+
+@pytest.mark.parametrize("text, answer", [("what's 10/2", "5"), ("what is 7 - 11", "-4"), ("what's two times three and four", "10"),
+                                          ("what's ten and five divided by five", "11"), ("two hundred and fifty plus one", "251")])
+def test_sums_still_work(text, answer):
+    assert calculate(text) == answer
+
+
+def test_reminders_speak_back_naturally(jarvis):
+    assistant, events, say, mock, calls = jarvis
+    reply, _ = say("remind me to call my mum in 10 minutes")
+    assert "remind you to call your mum in 10 minutes" in reply
+    reply, _ = say("remind me at 5pm to feed my cat")
+    assert "remind you to feed your cat at 5pm" in reply
+    say("cancel my timers")
+
+
+def test_system_actions_are_not_apps_to_open(jarvis, monkeypatch):
+    assistant, events, say, mock, calls = jarvis
+    opened = []
+    monkeypatch.setattr(osctl, "show_desktop", lambda: calls.append(("desktop",)))
+    assistant.tools.open_target = lambda target, **k: opened.append(target) or {"name": target, "path": target}
+    say("show me the desktop")
+    reply, _ = say("run a diagnostic")
+    assert ("desktop",) in calls and opened == [] and "Opening" not in reply
+
+
+def test_chain_of_nothing_goes_to_the_model(jarvis):
+    assistant, events, say, mock, calls = jarvis
+    from core.tools import ToolError
+
+    def nothing(target, **k):
+        raise ToolError("no")
+
+    assistant.tools.open_target = nothing
+    reply, _ = say("open the pod bay doors and then start the engine")
+    assert "couldn't work out" not in reply
+
+
+def test_unmute_typed_is_about_the_sound(jarvis):
+    assistant, events, say, mock, calls = jarvis
+    reply, _ = say("unmute")
+    assert calls[-1] == ("unmute",) and "already listening" not in reply
+
+
+def test_a_timer_waits_for_a_long_task_instead_of_cutting_it_off(jarvis):
+    assistant, events, say, mock, calls = jarvis
+
+    busy = assistant._new_turn("text")  # e.g. a document being written
+    assistant._timers[99] = {"timer": None, "due": time.time(), "label": "", "seconds": 1}
+    import threading
+    t = threading.Thread(target=assistant._timer_fired, args=(99,), daemon=True)
+    t.start()
+    time.sleep(1.2)
+    assert not busy.cancel.is_set() and t.is_alive()
+    assistant._finish_turn(busy)
+    t.join(5)
+    assert not t.is_alive()
+    events.wait_for(lambda: any("Time's up" in p.get("text", "") for p in events.of("assistant_token")), 10)

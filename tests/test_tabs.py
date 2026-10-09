@@ -250,3 +250,19 @@ def test_new_tab_with_no_browser_open_starts_one(config):
         assert opened == ["google.com"]
     finally:
         assistant.shutdown()
+
+
+def test_close_the_other_tabs_when_some_are_to_the_left(desk):
+    desk.chrome.tabs = ["Inbox - Gmail", "Never Gonna Give You Up - YouTube", "Messi bio - Google Docs", "Weather - BBC"]
+    desk.chrome.active = 1
+    closed = tabs.close_other_tabs(desk, "chrome", settle=0)
+    assert closed == 3 and desk.chrome.tabs == ["Never Gonna Give You Up - YouTube"]
+    assert tabs.close_other_tabs(desk, "chrome", settle=0) == 0  # nothing else to close
+
+
+def test_finding_a_tab_past_two_with_the_same_title(desk):
+    desk.chrome.tabs = ["New Tab", "Inbox - Gmail", "New Tab", "Messi bio - Google Docs"]
+    desk.chrome.active = 0
+    found = tabs.find_tab(desk, "docs", "chrome", settle=0)
+    assert found is not None and "Google Docs" in found.title
+    assert tabs.find_tab(desk, "spreadsheet", "chrome", settle=0) is None  # still gives up after one full lap

@@ -1,0 +1,28 @@
+name: Windows helper probe
+
+on:
+  push:
+    paths:
+      - core/winhelper.py
+      - tests/windows_helper_probe.py
+      - .github/workflows/probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Windows helper probe (media sessions, app volume, address bar)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Probe
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_helper_probe.py

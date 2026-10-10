@@ -56,6 +56,10 @@
     </div>
 
     <div class="win-buttons">
+      <button class="wb update-btn hidden" id="btn-update" title="An update is ready" aria-label="An update is ready to install">
+        <svg viewBox="0 0 24 24"><path d="M12 4v10.5M7.5 10 12 14.5 16.5 10"/><path d="M5 17.5v2h14v-2"/></svg>
+        <span id="update-btn-text">UPDATE</span>
+      </button>
       <button class="wb" id="btn-persona" title="Personality (Ctrl+P)" aria-label="Choose a personality">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.6 14.2c.9 1.3 2 1.9 3.4 1.9s2.5-.6 3.4-1.9"/><path d="M9.2 9.6h.01M14.8 9.6h.01" stroke-width="2.4" stroke-linecap="round"/></svg>
       </button>
@@ -440,6 +444,15 @@
     </div>
   </div>
 
+  <!-- ======================================================= installing an update -->
+  <div id="update-overlay" class="overlay modal hidden" role="alertdialog" aria-live="assertive" aria-labelledby="update-overlay-text">
+    <div class="update-card">
+      <div class="upd-spin" aria-hidden="true"></div>
+      <h2 id="update-overlay-text">Installing the update…</h2>
+      <p>J.A.R.V.I.S. will close and open again by itself in a few seconds. Your settings, memories and protocols stay as they are.</p>
+    </div>
+  </div>
+
   <!-- ======================================================= automation center -->
   <div id="center" class="overlay modal hidden" role="dialog" aria-modal="true" aria-labelledby="ac-title">
     <div class="modal-card cyan center-card">
@@ -687,6 +700,19 @@
         <label class="field"><span>J.A.R.V.I.S. calls me</span><input data-key="user_title" type="text" maxlength="40" placeholder="sir"></label>
         <label class="field"><span>Your name (Harper and Sage use it)</span><input data-key="user_name" type="text" maxlength="60" placeholder="e.g. Tony Stark"></label>
         <label class="toggle"><input type="checkbox" data-key="frameless"><i></i><span>Borderless HUD window (applies on restart)</span></label>
+      </fieldset>
+      <fieldset id="update-settings">
+        <legend>Updates</legend>
+        <div class="upd-row"><b id="upd-version">Version …</b><span id="upd-state" class="upd-state"></span></div>
+        <div class="upd-bar hidden" id="upd-bar"><i id="upd-progress"></i></div>
+        <div class="upd-notes hidden" id="upd-notes"></div>
+        <div class="row upd-actions">
+          <button class="btn sm" type="button" id="upd-check"><span>CHECK NOW</span></button>
+          <button class="btn sm primary hidden" type="button" id="upd-install"><span>INSTALL &amp; RESTART</span></button>
+          <button class="btn sm ghost hidden" type="button" id="upd-restore">GO BACK TO PREVIOUS VERSION</button>
+        </div>
+        <label class="toggle"><input type="checkbox" data-key="auto_update"><i></i><span>Download new versions in the background (installing always waits for you)</span></label>
+        <p class="field-note">New versions come from this project's GitHub releases, are checked against their fingerprint and test themselves before you're asked. If one doesn't start properly, JARVIS puts the old one back.</p>
       </fieldset>
       <p class="drawer-foot" id="about">J.A.R.V.I.S. · runs locally · no API keys</p>
     </div>

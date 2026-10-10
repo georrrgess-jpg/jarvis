@@ -176,6 +176,8 @@ window.createJarvisMock = function createJarvisMock() {
   const browser = { state: 'AUTHENTICATION_REQUIRED', title: 'Sign in - Google Accounts', url: 'https://accounts.google.com/v3/signin/identifier', browser: 'Chrome',
     profile: { name: 'Tony', email: 'tony@example.com', directory: 'Default' }, waiting: { label: 'Gmail', why: 'Google sign-in' }, history: [], address_bar: true,
     profiles: [{ name: 'Tony', email: 'tony@example.com', directory: 'Default' }, { name: 'Work', email: 'tony@stark.example', directory: 'Profile 1' }] };
+  const updateState = { state: 'ready', current: '1.1.38', progress: 1, error: '', checked_at: now - 600, has_previous: true, auto: true,
+    release: { version: '1.1.42', notes: '- One-click updates\n- Say “that was wrong” to correct me\n- The window moves, resizes and goes full screen properly' } };
   const health = { neural_core: true, model: 'llama3.2', voice: true, microphone: true, wake_word: true, media_sessions: true, app_volumes: true, address_bar: true, helper_errors: {}, ocr: true, google: false, internet: true };
 
   return {
@@ -188,7 +190,7 @@ window.createJarvisMock = function createJarvisMock() {
       window: { frameless: true },
       wake: { enabled: true, active: true, phrase: settings.persona === 'harper' ? 'Hey Harper' : 'Hey Jarvis', phrases: ['Hey Jarvis'], reason: null }, vision: mockVision,
       persona: personaInfo(), personas: listPersonas(), memory: memStats(), protocols: protoList(),
-      media: sessions[0], activity: activity.slice(),
+      media: sessions[0], activity: activity.slice(), update: { ...updateState },
       restored: params.has('restored') ? [{ role: 'user', text: 'Any ideas for the bakery website homepage?', ts: now - 3000 },
         { role: 'assistant', text: 'Lead with a big photo of the bread, the opening hours and a "call to order" button. Want me to sketch a layout?', ts: now - 2990 }] : [],
     }),
@@ -407,6 +409,10 @@ window.createJarvisMock = function createJarvisMock() {
       return { ok: true, verified: true };
     },
     media_volume: async (key, level) => { const s = sessions.find((x) => x.key === key); if (s) s.volume = level; return { ok: true, volume: level }; },
+    update_status: async () => ({ ...updateState }),
+    update_check: async () => ({ ok: true, available: true, ...updateState }),
+    update_install: async () => { setTimeout(() => emit({ type: 'update', ...updateState, state: 'installing' }), 100); return { ok: true }; },
+    update_restore_previous: async () => ({ ok: true }),
     activity_list: async () => ({ items: activity.slice(), health }),
     browser_status: async () => ({ ...browser }),
     browser_set_profile: async (dir) => { settings.browser_profile = dir; return { ...browser }; },

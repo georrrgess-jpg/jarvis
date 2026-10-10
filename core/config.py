@@ -71,6 +71,7 @@ DEFAULTS: dict[str, Any] = {
     "media_history": [],  # what was played lately, for "resume what I was listening to"
     "browser_profile": "auto",  # which Chrome / Edge / Brave profile links open in ("auto" = the linked Google account's)
     "favorite_website": "",  # "open my favourite website"
+    "auto_update": True,  # look for new versions and get them ready in the background (installing always waits for you)
     "activity_history": [],  # the last actions and whether they were verified (Automation Center)  # youtube | spotify: where "play <song>" goes (see core/media.py)
     "protocols": [],  # named lists of commands: [{id, name, steps, schedule, created, last_run}] (see core/protocols.py)
     "custom_personas": [],  # personalities the user made: [{id, name, description, voice, gender, color, address}]

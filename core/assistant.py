@@ -12,6 +12,7 @@ import itertools
 import json
 import logging
 import random
+import os
 import sys
 import queue
 from collections import deque
@@ -48,6 +49,7 @@ from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
+from .updater import UpdateError, Updater
 from .media import MediaCommand, find_youtube_video, parse_media, spotify_targets, youtube_search_url
 from .mediahub import _HINTS, MediaHub, MediaSession, describe_position, hint_from
 from .winhelper import WinHelper
@@ -157,6 +159,12 @@ _BROWSER_NAMES = {"chrome": "chrome", "google chrome": "chrome", "browser": "", 
                   "microsoft edge": "edge", "firefox": "firefox", "brave": "brave"}
 _WHAT_PAGE = re.compile(r"^(?:(?:hey\s+)?\w+,\s*)?(?:what|which)\s+(?:page|website|site|tab|web\s*page)\s+(?:am\s+i\s+on|is\s+(?:this|open|showing)|is\s+chrome\s+on)|"
                         r"^what(?:'s|\s+is)\s+(?:this|the)\s+(?:page|website|site|tab)(?:\s+called)?|^where\s+am\s+i\s+in\s+(?:the\s+)?(?:browser|chrome)", re.I)
+_UPDATE_COMMAND = re.compile(
+    r"^(?:(?P<check>(?:check|look)\s+for\s+(?:an?\s+|any\s+)?(?:new\s+)?(?:updates?|versions?)|(?:are|is)\s+there\s+(?:an?\s+|any\s+)?(?:new\s+)?(?:updates?|versions?)(?:\s+(?:available|for\s+you))?|any\s+updates?)"
+    r"|(?P<install>(?:please\s+)?(?:update|upgrade)(?:\s+(?:yourself|jarvis|now|to\s+the\s+(?:latest|new(?:est)?)\s+version))+|install\s+(?:the|that)\s+update(?:\s+now)?|update\s+now)"
+    r"|(?P<version>what(?:'s|\s+is)\s+your\s+version(?:\s+number)?|what\s+version\s+(?:are\s+you|is\s+this|of\s+jarvis\s+is\s+this)(?:\s+running)?)"
+    r"|(?P<new>what(?:'s|\s+is)\s+new(?:\s+in\s+(?:this|the)\s+(?:version|update))?|what\s+changed\s+in\s+(?:the|this)\s+update)"
+    r"|(?P<restore>(?:go\s+back|roll\s+back|revert)\s+to\s+the\s+(?:previous|old|last)\s+version|undo\s+the\s+update))[\s?.!]*$", re.I)
 _FAVORITE_SITE = re.compile(r"^(?:my\s+)?favou?rite\s+(?:web\s*)?site\s+is\s+(?P<site>\S+(?:\s+\S+){0,3})[\s.!]*$", re.I)
 _CHAIN_SPLIT = re.compile(r"\s*(?:,\s*(?:and\s+)?(?:then\s+)?|\s+and\s+(?:then\s+)?|\s+then\s+)(?=(?:open|launch|start|play|fire up|boot up)\b)", re.IGNORECASE)
 _OPEN_COMMAND = re.compile(
@@ -380,6 +388,18 @@ class Speaker:
         return self._ducked
 
 
+def _notes_list(notes: str) -> list[str]:
+    """Release notes as short plain items (bullet lines, else the first lines)."""
+    lines = [l.strip() for l in str(notes or "").splitlines() if l.strip()]
+    items = [re.sub(r"^[-*•]\s*", "", l) for l in lines if re.match(r"^[-*•]\s", l)] or lines[:3]
+    return [re.sub(r"\s+", " ", i).rstrip(".") for i in items if not i.lower().startswith(("co-authored-by", "claude-session"))]
+
+
+def _first_note(notes: str) -> str:
+    items = _notes_list(notes)
+    return (items[0] + ".") if items else ""
+
+
 class Assistant:
     LAUNCH_WAIT = 4.0 if sys.platform == "win32" else 0.0  # seconds to wait for an app's window before saying "opening"
 
@@ -456,6 +476,10 @@ class Assistant:
         self._media_snapshot = ""
         self._pending_media: dict | None = None  # "Spotify and YouTube are both playing. Which one?"
         self.winhelper = WinHelper()
+        self.updater = Updater(APP_VERSION, state_dir=app_data_dir(), emit=lambda st: self.emit("update", **st))
+        self.updater.auto_install = False  # only the update CI check sets this
+        self.just_updated: dict | None = None  # set by app.py when this copy was started by an update
+        self._update_announced = ""
         self.media = MediaHub(self.winhelper, windows=self._safe_windows, media_key=lambda a: osctl.media_key(a), youtube_keys=self._youtube_keys,
                               state_dir=app_data_dir())
         self.browser = BrowserManager(config, windows=self._safe_windows, helper=self.winhelper, front=self._foreground,
@@ -593,6 +617,7 @@ class Assistant:
             ("protocol scheduler", lambda: self._spawn(self._protocol_scheduler, name="protocol-scheduler")),
             ("protocol hotkeys", self._sync_hotkeys),
             ("media watcher", lambda: self._spawn(self._media_watch, name="media-watch")),
+            ("updates", lambda: self._spawn(self._update_loop, name="updates")),
         )
         try:
             for name, step in steps:  # logged one by one so jarvis.log pinpoints a native crash
@@ -604,6 +629,134 @@ class Assistant:
             self.emit("mic_status", **{**self._mic, "engine": self.stt.engine_label()})
         finally:
             self._started.set()
+
+    # ================================================================== updates
+    def _update_loop(self) -> None:
+        """Look for a new version now and then, and get it ready in the background; installing waits for the user."""
+        up = self.updater
+        if not up.supported:
+            return
+        up.cleanup()
+        delay = float(os.environ.get("JARVIS_UPDATE_CHECK_DELAY") or 45)
+        if self._scheduler_stop.wait(delay):
+            return
+        up.cleanup()  # again: the copy that finished the last update has gone by now
+        while True:
+            if self.config.get("auto_update", True) or up.auto_install:
+                try:
+                    rel = up.prepare()
+                    if rel is not None:
+                        self._announce_update(rel)
+                        if up.auto_install:
+                            self._wait_for_quiet(threading.Event(), 30)
+                            up.install()
+                except UpdateError as exc:
+                    log.info("update not ready: %s", exc)
+                except Exception:
+                    log.exception("update check failed")
+            if self._scheduler_stop.wait(1800 if up.status.state in ("error", "rolled_back") else 6 * 3600):
+                return
+
+    def _announce_update(self, rel) -> None:
+        """Mention a ready update once, when JARVIS isn't busy talking."""
+        if self._update_announced == rel.version or self.updater.auto_install:
+            return
+        self._update_announced = rel.version
+        self._activity("update", f"Version {rel.version} is ready to install", "ok")
+        if self.state.state == State.IDLE:
+            self.speak(f"{self.title.capitalize()}, version {rel.version} of me is downloaded and ready. "
+                       "Say “update now”, or press INSTALL, whenever it suits you.", delay=0.2)
+
+    def _updated_line(self) -> str:
+        info = self.just_updated or {}
+        if not info:
+            return ""
+        version = info.get("to_version") or APP_VERSION
+        if info.get("status") == "rolled_back":
+            return (f" The update to version {version} didn't start properly on this PC, so I put version {APP_VERSION} back."
+                    " Nothing else changed.")
+        if info.get("status") == "error":
+            return f" I couldn't finish installing version {version}, so I'm still on {APP_VERSION}."
+        if info.get("restore"):
+            return f" I'm back on version {version}, as you asked."
+        notes = _first_note(info.get("notes", ""))
+        return f" I've been updated to version {version}." + (f" New: {notes}" if notes else "")
+
+    def update_status(self) -> dict:
+        snap = self.updater.snapshot()
+        snap["auto"] = bool(self.config.get("auto_update", True))
+        snap["has_previous"] = self.updater.previous_path.exists() if self.updater.supported else False
+        return snap
+
+    def update_check(self) -> dict:
+        try:
+            rel = self.updater.prepare()
+        except UpdateError as exc:
+            return {"ok": False, "error": str(exc), **self.update_status()}
+        return {"ok": True, "available": rel is not None, **self.update_status()}
+
+    def update_install(self, restore: bool = False) -> dict:
+        up = self.updater
+        if not up.supported:
+            return {"ok": False, "error": "Updates install into the Jarvis.exe app; this copy runs from source."}
+        if not restore and up.ready is None:
+            return {"ok": False, "error": "No update is ready yet."}
+        self._activity("update", "Going back to the previous version" if restore else f"Installing version {up.ready.version}", "ok")
+        self._spawn(lambda: self._install_update(restore), name="update-install")
+        return {"ok": True}
+
+    def _install_update(self, restore: bool) -> None:
+        try:
+            if not self.updater.install(restore=restore):
+                self.speak(f"I'm sorry, {self.title}. {self.updater.status.error[:1].upper() + self.updater.status.error[1:]}.")
+        except UpdateError as exc:
+            self.speak(f"I couldn't do that, {self.title}: {exc}.")
+        except Exception:
+            log.exception("installing the update failed")
+            self.speak(f"Something went wrong installing the update, {self.title}. I'm still on version {APP_VERSION}.")
+
+    def _update_command(self, m: "re.Match") -> str:
+        t, up = self.title, self.updater
+        if m.group("version"):
+            return f"I'm version {APP_VERSION}, {t}." + (f" Version {up.ready.version} is ready to install." if up.ready else "")
+        if m.group("new"):
+            info = self.just_updated or {}
+            notes = info.get("notes") or (up.ready.notes if up.ready else "")
+            if not notes:
+                return f"I don't have notes for this version, {t}. I'm version {APP_VERSION}."
+            which = f"version {info.get('to_version') or up.ready.version}" if (info or up.ready) else "this version"
+            return f"Here's what's in {which}, {t}: " + "; ".join(_notes_list(notes)[:4]) + "."
+        if not up.supported:
+            return f"Updates install into the Jarvis.exe app, {t}; this copy runs from source, so update it with git instead."
+        if m.group("restore"):
+            if not up.previous_path.exists():
+                return f"There's no previous version kept on this PC, {t}."
+            self.update_install(restore=True)
+            return f"Going back to the previous version, {t}. I'll be right back."
+        if m.group("check"):
+            self._emit_activity_label("Checking for updates")
+            try:
+                rel = up.prepare()
+            except UpdateError as exc:
+                return f"I couldn't finish that, {t}: {exc}."
+            if rel is None:
+                return f"I'm up to date, {t}: version {APP_VERSION} is the latest."
+            self._update_announced = rel.version
+            return f"Version {rel.version} is downloaded and checked, {t}. Say “update now” to install it; I'll restart in a few seconds."
+        # install
+        if up.ready is None:
+            try:
+                rel = up.prepare()
+            except UpdateError as exc:
+                return f"I couldn't get the update ready, {t}: {exc}."
+            if rel is None:
+                return f"I'm already on the latest version, {t}: {APP_VERSION}."
+        version = up.ready.version
+        self._spawn(lambda: (self._wait_for_quiet(threading.Event(), 20), self._install_update(False)), name="update-install")
+        return f"Updating to version {version} now, {t}. I'll be back in a moment."
+
+    def _emit_activity_label(self, label: str) -> None:
+        self.emit("activity", label=label)
 
     def boot_payload(self, wait: float = 25.0) -> dict:
         self._started.wait(wait)
@@ -628,6 +781,7 @@ class Assistant:
             "protocols": self.protocol_list(),
             "media": self._now_playing.to_dict() if self._now_playing else None,
             "activity": list(self._activities)[-40:],
+            "update": self.update_status(),
         }
 
     def boot_complete(self) -> None:
@@ -647,6 +801,7 @@ class Assistant:
             text = f"Good {part}, {self.title}. Ollama is running, but no language model is installed yet. I've put the details on screen."
         else:
             text = f"Good {part}, {self.title}. I'm afraid my neural core is offline. I've put instructions on screen to bring it online."
+        text += self._updated_line()
         self.sfx.play("activate")
         self.speak(text, delay=0.45)
         self._spawn(self._startup_protocols, name="startup-protocols")
@@ -3143,6 +3298,10 @@ class Assistant:
             if choice:
                 self._deliver(turn, [choice])
                 return
+        upd = _UPDATE_COMMAND.match(_bare(text))
+        if upd:
+            self._deliver(turn, [self._update_command(upd)])
+            return
         if _WHAT_PAGE.match(text.strip()):
             look = self.browser.look()
             if look.state == "NOT_RUNNING":

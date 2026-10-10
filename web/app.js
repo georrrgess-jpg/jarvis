@@ -2528,6 +2528,68 @@
     },
   };
 
+  // ========================================================================= updates
+  const Updates = {
+    st: null,
+    label: { idle: '', checking: 'Checking…', up_to_date: 'Up to date', available: 'New version found', downloading: 'Downloading…',
+      verifying: 'Checking the download…', ready: 'Ready to install', installing: 'Installing — restarting in a moment…', installed: 'Installed',
+      rolled_back: 'Update rolled back', error: 'Problem', unsupported: 'Updates install into Jarvis.exe (this copy runs from source)' },
+    set(st) {
+      if (!st) return;
+      this.st = { ...(this.st || {}), ...st };
+      const u = this.st;
+      const rel = u.release || null;
+      $('#upd-version').textContent = `Version ${u.current || '…'}`;
+      let text = this.label[u.state] || u.state || '';
+      if (u.state === 'downloading') text = `Downloading ${rel ? rel.version : ''}… ${Math.round((u.progress || 0) * 100)}%`;
+      if (u.state === 'ready' && rel) text = `Version ${rel.version} is ready`;
+      if (u.state === 'up_to_date' && u.checked_at) text = `Up to date · checked ${ago(u.checked_at)}`;
+      if ((u.state === 'error' || u.state === 'rolled_back') && u.error) text = u.error.charAt(0).toUpperCase() + u.error.slice(1);
+      if (u.detail && u.state === 'up_to_date') text = u.detail;
+      $('#upd-state').textContent = text;
+      $('#upd-state').className = `upd-state ${u.state}`;
+      $('#upd-bar').classList.toggle('hidden', u.state !== 'downloading');
+      $('#upd-progress').style.width = `${Math.round((u.progress || 0) * 100)}%`;
+      const notes = rel && rel.notes ? rel.notes.split('\n').map((l) => l.trim()).filter((l) => /^[-*•]\s/.test(l)).slice(0, 6) : [];
+      $('#upd-notes').classList.toggle('hidden', !notes.length || !['ready', 'available', 'downloading', 'verifying'].includes(u.state));
+      $('#upd-notes').innerHTML = notes.length ? `<b>WHAT'S NEW</b><ul>${notes.map(() => '<li></li>').join('')}</ul>` : '';
+      $$('#upd-notes li').forEach((li, i) => (li.textContent = notes[i].replace(/^[-*•]\s*/, '')));
+      $('#upd-install').classList.toggle('hidden', u.state !== 'ready');
+      $('#upd-restore').classList.toggle('hidden', !u.has_previous || u.state === 'installing');
+      $('#upd-check').disabled = ['checking', 'downloading', 'verifying', 'installing', 'unsupported'].includes(u.state);
+      $('#update-settings').classList.toggle('unsupported', u.state === 'unsupported');
+      const ready = u.state === 'ready' && rel;
+      $('#btn-update').classList.toggle('hidden', !ready && u.state !== 'installing');
+      $('#update-btn-text').textContent = u.state === 'installing' ? 'UPDATING…' : 'UPDATE';
+      $('#btn-update').title = ready ? `Version ${rel.version} is ready — click to install and restart` : 'Installing the update…';
+      if (u.state === 'installing') $('#update-overlay').classList.remove('hidden');
+      if (['error', 'rolled_back', 'ready'].includes(u.state)) $('#update-overlay').classList.add('hidden');
+    },
+    async install(restore = false) {
+      const r = await call(restore ? 'update_restore_previous' : 'update_install');
+      if (r && !r.ok) toast(r.error || 'Could not install it.', 'error');
+      else { $('#update-overlay').classList.remove('hidden'); $('#update-overlay-text').textContent = restore ? 'Going back to the previous version…' : `Installing version ${(this.st.release || {}).version || ''}…`; }
+    },
+    async check() {
+      $('#upd-state').textContent = 'Checking…';
+      const r = await call('update_check');
+      if (!r) return;
+      this.set(r);
+      if (!r.ok) toast(r.error || 'Could not check for updates.', 'error');
+      else if (!r.available) toast(`You're on the latest version (${r.current}).`, 'ok', 2500);
+    },
+    init() {
+      $('#btn-update').onclick = () => { if (this.st && this.st.state === 'ready') this.install(); };
+      $('#upd-install').onclick = () => this.install();
+      $('#upd-check').onclick = () => this.check();
+      let armed = 0;
+      $('#upd-restore').onclick = () => {
+        if (!armed) { armed = setTimeout(() => { armed = 0; $('#upd-restore').textContent = 'GO BACK TO PREVIOUS VERSION'; }, 4000); $('#upd-restore').textContent = 'CLICK AGAIN TO GO BACK'; return; }
+        clearTimeout(armed); armed = 0; this.install(true);
+      };
+    },
+  };
+
   // ========================================================================= events from Python
   function handle(ev) {
     switch (ev.type) {
@@ -2589,6 +2651,7 @@
       case 'protocol': Protocols.progress(ev); break;
       case 'media': Media.update(ev); break;
       case 'activity_log': Center.add(ev.item); break;
+      case 'update': { const { type, ...u } = ev; Updates.set(u); break; }
       case 'browser': { const { type, ...b } = ev; Center.browser = { ...(Center.browser || {}), ...b }; Center.browserPanel(); break; }
       case 'protocol_edit': Protocols.open(false, ev.protocol); break;
       default: break;
@@ -2782,6 +2845,7 @@
     Protocols.init();
     Media.init();
     Center.init();
+    Updates.init();
     bindControls();
     Hud.clock();
     setInterval(() => Hud.clock(), 1000);
@@ -2825,6 +2889,7 @@
     if (p.protocols) Protocols.set(p.protocols);
     if (p.media) Media.set(p.media);
     if (p.activity) Center.items = p.activity.slice();
+    if (p.update) Updates.set(p.update);
     Telemetry.start();
 
     call('play_sfx', 'boot');

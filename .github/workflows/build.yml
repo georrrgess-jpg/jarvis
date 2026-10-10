@@ -43,6 +43,7 @@ jobs:
       - name: Test, build and self-test the executable
         run: python build.py
         env:
+          JARVIS_BUILD_NUMBER: ${{ github.run_number }}
           SDL_AUDIODRIVER: dummy
           PYTHONIOENCODING: utf-8
       - name: GUI smoke test (launch the real exe and wait for the HUD)
@@ -64,6 +65,11 @@ jobs:
           Get-Content "$env:JARVIS_HOME\jarvis.log" -ErrorAction SilentlyContinue
           Get-Content "$env:TEMP\jarvis-crash.txt" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { exit 1 }
+      - name: One-click update check (real exe - download, verify, self-test, swap, restart; and roll back a broken one)
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_update_check.py dist/Jarvis.exe update-check.json
       - name: Native crash reporting check (a .NET thread crash must be reported, not silent)
         shell: pwsh
         env:
@@ -132,6 +138,7 @@ jobs:
             tabs-check.json
             online-check.json
             typing-check.json
+            update-check.json
             vision-check.json
             vision-check.png
             ${{ runner.temp }}/jarvis-home/jarvis.log
@@ -146,3 +153,36 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Jarvis.exe
+
+  release:
+    name: Publish the update (GitHub release that JARVIS installs from)
+    needs: [test-linux, build-windows]
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Jarvis-windows-x64
+          path: dist
+      - name: Write latest.json (version, size, SHA-256, notes)
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          REPO: ${{ github.repository }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: python3 tests/release_manifest.py dist/Jarvis.exe dist/latest.json dist/notes.md
+      - name: Read the version
+        id: v
+        run: echo "version=$(python3 -c "import json; print(json.load(open('dist/latest.json'))['version'])")" >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: J.A.R.V.I.S. ${{ steps.v.outputs.version }}
+          body_path: dist/notes.md
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          files: |
+            dist/Jarvis.exe
+            dist/latest.json

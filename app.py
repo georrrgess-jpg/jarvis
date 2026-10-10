@@ -212,6 +212,28 @@ def acquire_single_instance() -> bool:
     return True
 
 
+def release_single_instance() -> None:
+    """Let the freshly updated copy start while this one waits (hidden) to see that it works."""
+    global _instance_mutex
+    if sys.platform != "win32" or not _instance_mutex:
+        return
+    import ctypes
+
+    ctypes.windll.kernel32.CloseHandle(_instance_mutex)
+    _instance_mutex = None
+
+
+def acquire_single_instance_patiently(seconds: float) -> bool:
+    """After an update the old copy may still be letting go of the lock for a moment."""
+    deadline = time.monotonic() + seconds
+    while True:
+        if acquire_single_instance():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+
+
 # ============================================================================ events → UI
 class EventBridge:
     """Batches backend events and pushes them into the page with a single JS call per frame.
@@ -311,6 +333,7 @@ class JarvisAPI:
         self._maximized = False
         self._ready = threading.Event()
         self._booted = threading.Event()
+        self._after_update = ""  # state file path when this copy was started by an update
 
     def _attach(self, window) -> None:
         self._window = window
@@ -338,6 +361,8 @@ class JarvisAPI:
     def boot_complete(self) -> None:
         self._booted.set()
         log.info("HUD boot sequence complete")
+        if self._after_update:
+            self._assistant.updater.mark_healthy(Path(self._after_update))  # the old copy can go now
         self._assistant.boot_complete()
 
     def play_sfx(self, name: str) -> None:
@@ -596,6 +621,19 @@ class JarvisAPI:
         from core.browsers import installed_browsers
 
         return installed_browsers()
+
+    # -- updates -------------------------------------------------------------
+    def update_status(self) -> dict:
+        return self._assistant.update_status()
+
+    def update_check(self) -> dict:
+        return self._assistant.update_check()
+
+    def update_install(self) -> dict:
+        return self._assistant.update_install()
+
+    def update_restore_previous(self) -> dict:
+        return self._assistant.update_install(restore=True)
 
     def window_minimize(self) -> None:
         if self._window:
@@ -988,6 +1026,36 @@ def _diag_dotnet_crash() -> int:
     return 3
 
 
+# ============================================================================ updates
+def _update_status(state_path: str) -> str:
+    try:
+        return str(json.loads(Path(state_path).read_text(encoding="utf-8")).get("status") or "")
+    except Exception:
+        return ""
+
+
+def wire_updates(assistant, window, bridge: EventBridge, args) -> None:
+    """Give the updater what it needs to restart into a new version, and tell a freshly updated copy what happened."""
+    def quit_now() -> None:
+        try:
+            bridge.close()
+            assistant.shutdown()
+        except Exception:
+            log.debug("shutdown before update hiccup", exc_info=True)
+        threading.Timer(8, lambda: os._exit(0)).start()  # never linger
+        try:
+            window.destroy()
+        except Exception:
+            os._exit(0)
+
+    updater = assistant.updater
+    updater.hooks = {"release_lock": release_single_instance, "quit": quit_now}
+    if args.after_update:
+        assistant.just_updated = updater.after_update(Path(args.after_update))
+    if args.install_update_when_ready:
+        updater.auto_install = True
+
+
 # ============================================================================ main
 def log_environment() -> None:
     log.info("Platform: %s | Python %s | frozen=%s | exe=%s", platform.platform(), platform.python_version(),
@@ -1008,6 +1076,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--diag-dotnet-crash", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--gui", help="force a pywebview backend (edgechromium, qt, gtk, cef)")
     parser.add_argument("--framed", action="store_true", help="use a normal OS window frame")
+    parser.add_argument("--after-update", metavar="STATE", help=argparse.SUPPRESS)  # started by the updater
+    parser.add_argument("--finish-update", metavar="STATE", help=argparse.SUPPRESS)  # the new exe swapping itself in
+    parser.add_argument("--install-update-when-ready", action="store_true", help=argparse.SUPPRESS)  # the update CI check
     args, _unknown = parser.parse_known_args(argv)
 
     ensure_std_streams()
@@ -1020,6 +1091,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.selftest:
         return run_selftest(args.selftest_report)
+    if args.finish_update:  # no window: swap the files, start the new Jarvis.exe, roll back if it doesn't come up
+        from core.updater import Updater
+
+        state = Path(args.finish_update)
+        return Updater(APP_VERSION, state_dir=state.parent, supported=True).finish(state)
 
     if sys.platform == "win32" and not args.gui:
         if webview2_version() is None:
@@ -1034,7 +1110,14 @@ def main(argv: list[str] | None = None) -> int:
             if choice == _IDOK:
                 webbrowser.open(WEBVIEW2_DOWNLOAD_URL)
             return 2
-        if not args.smoke_test and not acquire_single_instance():
+        if args.after_update and os.environ.get("JARVIS_TEST_FAIL_AFTER_UPDATE") == "1" and _update_status(args.after_update) == "starting":
+            log.error("JARVIS_TEST_FAIL_AFTER_UPDATE: pretending this update is broken")
+            return 3  # lets the CI check prove that a broken update is rolled back
+        if args.after_update:
+            locked = acquire_single_instance_patiently(20)
+        else:
+            locked = args.smoke_test or acquire_single_instance()
+        if not locked:
             log.info("Another instance is already running; exiting")
             message_box("J.A.R.V.I.S. is already running.\n\nIt can take a few seconds to appear after you open it.",
                         "J.A.R.V.I.S.", _MB_OK | _MB_ICONINFO)
@@ -1047,6 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
     bridge = EventBridge()
     frameless = bool(config.get("frameless", True)) and not args.framed
     api = JarvisAPI(None, bridge, frameless)
+    api._after_update = args.after_update or ""
     assistants: list = []
 
     width, height, min_size, maximized = window_geometry(webview)  # also loads the native GUI backend
@@ -1083,6 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
 
             assistant = Assistant(config, bridge.emit)
             assistants.append(assistant)
+            wire_updates(assistant, window, bridge, args)
             api._set_assistant(assistant)
             log.info("Core loaded in %.1fs", time.monotonic() - t0)
             assistant.start()

@@ -19,6 +19,7 @@ import json
 import os
 import platform
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
@@ -57,9 +58,19 @@ def banner(text: str) -> None:
 
 
 def app_version() -> str:
-    namespace: dict = {}
-    exec((ROOT / "core" / "__init__.py").read_text(encoding="utf-8"), namespace)
-    return namespace["APP_VERSION"]
+    """BASE_VERSION.<CI build number> for released builds (JARVIS_BUILD_NUMBER), else BASE_VERSION.0."""
+    text = (ROOT / "core" / "__init__.py").read_text(encoding="utf-8")
+    base = re.search(r'BASE_VERSION = "([\d.]+)"', text).group(1)
+    number = os.environ.get("JARVIS_BUILD_NUMBER", "").strip()
+    return f"{base}.{int(number)}" if number.isdigit() else f"{base}.0"
+
+
+def write_build_info(version: str) -> Path:
+    """Baked into the exe: the version the updater compares against."""
+    path = ROOT / "core" / "build_info.py"
+    info = {"version": version, "commit": os.environ.get("GITHUB_SHA", "")[:12], "built": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())}
+    path.write_text(f"# written by build.py; not in git\nBUILD = {info!r}\n", encoding="utf-8")
+    return path
 
 
 def check_python() -> None:
@@ -214,6 +225,7 @@ def main() -> int:
               " here it will produce a native executable.")
 
     version = app_version()
+    write_build_info(version)
     icon = ensure_icon()
     cli = pyinstaller_args(args, icon, version)
 

@@ -675,6 +675,7 @@ class JarvisAPI:
         return self._frame or None
 
     def window_minimize(self) -> None:
+        log.info("window_minimize")
         if self._window:
             self._window.minimize()
 
@@ -718,6 +719,28 @@ class JarvisAPI:
     def window_state(self) -> dict:
         frame = self._frame_ready()
         return frame.state() if frame else {"maximized": self._maximized, "fullscreen": False, "native": False}
+
+    def wake_webview(self) -> None:
+        """After a minimise, make sure WebView2 is visible, knows where its window is and has focus."""
+        try:
+            native = self._window.native
+            control = native.browser.webview
+            from System import Func, Type
+            from System.Reflection import BindingFlags
+
+            def wake():
+                field = control.GetType().GetField("_coreWebView2Controller", BindingFlags.NonPublic | BindingFlags.Instance)
+                controller = field.GetValue(control) if field is not None else None
+                if controller is not None:
+                    controller.IsVisible = True
+                    controller.NotifyParentWindowPositionChanged()
+                control.Focus()
+                return None
+
+            native.Invoke(Func[Type](wake)) if native.InvokeRequired else wake()
+            log.info("WebView woken after restore")
+        except Exception:
+            log.warning("Could not wake the WebView after restore", exc_info=True)
 
     def window_close(self) -> None:
         log.info("window_close")
@@ -1272,6 +1295,14 @@ def main(argv: list[str] | None = None) -> int:
             threading.Timer(0.3, lambda: (api._frame_ready() and api._frame.maximize())).start()
 
     window.events.shown += on_shown
+
+    def on_restored() -> None:
+        """Back from the taskbar: give the page the keyboard and mouse again (WebView2 can stay asleep otherwise)."""
+        log.info("Window restored")
+        if sys.platform == "win32":
+            threading.Timer(0.15, api.wake_webview).start()
+
+    window.events.restored += on_restored
 
     def load_assistant() -> None:
         """Runs on pywebview's worker thread once the GUI loop is up: heavy imports happen behind the boot screen."""

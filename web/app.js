@@ -2566,7 +2566,11 @@
       // A plain click still clicks (the J.A.R.V.I.S. badge opens the personalities) and a double-click maximises.
       const NOT_DRAG = 'button, input, select, textarea, a, label, .chip.clickable, [data-no-drag]';
       let down = null;
-      const dbg = (window.__winDebug = { down: 0, drag: 0, dbl: 0, grip: 0 });
+      const dbg = (window.__winDebug = { down: 0, drag: 0, dbl: 0, grip: 0, any: 0, last: '' });
+      document.addEventListener('pointerdown', (e) => {
+        dbg.any++;
+        const t = e.target; dbg.last = t ? (t.id || (t.closest && t.closest('[id]') ? '#' + t.closest('[id]').id : t.tagName)) : '';
+      }, true);
       document.addEventListener('mousedown', (e) => {
         if (e.target.closest && e.target.closest('.drag-region')) dbg.down++;
         if (e.button !== 0 || this.full || !e.target.closest('.drag-region') || e.target.closest(NOT_DRAG)) { down = null; return; }

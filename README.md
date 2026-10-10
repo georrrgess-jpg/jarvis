@@ -15,6 +15,9 @@ A holographic, Iron-Man-style desktop assistant that talks back. It runs with **
 
 ## Features
 
+- **One-click updates**: JARVIS checks this project's GitHub releases now and then and downloads a new version in the background. It checks the download's size and SHA-256 fingerprint, and lets the new copy test itself. Then a green **UPDATE** button appears in the title bar, and JARVIS mentions it once. Click it, use Settings ▸ Updates, or say "update now": JARVIS closes, the new version swaps itself in and opens again, and tells you what's new. If the new version doesn't start properly, the old one is put back and started again automatically, and that version isn't offered again. "Check for updates", "what version are you?", "what's new?" and "go back to the previous version" also work. Nothing ever installs without you.
+- **"That was wrong"**: if JARVIS mishears or does the wrong thing, say "that was wrong" (or "wrong", or "you misheard me"). It tells you what it heard and did, and asks what you meant. Or say it in one go: "no, I said open Spotify", "I meant Discord". It does the right thing and learns the correction. A misheard phrase ("this cord" → "discord") is fixed wherever it comes up; anything else is fixed for that exact sentence. Next time it gets it right first time and shows which correction it used. Everything it has learnt is listed in Automation Center ▸ Corrections, where you can delete any of it.
+- **A window that behaves**: drag the title bar to move JARVIS, and drag any edge or corner to resize it. Double-click the title bar or use □ to maximise; the taskbar stays visible. Use ⛶ or F11 for full screen, and Esc to leave it. Dragging a maximised window restores it. The window buttons always stay on screen, however narrow the window.
 - **Media & Automation Center** (the pulse button in the title bar, <kbd>Ctrl</kbd>+<kbd>J</kbd>): one place that shows everything JARVIS is doing and whether it actually worked.
   - **Media**: every player Windows knows about (Spotify, YouTube and YouTube Music in any browser, VLC, the Windows players) with its title, progress bar, ⏮ ⏯ ⏭ and, where Windows allows, its own volume slider.
   - **Browser**: which browser and Chrome profile JARVIS uses, the page it's on, and whether it's ready, loading, or waiting for you (sign-in, profile picker, cookie consent). Pick the profile here if you have several.
@@ -142,6 +145,9 @@ core/
   media.py          understanding media requests ("pause YouTube", "skip forward 30 seconds"), YouTube search, Spotify
   mediahub.py       verified media control through Windows' media sessions, per-app volume, ducking, YouTube shortcuts
   browser.py        browser readiness: profiles, sign-in / picker / consent detection, verified navigation, waiting for you
+  updater.py        one-click updates: GitHub release check, verified download, self-test, swap, health check, rollback
+  feedback.py       "that was wrong": parsing corrections and learning the smallest rewrite
+  winframe.py       the borderless window: Windows' own move / resize, maximise to the work area, full screen
   winhelper.py      one persistent PowerShell helper: media sessions (WinRT), app volumes (Core Audio), the address bar (UI Automation)
   docops.py         multi-step document requests ("rename it to X, then type out Y") and "type out ..." anywhere
   docs_keys.py      renaming and typing in a Google Doc open in the browser, by keyboard
@@ -185,7 +191,7 @@ build.py            automated PyInstaller build
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest -q                  # 1000 tests; no microphone, speakers or network needed
+python -m pytest -q                  # 1020 tests; no microphone, speakers or network needed
 python -m tests.mock_ollama          # fake Ollama on :11434 for UI work without a model
 ```
 

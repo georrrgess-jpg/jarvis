@@ -66,7 +66,6 @@ jobs:
           Get-Content "$env:TEMP\jarvis-crash.txt" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { exit 1 }
       - name: Window check (real mouse and keyboard - drag, resize, maximise, full screen, minimise, close)
-        continue-on-error: true  # results are reported; the close-click step is still being diagnosed
         shell: pwsh
         env:
           PYTHONIOENCODING: utf-8

@@ -50,6 +50,37 @@ def find_window(pid_hint=None, timeout=120):
     return None
 
 
+def _describe(h):
+    if not h:
+        return None
+    cls, text = ctypes.create_unicode_buffer(128), ctypes.create_unicode_buffer(128)
+    user32.GetClassNameW(h, cls, 128)
+    user32.GetWindowTextW(h, text, 128)
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(h, ctypes.byref(pid))
+    return {"hwnd": h, "class": cls.value, "text": text.value, "visible": bool(user32.IsWindowVisible(h)),
+            "enabled": bool(user32.IsWindowEnabled(h)), "pid": pid.value, "rect": rect(h)}
+
+
+def who_is_at(x, y, top):
+    """Which window Windows would send a click at (x, y) to, the foreground window, and JARVIS's child windows."""
+    user32.WindowFromPoint.argtypes = (wintypes.POINT,)
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetAncestor.restype = wintypes.HWND
+    hit = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+    children = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(h, _):
+        children.append(_describe(h))
+        return len(children) < 20
+
+    user32.EnumChildWindows(top, WNDENUMPROC(cb), 0)
+    return {"point": [int(x), int(y)], "hit": _describe(hit), "hit_root": _describe(user32.GetAncestor(hit, 2)) if hit else None,
+            "foreground": _describe(user32.GetForegroundWindow()), "jarvis": _describe(top), "children": children}
+
+
 def rect(hwnd):
     r = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r))
@@ -259,13 +290,16 @@ def main() -> int:
         check("the HUD responds again after coming back from the taskbar", (probe().get("t") or 0) >= t0, probe().get("t"))
         for attempt in range(3):  # right after coming back from the taskbar a first click can be lost
             p = probe()
-            click(*screen_point(p, "close"))
+            cx, cy = screen_point(p, "close")
+            report["steps"].append({"close_target": who_is_at(cx, cy, hwnd)})
+            click(cx, cy)
             try:
                 proc.wait(15)
                 break
             except subprocess.TimeoutExpired:
                 report["steps"].append({"close_attempt": attempt, "page_events": probe().get("debug")})
-        check("the close button closes JARVIS", proc.poll() is not None, proc.poll())
+        closed = proc.poll() is not None
+        check("the close button closes JARVIS", closed, None if closed else [st for st in report["steps"] if "close_target" in st][:1])
     except Exception as exc:  # noqa: BLE001
         import traceback
 

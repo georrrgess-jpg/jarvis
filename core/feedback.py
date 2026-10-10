@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import secrets
 import time
 from dataclasses import dataclass
 
@@ -103,7 +104,7 @@ class Corrections:
         rules = [r for r in self.all() if not (r["heard"] == rule["heard"] and r.get("whole") == rule.get("whole"))]
         # a rule that would undo a newer one is dropped ("discord" -> "this cord" after "this cord" -> "discord")
         rules = [r for r in rules if not (r["heard"] == rule["meant"] and r["meant"] == rule["heard"])]
-        item = {"id": f"c{int(time.time() * 1000) % 10**10}", "heard": rule["heard"], "meant": rule["meant"], "whole": bool(rule.get("whole")),
+        item = {"id": "c" + secrets.token_hex(5), "heard": rule["heard"], "meant": rule["meant"], "whole": bool(rule.get("whole")),
                 "voice_only": bool(voice), "uses": 0, "created": time.time()}
         rules.append(item)
         self._save(rules)

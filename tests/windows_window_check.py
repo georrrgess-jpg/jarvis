@@ -64,6 +64,17 @@ def monitor(hwnd, work=True):
     return [r.left, r.top, r.right - r.left, r.bottom - r.top]
 
 
+def focus(hwnd):
+    """Bring JARVIS to the front the way the vision check does (Windows ignores input to background windows otherwise)."""
+    from core.screen import WindowsDesktop
+
+    desk = WindowsDesktop()
+    win = desk.window_info(hwnd)
+    if win is not None:
+        desk.bring_to_front(win)
+    time.sleep(0.3)
+
+
 def move_to(x, y):
     user32.SetCursorPos(int(x), int(y))
 
@@ -103,6 +114,7 @@ def near(a, b, tol=8):
 
 
 def main() -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     ctypes.windll.user32.SetProcessDPIAware()
     exe = Path(sys.argv[1] if len(sys.argv) > 1 else "dist/Jarvis.exe").resolve()
     report_path = Path(sys.argv[2] if len(sys.argv) > 2 else "window-check.json")
@@ -112,6 +124,9 @@ def main() -> int:
     failures: list[str] = []
 
     def check(name, ok, detail=None):
+        if not ok:
+            p = probe()
+            detail = {"detail": detail, "page_events": p.get("debug"), "under_title_bar": p.get("at"), "state": p.get("state")}
         report["checks"][name] = {"ok": bool(ok), "detail": detail}
         print(("PASS " if ok else "FAIL ") + name + (f": {detail}" if detail is not None else ""), flush=True)
         if not ok:
@@ -124,10 +139,11 @@ def main() -> int:
             return {}
 
     def screen_point(p, name, fx=0.5, fy=0.5):
-        """Centre of an element from the probe, in screen pixels."""
+        """Centre of an element from the probe, in screen pixels (and JARVIS brought to the front)."""
         box, dpr, r = p.get(name), p.get("dpr") or 1, p.get("rect") or [0, 0, 0, 0]
         if not box:
-            return None
+            raise RuntimeError(f"the page has no visible {name!r} to aim at: {p}")
+        focus(hwnd)
         return r[0] + (box[0] + box[2] * fx) * dpr, r[1] + (box[1] + box[3] * fy) * dpr
 
     env = {**os.environ, "JARVIS_HOME": str(work / "home"), "JARVIS_NO_DIALOGS": "1", "SDL_AUDIODRIVER": "dummy"}
@@ -135,6 +151,7 @@ def main() -> int:
     try:
         hwnd = find_window()
         check("window appeared", hwnd is not None)
+        report["hwnd"] = hwnd
         deadline = time.time() + 120
         while time.time() < deadline and not probe().get("booted"):
             time.sleep(0.5)
@@ -236,6 +253,8 @@ def main() -> int:
         except OSError:
             pass
         report["ok"] = not failures
+        if failures:
+            print("----- jarvis.log (tail) -----\n" + report.get("log_tail", ""), flush=True)
         report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     print("ALL WINDOW CHECKS PASSED" if not failures else f"FAILED: {failures}", flush=True)
     return 0 if not failures else 1

@@ -675,6 +675,7 @@ class JarvisAPI:
             self._window.minimize()
 
     def window_toggle_maximize(self) -> dict:
+        log.info("window_toggle_maximize")
         frame = self._frame_ready()
         if frame:
             frame.toggle_maximize()
@@ -689,6 +690,7 @@ class JarvisAPI:
         return {"maximized": self._maximized, "fullscreen": False}
 
     def window_toggle_fullscreen(self) -> dict:
+        log.info("window_toggle_fullscreen")
         frame = self._frame_ready()
         if frame:
             frame.toggle_fullscreen()
@@ -698,11 +700,13 @@ class JarvisAPI:
         return {}
 
     def window_drag(self) -> None:
+        log.info("window_drag")
         frame = self._frame_ready()
         if frame:
             frame.start_drag()
 
     def window_resize(self, edge: str) -> None:
+        log.info("window_resize %s", edge)
         frame = self._frame_ready()
         if frame:
             frame.start_resize(str(edge))
@@ -1077,7 +1081,9 @@ _PROBE_JS = r"""JSON.stringify((() => {
     return r.width ? [r.left, r.top, r.width, r.height] : null; };
   return { dpr: window.devicePixelRatio, booted: !document.body.classList.contains('booting'), w: innerWidth, h: innerHeight,
     body: document.body.className, drag: box('#titlebar .tb-fill'), min: box('#btn-min'), max: box('#btn-max'), close: box('#btn-close'),
-    grip: box('.rz-bottom') };
+    grip: box('.rz-bottom'), debug: window.__winDebug || null,
+    at: (() => { const r = document.querySelector('#titlebar .tb-fill'); if (!r) return null; const b = r.getBoundingClientRect();
+      const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e ? (e.id || e.className || e.tagName) : null; })() };
 })())"""
 
 

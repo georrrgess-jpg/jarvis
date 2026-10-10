@@ -2566,21 +2566,24 @@
       // A plain click still clicks (the J.A.R.V.I.S. badge opens the personalities) and a double-click maximises.
       const NOT_DRAG = 'button, input, select, textarea, a, label, .chip.clickable, [data-no-drag]';
       let down = null;
+      const dbg = (window.__winDebug = { down: 0, drag: 0, dbl: 0, grip: 0 });
       document.addEventListener('mousedown', (e) => {
+        if (e.target.closest && e.target.closest('.drag-region')) dbg.down++;
         if (e.button !== 0 || this.full || !e.target.closest('.drag-region') || e.target.closest(NOT_DRAG)) { down = null; return; }
         down = { x: e.screenX, y: e.screenY };
       });
       document.addEventListener('mousemove', (e) => {
         if (!down || !(e.buttons & 1)) { down = null; return; }
-        if (Math.abs(e.screenX - down.x) + Math.abs(e.screenY - down.y) >= 4) { down = null; call('window_drag'); }
+        if (Math.abs(e.screenX - down.x) + Math.abs(e.screenY - down.y) >= 4) { down = null; dbg.drag++; call('window_drag'); }
       });
       document.addEventListener('mouseup', () => { down = null; });
       document.addEventListener('dblclick', (e) => {
-        if (e.target.closest('.drag-region') && !e.target.closest(NOT_DRAG)) { e.preventDefault(); this.toggleMax(); }
+        if (e.target.closest('.drag-region') && !e.target.closest(NOT_DRAG)) { e.preventDefault(); dbg.dbl++; this.toggleMax(); }
       });
       $$('.rz').forEach((g) => g.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         e.preventDefault();
+        dbg.grip++;
         call('window_resize', g.dataset.edge);
       }));
       call('window_state').then((st) => this.set(st));

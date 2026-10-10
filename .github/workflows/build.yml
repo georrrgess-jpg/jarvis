@@ -182,13 +182,17 @@ jobs:
       - name: Read the version
         id: v
         run: echo "version=$(python3 -c "import json; print(json.load(open('dist/latest.json'))['version'])")" >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.v.outputs.version }}
-          name: J.A.R.V.I.S. ${{ steps.v.outputs.version }}
-          body_path: dist/notes.md
-          target_commitish: ${{ github.sha }}
-          make_latest: true
-          files: |
-            dist/Jarvis.exe
-            dist/latest.json
+      - name: Tag the commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "v${{ steps.v.outputs.version }}" "${{ github.sha }}"
+          git push -f origin "refs/tags/v${{ steps.v.outputs.version }}"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "v${{ steps.v.outputs.version }}" --yes --repo "${{ github.repository }}" 2>/dev/null || true
+          gh release create "v${{ steps.v.outputs.version }}" dist/Jarvis.exe dist/latest.json \
+            --repo "${{ github.repository }}" --verify-tag --latest \
+            --title "J.A.R.V.I.S. ${{ steps.v.outputs.version }}" --notes-file dist/notes.md

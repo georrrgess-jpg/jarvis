@@ -1087,6 +1087,8 @@ _PROBE_JS = r"""JSON.stringify((() => {
   return { t: Date.now(), dpr: window.devicePixelRatio, booted: !document.body.classList.contains('booting'), w: innerWidth, h: innerHeight,
     body: document.body.className, drag: box('#titlebar .tb-fill'), min: box('#btn-min'), max: box('#btn-max'), close: box('#btn-close'),
     grip: box('.rz-bottom'), debug: window.__winDebug || null,
+    closeHit: (() => { const b = document.querySelector('#btn-close').getBoundingClientRect();
+      const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e ? (e.id || e.className || e.tagName) : null; })(),
     at: (() => { const r = document.querySelector('#titlebar .tb-fill'); if (!r) return null; const b = r.getBoundingClientRect();
       const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); return e ? (e.id || e.className || e.tagName) : null; })() };
 })())"""

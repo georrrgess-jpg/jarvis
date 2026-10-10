@@ -126,7 +126,7 @@ def main() -> int:
     def check(name, ok, detail=None):
         if not ok:
             p = probe()
-            detail = {"detail": detail, "page_events": p.get("debug"), "under_title_bar": p.get("at"), "state": p.get("state")}
+            detail = {"detail": detail, "page_events": p.get("debug"), "under_close": p.get("closeHit"), "probe_w": p.get("w"), "close_box": p.get("close"), "under_title_bar": p.get("at"), "state": p.get("state")}
         report["checks"][name] = {"ok": bool(ok), "detail": detail}
         print(("PASS " if ok else "FAIL ") + name + (f": {detail}" if detail is not None else ""), flush=True)
         if not ok:

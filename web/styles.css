@@ -113,9 +113,17 @@ button { cursor: pointer; }
   text-shadow: 0 0 14px rgb(var(--accent-rgb) / .75);
 }
 .brand-text span { display: block; margin-top: 4px; font: 500 9.5px/1 var(--font-display); letter-spacing: .26em; color: var(--text-dim); text-transform: uppercase; }
-.tb-fill { flex: 1; height: 100%; }
+.tb-fill { flex: 1 1 0; min-width: 16px; height: 100%; }
+.brand, .clock { flex: none; }
+.brand { min-width: 0; }
 
-.chips { display: flex; gap: 8px; }
+/* the window buttons must never be pushed off the edge: the status chips give way first */
+.chips { display: flex; gap: 8px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.chip { flex: none; }
+.win-buttons { flex: none; }
+.chips .chip.squeezed { display: none; }
+@media (max-width: 1640px) { .chip span { max-width: 110px; } }
+@media (max-width: 1380px) { .brand-text span { display: none; } }
 .chip {
   position: relative;
   display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px;
@@ -1202,3 +1210,21 @@ body.booting #col-center { transform: scale(.94); }
   animation: upd-spin 1s linear infinite; }
 @keyframes upd-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .upd-spin { animation-duration: 3s !important; animation-iteration-count: infinite !important; } }
+
+/* ------------------------------------------------------------ the window: resize edges, maximise / full-screen icons */
+.rz-grips { position: fixed; inset: 0; z-index: 9000; pointer-events: none; }
+.rz { position: absolute; pointer-events: auto; display: block; }
+.rz-top { top: 0; left: 10px; right: 10px; height: 5px; cursor: n-resize; }
+.rz-bottom { bottom: 0; left: 10px; right: 10px; height: 6px; cursor: s-resize; }
+.rz-left { left: 0; top: 10px; bottom: 10px; width: 6px; cursor: w-resize; }
+.rz-right { right: 0; top: 10px; bottom: 10px; width: 6px; cursor: e-resize; }
+.rz-topleft { left: 0; top: 0; width: 10px; height: 10px; cursor: nw-resize; }
+.rz-topright { right: 0; top: 0; width: 10px; height: 10px; cursor: ne-resize; }
+.rz-bottomleft { left: 0; bottom: 0; width: 12px; height: 12px; cursor: sw-resize; }
+.rz-bottomright { right: 0; bottom: 0; width: 12px; height: 12px; cursor: se-resize; }
+body.win-max .rz-grips, body.win-full .rz-grips, body.framed .rz-grips { display: none; }
+#btn-max .i-restore, #btn-full .i-exit { display: none; }
+body.win-max #btn-max .i-max, body.win-full #btn-full .i-enter { display: none; }
+body.win-max #btn-max .i-restore, body.win-full #btn-full .i-exit { display: inline; }
+#btn-max svg path, #btn-max svg rect, #btn-full svg path { fill: none; }
+.drag-region { cursor: default; }

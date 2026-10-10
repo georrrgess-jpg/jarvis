@@ -2543,6 +2543,61 @@
     },
   };
 
+  // ========================================================================= the window (borderless: our own title bar)
+  const Win = {
+    max: false, full: false,
+    set(st) {
+      if (!st) return;
+      this.max = !!st.maximized; this.full = !!st.fullscreen;
+      document.body.classList.toggle('win-max', this.max);
+      document.body.classList.toggle('win-full', this.full);
+      $('#btn-max').title = this.max ? 'Restore' : 'Maximise';
+      $('#btn-max').setAttribute('aria-label', this.max ? 'Restore' : 'Maximise');
+      $('#btn-full').title = this.full ? 'Leave full screen (Esc)' : 'Full screen (F11)';
+    },
+    async toggleMax() { this.set(await call('window_toggle_maximize')); },
+    async toggleFull() { this.set(await call('window_toggle_fullscreen')); },
+    init() {
+      $('#btn-min').onclick = () => call('window_minimize');
+      $('#btn-max').onclick = () => this.toggleMax();
+      $('#btn-full').onclick = () => this.toggleFull();
+      $('#btn-close').onclick = () => call('window_close');
+      // Dragging: once the mouse moves a few pixels with the button down on the title bar, Windows takes over the move.
+      // A plain click still clicks (the J.A.R.V.I.S. badge opens the personalities) and a double-click maximises.
+      const NOT_DRAG = 'button, input, select, textarea, a, label, .chip.clickable, [data-no-drag]';
+      let down = null;
+      document.addEventListener('mousedown', (e) => {
+        if (e.button !== 0 || this.full || !e.target.closest('.drag-region') || e.target.closest(NOT_DRAG)) { down = null; return; }
+        down = { x: e.screenX, y: e.screenY };
+      });
+      document.addEventListener('mousemove', (e) => {
+        if (!down || !(e.buttons & 1)) { down = null; return; }
+        if (Math.abs(e.screenX - down.x) + Math.abs(e.screenY - down.y) >= 4) { down = null; call('window_drag'); }
+      });
+      document.addEventListener('mouseup', () => { down = null; });
+      document.addEventListener('dblclick', (e) => {
+        if (e.target.closest('.drag-region') && !e.target.closest(NOT_DRAG)) { e.preventDefault(); this.toggleMax(); }
+      });
+      $$('.rz').forEach((g) => g.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        call('window_resize', g.dataset.edge);
+      }));
+      call('window_state').then((st) => this.set(st));
+      // status chips: show as many whole chips as fit between the badge and the clock, never half of one
+      const fit = () => {
+        const box = $('#titlebar .chips');
+        const chips = $$('.chip', box);
+        chips.forEach((c) => c.classList.remove('squeezed'));
+        for (let i = chips.length - 1; i >= 0 && box.scrollWidth > box.clientWidth + 1; i--) chips[i].classList.add('squeezed');
+      };
+      this.fitChips = fit;
+      window.addEventListener('resize', () => requestAnimationFrame(fit));
+      new MutationObserver(() => requestAnimationFrame(fit)).observe($('#btn-update'), { attributes: true, attributeFilter: ['class'] });
+      setTimeout(fit, 200); setTimeout(fit, 2500);
+    },
+  };
+
   // ========================================================================= updates
   const Updates = {
     st: null,
@@ -2667,6 +2722,7 @@
       case 'media': Media.update(ev); break;
       case 'activity_log': Center.add(ev.item); break;
       case 'update': { const { type, ...u } = ev; Updates.set(u); break; }
+      case 'window_state': { const { type, ...w } = ev; Win.set(w); break; }
       case 'corrections': Center.corrections = ev.items || []; Center.correctionsPanel(); break;
       case 'browser': { const { type, ...b } = ev; Center.browser = { ...(Center.browser || {}), ...b }; Center.browserPanel(); break; }
       case 'protocol_edit': Protocols.open(false, ev.protocol); break;
@@ -2785,10 +2841,7 @@
     };
     $('#btn-clear-log').onclick = () => Chat.empty();
     $('#btn-settings').onclick = () => { call('play_sfx', 'click'); Settings.toggle(); };
-    $('#btn-min').onclick = () => call('window_minimize');
-    $('#btn-max').onclick = () => call('window_toggle_maximize');
-    $('#btn-close').onclick = () => call('window_close');
-    $$('.pywebview-drag-region').forEach((el) => el.addEventListener('dblclick', () => call('window_toggle_maximize')));
+    Win.init();
 
     $('#boot-close').onclick = () => (api ? call('window_close') : window.close());
     $('#g-setup').onclick = () => Google.open();
@@ -2823,6 +2876,7 @@
       const modalOpen = ['#reader', '#google', '#memory', '#personas', '#persona-edit', '#wake-teach', '#protocols', '#center'].some((id) => !$(id).classList.contains('hidden'));
       if (e.code === 'Space' && !typing() && !modalOpen) { e.preventDefault(); if (!e.repeat) Ptt.down(); return; }
       if (e.key === 'Escape') {
+        if (Win.full && !modalOpen && !$('#settings').classList.contains('open')) { Win.toggleFull(); return; }
         if (!$('#persona-edit').classList.contains('hidden')) PersonaEditor.close();
         else if (!$('#wake-teach').classList.contains('hidden')) WakeTeach.close();
         else if (!$('#memory').classList.contains('hidden')) MemoryCore.close();
@@ -2837,7 +2891,7 @@
         return;
       }
       if (e.key === '/' && !typing()) { e.preventDefault(); $('#cmd').focus(); return; }
-      if (e.key === 'F11') { e.preventDefault(); call('window_toggle_fullscreen'); return; }
+      if (e.key === 'F11') { e.preventDefault(); Win.toggleFull(); return; }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'l') { e.preventDefault(); Chat.empty(); }
       if ((e.ctrlKey || e.metaKey) && e.key === ',') { e.preventDefault(); Settings.toggle(); }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); MemoryCore.el.classList.contains('hidden') ? MemoryCore.open() : MemoryCore.close(); }

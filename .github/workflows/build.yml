@@ -65,6 +65,11 @@ jobs:
           Get-Content "$env:JARVIS_HOME\jarvis.log" -ErrorAction SilentlyContinue
           Get-Content "$env:TEMP\jarvis-crash.txt" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Window check (real mouse and keyboard - drag, resize, maximise, full screen, minimise, close)
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python tests/windows_window_check.py dist/Jarvis.exe window-check.json
       - name: One-click update check (real exe - download, verify, self-test, swap, restart; and roll back a broken one)
         shell: pwsh
         env:
@@ -139,6 +144,7 @@ jobs:
             online-check.json
             typing-check.json
             update-check.json
+            window-check.json
             vision-check.json
             vision-check.png
             ${{ runner.temp }}/jarvis-home/jarvis.log

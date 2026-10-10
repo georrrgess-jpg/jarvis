@@ -176,6 +176,7 @@ window.createJarvisMock = function createJarvisMock() {
   const browser = { state: 'AUTHENTICATION_REQUIRED', title: 'Sign in - Google Accounts', url: 'https://accounts.google.com/v3/signin/identifier', browser: 'Chrome',
     profile: { name: 'Tony', email: 'tony@example.com', directory: 'Default' }, waiting: { label: 'Gmail', why: 'Google sign-in' }, history: [], address_bar: true,
     profiles: [{ name: 'Tony', email: 'tony@example.com', directory: 'Default' }, { name: 'Work', email: 'tony@stark.example', directory: 'Profile 1' }] };
+  const winState = { maximized: false, fullscreen: false };
   const updateState = { state: 'ready', current: '1.1.38', progress: 1, error: '', checked_at: now - 600, has_previous: true, auto: true,
     release: { version: '1.1.42', notes: '- One-click updates\n- Say “that was wrong” to correct me\n- The window moves, resizes and goes full screen properly' } };
   const health = { neural_core: true, model: 'llama3.2', voice: true, microphone: true, wake_word: true, media_sessions: true, app_volumes: true, address_bar: true, helper_errors: {}, ocr: true, google: false, internet: true };
@@ -412,6 +413,12 @@ window.createJarvisMock = function createJarvisMock() {
     corrections_list: async () => ({ items: [{ id: 'c1', heard: 'this cord', meant: 'discord', whole: false, voice_only: true, uses: 3 },
       { id: 'c2', heard: 'play lo fi', meant: 'play lo fi on youtube', whole: true, voice_only: false, uses: 0 }], log: [] }),
     corrections_delete: async () => ({ ok: true }),
+    window_state: async () => ({ ...winState }),
+    window_toggle_maximize: async () => { winState.maximized = !winState.maximized; return { ...winState }; },
+    window_toggle_fullscreen: async () => { winState.fullscreen = !winState.fullscreen; return { ...winState }; },
+    window_drag: async () => {},
+    window_resize: async () => {},
+    window_minimize: async () => {},
     update_status: async () => ({ ...updateState }),
     update_check: async () => ({ ok: true, available: true, ...updateState }),
     update_install: async () => { setTimeout(() => emit({ type: 'update', ...updateState, state: 'installing' }), 100); return { ok: true }; },
@@ -483,6 +490,6 @@ window.createJarvisMock = function createJarvisMock() {
     email_discard: async (id) => { emit({ type: 'email_status', id, status: 'discarded' }); },
     preview_voice: async () => reply('Good day, sir. This is how I will sound from now on.', true),
     open_url: async (url) => { window.open(url, '_blank'); return true; },
-    window_minimize: async () => {}, window_toggle_maximize: async () => {}, window_toggle_fullscreen: async () => {}, window_close: async () => {},
+    window_close: async () => {},
   };
 };

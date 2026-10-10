@@ -334,6 +334,7 @@ class JarvisAPI:
         self._ready = threading.Event()
         self._booted = threading.Event()
         self._after_update = ""  # state file path when this copy was started by an update
+        self._frame = None  # core.winframe.WinFrame once the window exists (Windows, borderless)
 
     def _attach(self, window) -> None:
         self._window = window
@@ -642,22 +643,73 @@ class JarvisAPI:
     def update_restore_previous(self) -> dict:
         return self._assistant.update_install(restore=True)
 
+    # -- the window ----------------------------------------------------------
+    def _frame_ready(self):
+        """Windows' own move / size / maximise for the borderless HUD (None: let pywebview do it)."""
+        if self._frame is None and self._window is not None and sys.platform == "win32" and self._frameless:
+            try:
+                from core.winframe import WinFrame
+
+                native = self._window.native
+                from System import Func, Type  # pythonnet, loaded by pywebview's WinForms backend
+
+                def run_ui(fn) -> None:
+                    def call():
+                        fn()
+                        return None
+
+                    if native.InvokeRequired:
+                        native.Invoke(Func[Type](call))
+                    else:
+                        call()
+
+                self._frame = WinFrame(lambda: int(native.Handle.ToInt64()), run_ui,
+                                       lambda st: self._bridge.emit("window_state", st))
+            except Exception:
+                log.warning("native window control unavailable; using pywebview's", exc_info=True)
+                self._frame = False
+        return self._frame or None
+
     def window_minimize(self) -> None:
         if self._window:
             self._window.minimize()
 
-    def window_toggle_maximize(self) -> None:
+    def window_toggle_maximize(self) -> dict:
+        frame = self._frame_ready()
+        if frame:
+            frame.toggle_maximize()
+            return frame.state()
         if not self._window:
-            return
+            return {}
         if self._maximized:
             self._window.restore()
         else:
             self._window.maximize()
         self._maximized = not self._maximized
+        return {"maximized": self._maximized, "fullscreen": False}
 
-    def window_toggle_fullscreen(self) -> None:
+    def window_toggle_fullscreen(self) -> dict:
+        frame = self._frame_ready()
+        if frame:
+            frame.toggle_fullscreen()
+            return frame.state()
         if self._window:
             self._window.toggle_fullscreen()
+        return {}
+
+    def window_drag(self) -> None:
+        frame = self._frame_ready()
+        if frame:
+            frame.start_drag()
+
+    def window_resize(self, edge: str) -> None:
+        frame = self._frame_ready()
+        if frame:
+            frame.start_resize(str(edge))
+
+    def window_state(self) -> dict:
+        frame = self._frame_ready()
+        return frame.state() if frame else {"maximized": self._maximized, "fullscreen": False, "native": False}
 
     def window_close(self) -> None:
         if self._window:
@@ -1020,6 +1072,33 @@ def _watch_ui(window, api: JarvisAPI) -> None:
         pass
 
 
+_PROBE_JS = r"""JSON.stringify((() => {
+  const box = (sel) => { const e = document.querySelector(sel); if (!e) return null; const r = e.getBoundingClientRect();
+    return r.width ? [r.left, r.top, r.width, r.height] : null; };
+  return { dpr: window.devicePixelRatio, booted: !document.body.classList.contains('booting'), w: innerWidth, h: innerHeight,
+    body: document.body.className, drag: box('#titlebar .tb-fill'), min: box('#btn-min'), max: box('#btn-max'), close: box('#btn-close'),
+    grip: box('.rz-bottom') };
+})())"""
+
+
+def _window_probe(window, api: JarvisAPI, path: Path) -> None:
+    """CI only: keep writing where the title bar and buttons are (screen pixels) and the window's state."""
+    if not window.events.shown.wait(120):
+        return
+    while True:
+        try:
+            ui = json.loads(window.evaluate_js(_PROBE_JS))
+            frame = api._frame_ready()
+            ui["state"] = frame.state() if frame else {}
+            ui["rect"] = frame.rect() if frame else None
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(ui), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:
+            log.debug("window probe hiccup", exc_info=True)
+        time.sleep(0.4)
+
+
 def _diag_dotnet_crash() -> int:
     """CI check: throw on a .NET thread and let the AppDomain hook report it (process ends with 0xE0434352)."""
     from System.Threading import Thread as NetThread
@@ -1086,6 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--after-update", metavar="STATE", help=argparse.SUPPRESS)  # started by the updater
     parser.add_argument("--finish-update", metavar="STATE", help=argparse.SUPPRESS)  # the new exe swapping itself in
     parser.add_argument("--install-update-when-ready", action="store_true", help=argparse.SUPPRESS)  # the update CI check
+    parser.add_argument("--window-probe", metavar="PATH", help=argparse.SUPPRESS)  # the window CI check: where things are
     args, _unknown = parser.parse_known_args(argv)
 
     ensure_std_streams()
@@ -1145,6 +1225,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.diag_dotnet_crash:
         return _diag_dotnet_crash()
     log.info("Creating window %dx%d min=%s maximized=%s frameless=%s", width, height, min_size, maximized, frameless)
+    native_frame = frameless and sys.platform == "win32" and not args.gui
+    if native_frame:
+        # The page asks Windows to move / size the window itself (see core/winframe.py), so pywebview's
+        # JavaScript dragging is switched off; and a borderless window "maximised" by WinForms would cover the
+        # taskbar, so start normal and maximise to the work area once it's shown.
+        webview.settings["DRAG_REGION_SELECTOR"] = ".pywebview-drag-off"
     window = webview.create_window(
         "J.A.R.V.I.S.",
         url=str(resource_path("web", "index.html")),
@@ -1152,7 +1238,7 @@ def main(argv: list[str] | None = None) -> int:
         width=width,
         height=height,
         min_size=min_size,
-        maximized=maximized,
+        maximized=maximized and not native_frame,
         frameless=frameless,
         easy_drag=False,
         background_color="#02070d",
@@ -1163,6 +1249,8 @@ def main(argv: list[str] | None = None) -> int:
     def on_shown() -> None:
         close_splash()
         log.info("Window shown after %.1fs (renderer: %s)", time.monotonic() - started, getattr(webview, "renderer", "?"))
+        if native_frame and maximized:
+            threading.Timer(0.3, lambda: (api._frame_ready() and api._frame.maximize())).start()
 
     window.events.shown += on_shown
 
@@ -1193,6 +1281,8 @@ def main(argv: list[str] | None = None) -> int:
 
     window.events.closed += on_closed
 
+    if args.window_probe:
+        threading.Thread(target=_window_probe, args=(window, api, Path(args.window_probe)), name="window-probe", daemon=True).start()
     smoke = SmokeTest(window, api, args.smoke_report, args.smoke_hold) if args.smoke_test else None
     if smoke:
         smoke.start()

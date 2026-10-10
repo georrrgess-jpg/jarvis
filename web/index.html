@@ -18,7 +18,7 @@
 
   <!-- ======================================================= title bar -->
   <header id="titlebar">
-    <div class="brand pywebview-drag-region" id="brand" title="Choose a personality">
+    <div class="brand drag-region" id="brand" title="Choose a personality">
       <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
         <circle cx="20" cy="20" r="17" class="bm-ring"/>
         <circle cx="20" cy="20" r="12" class="bm-ring2"/>
@@ -31,7 +31,7 @@
       </div>
     </div>
 
-    <div class="tb-fill pywebview-drag-region"></div>
+    <div class="tb-fill drag-region"></div>
 
     <div class="chips">
       <div class="chip" id="chip-core" title="Local language model (Ollama)">
@@ -48,9 +48,9 @@
       </div>
     </div>
 
-    <div class="tb-fill pywebview-drag-region"></div>
+    <div class="tb-fill drag-region"></div>
 
-    <div class="clock pywebview-drag-region">
+    <div class="clock drag-region">
       <span id="clock-time">00:00:00</span>
       <span id="clock-date">—</span>
     </div>
@@ -80,10 +80,17 @@
       </button>
       <span class="wb-sep frame-only"></span>
       <button class="wb frame-only" id="btn-min" title="Minimise" aria-label="Minimise"><svg viewBox="0 0 24 24"><path d="M5 12.5h14"/></svg></button>
-      <button class="wb frame-only" id="btn-max" title="Maximise" aria-label="Maximise"><svg viewBox="0 0 24 24"><rect x="5.5" y="5.5" width="13" height="13"/></svg></button>
+      <button class="wb frame-only" id="btn-full" title="Full screen (F11)" aria-label="Full screen"><svg viewBox="0 0 24 24"><path class="i-enter" d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15"/><path class="i-exit" d="M9 4.5V9H4.5M19.5 9H15V4.5M15 19.5V15h4.5M4.5 15H9v4.5"/></svg></button>
+      <button class="wb frame-only" id="btn-max" title="Maximise" aria-label="Maximise"><svg viewBox="0 0 24 24"><rect class="i-max" x="5.5" y="5.5" width="13" height="13"/><path class="i-restore" d="M8.5 8.5V5.5h10v10h-3M5.5 8.5h10v10h-10Z"/></svg></button>
       <button class="wb wb-close frame-only" id="btn-close" title="Close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </div>
   </header>
+
+  <!-- edges for resizing the borderless window (Windows does the actual resizing) -->
+  <div class="rz-grips frame-only" aria-hidden="true">
+    <i class="rz rz-top" data-edge="top"></i><i class="rz rz-bottom" data-edge="bottom"></i><i class="rz rz-left" data-edge="left"></i><i class="rz rz-right" data-edge="right"></i>
+    <i class="rz rz-topleft" data-edge="topleft"></i><i class="rz rz-topright" data-edge="topright"></i><i class="rz rz-bottomleft" data-edge="bottomleft"></i><i class="rz rz-bottomright" data-edge="bottomright"></i>
+  </div>
 
   <!-- ======================================================= HUD -->
   <main id="hud">
@@ -219,7 +226,7 @@
 
   <!-- ======================================================= boot overlay -->
   <div id="boot" class="overlay">
-    <div class="boot-bar-top pywebview-drag-region"></div>
+    <div class="boot-bar-top drag-region"></div>
     <button class="wb wb-close" id="boot-close" title="Close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     <div class="boot-inner">
       <svg class="boot-ring" viewBox="0 0 200 200" aria-hidden="true">

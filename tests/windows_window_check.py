@@ -251,6 +251,12 @@ def main() -> int:
         user32.ShowWindow(hwnd, 9)
         time.sleep(1.0)
         check("it comes back from the taskbar", not user32.IsIconic(hwnd) and rect(hwnd)[2] == normal[2], rect(hwnd))
+        # the page must be answering again after coming back from the taskbar (a frozen HUD would be a real bug)
+        t0 = time.time() * 1000
+        deadline = time.time() + 20
+        while time.time() < deadline and (probe().get("t") or 0) < t0:
+            time.sleep(0.3)
+        check("the HUD responds again after coming back from the taskbar", (probe().get("t") or 0) >= t0, probe().get("t"))
         for attempt in range(3):  # right after coming back from the taskbar a first click can be lost
             p = probe()
             click(*screen_point(p, "close"))

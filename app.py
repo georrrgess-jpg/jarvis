@@ -1084,7 +1084,7 @@ def _watch_ui(window, api: JarvisAPI) -> None:
 _PROBE_JS = r"""JSON.stringify((() => {
   const box = (sel) => { const e = document.querySelector(sel); if (!e) return null; const r = e.getBoundingClientRect();
     return r.width ? [r.left, r.top, r.width, r.height] : null; };
-  return { dpr: window.devicePixelRatio, booted: !document.body.classList.contains('booting'), w: innerWidth, h: innerHeight,
+  return { t: Date.now(), dpr: window.devicePixelRatio, booted: !document.body.classList.contains('booting'), w: innerWidth, h: innerHeight,
     body: document.body.className, drag: box('#titlebar .tb-fill'), min: box('#btn-min'), max: box('#btn-max'), close: box('#btn-close'),
     grip: box('.rz-bottom'), debug: window.__winDebug || null,
     at: (() => { const r = document.querySelector('#titlebar .tb-fill'); if (!r) return null; const b = r.getBoundingClientRect();
@@ -1096,8 +1096,14 @@ def _window_probe(window, api: JarvisAPI, path: Path) -> None:
     """CI only: keep writing where the title bar and buttons are (screen pixels) and the window's state."""
     if not window.events.shown.wait(120):
         return
+    import ctypes
+
     while True:
         try:
+            frame = api._frame_ready()
+            if frame and ctypes.windll.user32.IsIconic(frame._hwnd()):
+                time.sleep(0.4)  # minimised: don't ask the page anything until it's back
+                continue
             ui = json.loads(window.evaluate_js(_PROBE_JS))
             frame = api._frame_ready()
             ui["state"] = frame.state() if frame else {}

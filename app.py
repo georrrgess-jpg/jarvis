@@ -729,6 +729,26 @@ class JarvisAPI:
             from System.Reflection import BindingFlags
 
             def wake():
+                # Windows parks a minimised window at -32000; the page inside can stay there when it comes back
+                # (it was seen at +32000 inside the restored window, so every click hit an empty frame)
+                import ctypes
+                from ctypes import wintypes
+
+                u = ctypes.WinDLL("user32", use_last_error=True)
+                u.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+                u.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+                u.ScreenToClient.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.POINT))
+                u.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT)
+                form, child = int(native.Handle.ToInt64()), int(control.Handle.ToInt64())
+                client, at = wintypes.RECT(), wintypes.RECT()
+                u.GetClientRect(form, ctypes.byref(client))
+                u.GetWindowRect(child, ctypes.byref(at))
+                pt = wintypes.POINT(at.left, at.top)
+                u.ScreenToClient(form, ctypes.byref(pt))
+                if (pt.x, pt.y, at.right - at.left, at.bottom - at.top) != (0, 0, client.right, client.bottom):
+                    log.info("Page was at %d,%d (%dx%d) after restore; moving it back", pt.x, pt.y, at.right - at.left, at.bottom - at.top)
+                    u.SetWindowPos(child, None, 0, 0, client.right, client.bottom, 0x4 | 0x10)  # NOZORDER | NOACTIVATE
+                    native.PerformLayout()
                 field = control.GetType().GetField("_coreWebView2Controller", BindingFlags.NonPublic | BindingFlags.Instance)
                 controller = field.GetValue(control) if field is not None else None
                 if controller is not None:

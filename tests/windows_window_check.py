@@ -144,7 +144,22 @@ def main() -> int:
         if not box:
             raise RuntimeError(f"the page has no visible {name!r} to aim at: {p}")
         focus(hwnd)
+        r = rect(hwnd)  # the window's live position: the probe's snapshot can lag behind (or stall while minimised)
+        pw, ph = p.get("w") or r[2] / dpr, p.get("h") or r[3] / dpr
+        if name in ("min", "max", "close"):  # anchored to the right edge
+            return r[0] + r[2] - (pw - (box[0] + box[2] * fx)) * dpr, r[1] + (box[1] + box[3] * fy) * dpr
+        if name == "grip":  # the bottom edge
+            return r[0] + r[2] * 0.5, r[1] + r[3] - (ph - (box[1] + box[3] * fy)) * dpr
         return r[0] + (box[0] + box[2] * fx) * dpr, r[1] + (box[1] + box[3] * fy) * dpr
+
+    def state_is(key, want, timeout=4.0):
+        """Wait for JARVIS to report the window state (the probe file refreshes a few times a second)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if bool(probe().get("state", {}).get(key)) == want:
+                return True
+            time.sleep(0.2)
+        return False
 
     env = {**os.environ, "JARVIS_HOME": str(work / "home"), "JARVIS_NO_DIALOGS": "1", "SDL_AUDIODRIVER": "dummy"}
     proc = subprocess.Popen([str(exe), "--window-probe", str(probe_path)], env=env)
@@ -172,7 +187,7 @@ def main() -> int:
             click(dx, dy, double=True)
             time.sleep(1.0)
             r0 = rect(hwnd)
-            check("double-clicking the title bar restores it", not probe().get("state", {}).get("maximized") and r0[2] < workarea[2], r0)
+            check("double-clicking the title bar restores it", state_is("maximized", False) and r0[2] < workarea[2], r0)
         time.sleep(0.5)
 
         # 1. move by dragging the title bar
@@ -192,9 +207,9 @@ def main() -> int:
         p = probe()
         gx, gy = screen_point(p, "grip", 0.5, 0.5)
         before = rect(hwnd)
-        drag(gx, gy, 0, -50)
+        drag(gx, gy, 0, 40)  # taller (it can't get shorter: 640 px is its minimum on this screen)
         after = rect(hwnd)
-        check("dragging the bottom edge resizes the window", abs((after[3] - before[3]) + 50) <= 10 and after[:3] == before[:3],
+        check("dragging the bottom edge resizes the window", abs((after[3] - before[3]) - 40) <= 10 and after[:3] == before[:3],
               {"before": before, "after": after})
 
         # 3. maximise button -> work area; again -> back where it was
@@ -202,7 +217,7 @@ def main() -> int:
         p = probe()
         click(*screen_point(p, "max"))
         time.sleep(1.0)
-        check("the maximise button fills the work area (taskbar stays visible)", near(rect(hwnd), workarea) and probe().get("state", {}).get("maximized"),
+        check("the maximise button fills the work area (taskbar stays visible)", near(rect(hwnd), workarea) and state_is("maximized", True),
               {"rect": rect(hwnd), "work": workarea})
         p = probe()
         click(*screen_point(p, "max"))
@@ -213,9 +228,9 @@ def main() -> int:
         p = probe()
         click(*screen_point(p, "drag"))  # focus the window (a click, not a drag)
         key(0x7A)  # F11
-        check("F11 covers the whole monitor", near(rect(hwnd), screen) and probe().get("state", {}).get("fullscreen"), {"rect": rect(hwnd), "screen": screen})
+        check("F11 covers the whole monitor", near(rect(hwnd), screen) and state_is("fullscreen", True), {"rect": rect(hwnd), "screen": screen})
         key(0x1B)  # Esc
-        check("Esc leaves full screen", near(rect(hwnd), normal) and not probe().get("state", {}).get("fullscreen"), {"rect": rect(hwnd), "was": normal})
+        check("Esc leaves full screen", near(rect(hwnd), normal) and state_is("fullscreen", False), {"rect": rect(hwnd), "was": normal})
 
         # 5. dragging a maximised window restores it under the cursor
         p = probe()
@@ -225,7 +240,7 @@ def main() -> int:
         x, y = screen_point(p, "drag")
         drag(x, y, 0, 120)
         after = rect(hwnd)
-        check("dragging a maximised window restores it and moves it", not probe().get("state", {}).get("maximized") and after[2] == normal[2]
+        check("dragging a maximised window restores it and moves it", state_is("maximized", False) and after[2] == normal[2]
               and after[3] == normal[3] and after[0] <= x <= after[0] + after[2], {"rect": after, "normal": normal, "cursor": [x, y + 120]})
 
         # 6. minimise, bring back, close

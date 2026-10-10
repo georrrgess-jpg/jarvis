@@ -622,6 +622,13 @@ class JarvisAPI:
 
         return installed_browsers()
 
+    # -- corrections ("that was wrong") -----------------------------------------
+    def corrections_list(self) -> dict:
+        return self._assistant.corrections_list()
+
+    def corrections_delete(self, rid: str) -> dict:
+        return self._assistant.corrections_delete(str(rid))
+
     # -- updates -------------------------------------------------------------
     def update_status(self) -> dict:
         return self._assistant.update_status()

@@ -2390,7 +2390,7 @@
 
   // ========================================================================= media & automation center
   const Center = {
-    el: null, items: [], health: null, browser: null, lastRun: null, kind: 'all', query: '', unseen: 0,
+    el: null, items: [], health: null, browser: null, lastRun: null, kind: 'all', query: '', unseen: 0, corrections: [],
     open(focus = '') {
       this.el.classList.remove('hidden');
       call('play_sfx', 'click');
@@ -2401,10 +2401,11 @@
     close() { this.el.classList.add('hidden'); },
     shown() { return this.el && !this.el.classList.contains('hidden'); },
     async refresh() {
-      const [act, br] = await Promise.all([call('activity_list'), call('browser_status')]);
+      const [act, br, cor] = await Promise.all([call('activity_list'), call('browser_status'), call('corrections_list')]);
       if (act) { this.items = act.items || []; this.health = act.health || null; }
       if (br) this.browser = br;
-      this.media(); this.browserPanel(); this.run(); this.healthPanel(); this.log();
+      if (cor) this.corrections = cor.items || [];
+      this.media(); this.browserPanel(); this.run(); this.healthPanel(); this.correctionsPanel(); this.log();
     },
     add(item) {
       this.items.push(item);
@@ -2508,9 +2509,23 @@
         ['Address bar', h.address_bar, ''], ['Screen reading', h.ocr, ''], ['Google link', h.google, ''], ['Internet tools', h.internet, '']];
       box.innerHTML = rows.map(([k, ok, note]) => `<div class="ac-h ${ok ? 'ok' : 'bad'}" title="${esc(note || '')}"><i></i><b>${esc(k)}</b><span>${esc(ok ? (note && note !== 'offline' ? note : 'OK') : (note ? String(note).slice(0, 40) : 'off'))}</span></div>`).join('');
     },
+    correctionsPanel() {
+      if (!this.el) return;
+      const box = $('#ac-corrections');
+      const items = (this.corrections || []).slice().reverse();
+      if (!items.length) { box.innerHTML = '<li class="mm-empty">Nothing learnt yet. If I get something wrong, say “that was wrong”, then tell me what you meant: I\'ll remember it.</li>'; return; }
+      box.innerHTML = items.map(() => '<li><span class="h"></span><i>→</i><span class="m"></span><em></em><button type="button" class="mm-btn del" title="Forget this correction" aria-label="Forget this correction">×</button></li>').join('');
+      $$('li', box).forEach((li, i) => {
+        const c = items[i];
+        $('.h', li).textContent = `“${c.heard}”`;
+        $('.m', li).textContent = `“${c.meant}”`;
+        $('em', li).textContent = [c.whole ? 'this exact sentence' : 'wherever it comes up', c.voice_only ? 'speech only' : '', c.uses ? `used ${c.uses}×` : ''].filter(Boolean).join(' · ');
+        $('.del', li).onclick = async () => { const r = await call('corrections_delete', c.id); if (r && r.ok) toast('Forgotten.', 'ok', 1800); };
+      });
+    },
     log() {
       if (!this.el) return;
-      const kinds = ['all', 'command', 'media', 'browser', 'app', 'protocol'];
+      const kinds = ['all', 'command', 'media', 'browser', 'app', 'protocol', 'feedback'];
       $('#ac-log-kinds').innerHTML = kinds.map((k) => `<button type="button" class="${k === this.kind ? 'on' : ''}" data-k="${k}">${k.toUpperCase()}</button>`).join('');
       $$('#ac-log-kinds button').forEach((b) => (b.onclick = () => { this.kind = b.dataset.k; this.log(); }));
       const q = this.query.trim().toLowerCase();
@@ -2652,6 +2667,7 @@
       case 'media': Media.update(ev); break;
       case 'activity_log': Center.add(ev.item); break;
       case 'update': { const { type, ...u } = ev; Updates.set(u); break; }
+      case 'corrections': Center.corrections = ev.items || []; Center.correctionsPanel(); break;
       case 'browser': { const { type, ...b } = ev; Center.browser = { ...(Center.browser || {}), ...b }; Center.browserPanel(); break; }
       case 'protocol_edit': Protocols.open(false, ev.protocol); break;
       default: break;

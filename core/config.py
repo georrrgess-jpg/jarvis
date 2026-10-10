@@ -71,6 +71,8 @@ DEFAULTS: dict[str, Any] = {
     "media_history": [],  # what was played lately, for "resume what I was listening to"
     "browser_profile": "auto",  # which Chrome / Edge / Brave profile links open in ("auto" = the linked Google account's)
     "favorite_website": "",  # "open my favourite website"
+    "corrections": [],  # "that was wrong": rewrites learnt from the user's corrections (see core/feedback.py)
+    "feedback_log": [],  # the last corrections: what was heard, what JARVIS did, what was meant
     "auto_update": True,  # look for new versions and get them ready in the background (installing always waits for you)
     "activity_history": [],  # the last actions and whether they were verified (Automation Center)  # youtube | spotify: where "play <song>" goes (see core/media.py)
     "protocols": [],  # named lists of commands: [{id, name, steps, schedule, created, last_run}] (see core/protocols.py)
@@ -144,7 +146,7 @@ def resource_path(*parts: str) -> Path:
     return base.joinpath(*parts)
 
 
-_SIZE_LIMITS = {"protocols": 600_000, "activity_history": 120_000, "media_history": 40_000, "custom_personas": 60_000}
+_SIZE_LIMITS = {"protocols": 600_000, "activity_history": 120_000, "media_history": 40_000, "custom_personas": 60_000, "corrections": 80_000, "feedback_log": 60_000}
 
 
 def _coerce(key: str, value: Any) -> Any:

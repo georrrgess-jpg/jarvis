@@ -1090,7 +1090,14 @@ body.booting #col-center { transform: scale(.94); }
 .ac-panel h3 { display: flex; align-items: baseline; gap: 10px; margin: 0 0 9px; font: 700 10px/1 var(--font-display); letter-spacing: .24em; color: rgb(var(--cyan)); }
 .ac-panel h3 em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 10.5px var(--font-mono); font-style: normal; letter-spacing: .02em; color: var(--text-faint); }
 .ac-panel .mm-empty { padding: 16px 12px; font-size: 13.5px; }
-.ac-log { grid-column: 1 / -1; }
+.ac-log, .ac-corr { grid-column: 1 / -1; }
+.ac-corr-list { margin: 0; padding: 0; list-style: none; max-height: 22vh; overflow-y: auto; }
+.ac-corr-list li { display: flex; align-items: baseline; gap: 8px; padding: 4px 4px; border-bottom: 1px dashed rgb(var(--cyan) / .07); font-size: 13.5px; }
+.ac-corr-list li.mm-empty { display: block; }
+.ac-corr-list .h { color: var(--text-dim); text-decoration: line-through; text-decoration-color: rgb(var(--red) / .6); }
+.ac-corr-list i { font-style: normal; color: rgb(var(--cyan)); }
+.ac-corr-list .m { color: var(--text-hi); }
+.ac-corr-list em { flex: 1; font: 400 10.5px var(--font-mono); font-style: normal; color: var(--text-faint); }
 .ac-sessions { display: flex; flex-direction: column; gap: 6px; }
 .ac-session { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--text-faint); }
 .ac-session.playing { border-left-color: rgb(var(--green)); background: rgb(var(--green) / .04); }

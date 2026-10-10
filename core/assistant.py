@@ -49,6 +49,7 @@ from .vision import (DEFAULT_VISION_MODEL, ActRequest, LookRequest, VisionEngine
 from .compose import SHORT_FORM
 from .language import LANGUAGES, Detection, base_language, detect, voice_for
 from .patience import looks_unfinished
+from .feedback import Corrections, complete_command, is_never_mind, learn_rule, parse_feedback
 from .updater import UpdateError, Updater
 from .media import MediaCommand, find_youtube_video, parse_media, spotify_targets, youtube_search_url
 from .mediahub import _HINTS, MediaHub, MediaSession, describe_position, hint_from
@@ -388,6 +389,10 @@ class Speaker:
         return self._ducked
 
 
+def _words_of(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower())
+
+
 def _notes_list(notes: str) -> list[str]:
     """Release notes as short plain items (bullet lines, else the first lines)."""
     lines = [l.strip() for l in str(notes or "").splitlines() if l.strip()]
@@ -479,6 +484,9 @@ class Assistant:
         self.updater = Updater(APP_VERSION, state_dir=app_data_dir(), emit=lambda st: self.emit("update", **st))
         self.updater.auto_install = False  # only the update CI check sets this
         self.just_updated: dict | None = None  # set by app.py when this copy was started by an update
+        self.corrections = Corrections(config)
+        self._last_turn: dict | None = None  # what was said and done last, for "that was wrong"
+        self._pending_feedback: dict | None = None
         self._update_announced = ""
         self.media = MediaHub(self.winhelper, windows=self._safe_windows, media_key=lambda a: osctl.media_key(a), youtube_keys=self._youtube_keys,
                               state_dir=app_data_dir())
@@ -629,6 +637,84 @@ class Assistant:
             self.emit("mic_status", **{**self._mic, "engine": self.stt.engine_label()})
         finally:
             self._started.set()
+
+    # ================================================================== "that was wrong"
+    def _feedback(self, turn: Turn, text: str, source: str) -> bool:
+        """Handle "that was wrong" / "I meant X" about the last command. False: not feedback (or about a chat answer)."""
+        if self._recording is not None or self._pending_act is not None or self._awaiting is not None \
+                or self._proposal is not None or self._protocol_confirm is not None:
+            return False  # an answer to something else that's waiting
+        pending, self._pending_feedback = self._pending_feedback, None
+        if pending is not None and time.time() - pending["at"] < 90:
+            if is_never_mind(text):
+                self._deliver(turn, [f"No problem, {self.title}."])
+                return True
+            fb = parse_feedback(text)
+            meant = fb.meant if fb is not None and fb.kind == "meant" else (None if fb is not None else text)
+            if meant:
+                self._apply_correction(turn, pending["last"], meant)
+                return True
+        fb = parse_feedback(text)
+        if fb is None:
+            return False
+        last = self._last_turn
+        if last is None or time.time() - last["at"] > 300 or not self._was_action(last):
+            return False  # nothing to correct, or a chat answer: the model takes it from here
+        if fb.kind == "meant":
+            self._apply_correction(turn, last, fb.meant)
+            return True
+        self._pending_feedback = {"last": last, "at": time.time()}
+        did = self._what_i_did(last)
+        heard = f" I heard “{last['text']}”" if last.get("source") == "voice" else f" You asked for “{last['text']}”"
+        self._activity("feedback", f"You said this was wrong: {last['text']}", "failed", did)
+        self._deliver(turn, [f"Sorry, {self.title}.{heard} and {did}. What did you mean?"], listen_after=True)
+        return True
+
+    @staticmethod
+    def _was_action(last: dict) -> bool:
+        t = last.get("turn")
+        return not getattr(t, "chat", False) or bool(getattr(t, "tools", False))
+
+    def _what_i_did(self, last: dict) -> str:
+        done = [a for a in self._activities if a["id"] >= last["act_from"] and a["kind"] not in ("command", "feedback")
+                and a["at"] >= last["at"] - 1]
+        if done:
+            text = done[0]["text"]
+            return text[:1].lower() + text[1:]
+        reply = getattr(last.get("turn"), "reply", "") or ""
+        first = re.split(r"(?<=[.!?])\s+", reply.strip())[0] if reply else ""
+        return f"answered “{first[:120]}”" if first else "did that"
+
+    def _apply_correction(self, turn: Turn, last: dict, meant: str) -> None:
+        """Learn from what was meant, say what was learnt, and do the right thing."""
+        full = complete_command(last["text"], meant)
+        rule = learn_rule(last["text"], full)
+        learned = self.corrections.add(rule, voice=last.get("source") == "voice") if rule else None
+        did = self._what_i_did(last)
+        log_items = list(self.config.get("feedback_log") or [])[-49:]
+        log_items.append({"at": time.time(), "said": last["text"], "did": did, "meant": full, "rule": learned and learned["id"]})
+        self.config.update({"feedback_log": log_items})
+        self._activity("feedback", f"Corrected: “{last['text']}” → “{full}”", "ok",
+                       (f"learnt “{rule['heard']}” → “{rule['meant']}”" if rule else "noted"))
+        self.emit("corrections", items=self.corrections.all())
+        t = self.title
+        if learned and not learned["whole"]:
+            note = f"Sorry about that, {t}. I'll remember that “{learned['heard']}” means “{learned['meant']}”."
+        elif learned:
+            note = f"Sorry about that, {t}. Next time, “{learned['heard']}” will mean “{learned['meant']}”."
+        else:
+            note = f"Sorry about that, {t}. I've noted it."
+        self._deliver(turn, [note])
+        if _words_of(full) != _words_of(last["text"]):
+            self.submit_text(full, source="correction")
+
+    def corrections_list(self) -> dict:
+        return {"items": self.corrections.all(), "log": list(self.config.get("feedback_log") or [])[-20:]}
+
+    def corrections_delete(self, rid: str) -> dict:
+        ok = self.corrections.remove(str(rid))
+        self.emit("corrections", items=self.corrections.all())
+        return {"ok": ok}
 
     # ================================================================== updates
     def _update_loop(self) -> None:
@@ -2441,6 +2527,7 @@ class Assistant:
             self._spawn(self.tools.index.entries, name="file-index")
 
     def _tool_used(self, turn: Turn, name: str, args: dict) -> None:
+        turn.tools = True
         self._emit_turn(turn, "tool_activity", tool=name, label=describe_call(name, args))
 
     def _clock_answer(self, text: str) -> str | None:
@@ -3236,6 +3323,15 @@ class Assistant:
             return
         text = _strip_wake(text).strip(" ,") or text  # "Harper, close the tab" -> "close the tab"
         self.sfx.play("process")
+        heard = text
+        if source in ("voice", "text"):
+            fixed, used = self.corrections.apply(text, voice=source == "voice")
+            if used:
+                self.emit("system_message", level="info", text="Understood as “" + fixed + "” (from your corrections: "
+                          + ", ".join(f"“{r['heard']}” → “{r['meant']}”" for r in used) + ")")
+                text = fixed
+            if self._feedback(turn, text, source):
+                return
 
         pending, self._pending_act = self._pending_act, None
         if pending is not None and time.time() - pending["at"] < 120:
@@ -3275,6 +3371,10 @@ class Assistant:
             self._recording = None
         if source in ("voice", "text"):
             self._activity("command", text, "ok")
+        if source in ("voice", "text", "correction"):
+            last_id = self._activities[-1]["id"] if self._activities else 0
+            self._last_turn = {"text": text, "heard": heard, "source": source if source != "correction" else (self._last_turn or {}).get("source", "text"),
+                               "at": time.time(), "act_from": last_id + (0 if source in ("voice", "text") else 1), "turn": turn}
         confirm = self._protocol_confirm
         if confirm is not None and source != "protocol":
             bare = _bare(text)
@@ -3456,6 +3556,7 @@ class Assistant:
             if query:
                 self._tool_used(turn, "web_search", {"query": query})
                 prefetch.append(("web_search", {"query": query}, self.tools.run("web_search", {"query": query})))
+        turn.chat = True  # an answer from the model, not an action ("that was wrong" then goes to the model)
         self._deliver(turn, self.llm.stream_reply(
             text, turn.cancel, toolbox=toolbox, on_tool=lambda name, args: self._tool_used(turn, name, args),
             offer_tools=bool(_TOOL_CUES.search(text)) and not _CLOSING.match(text), prefetch=prefetch,

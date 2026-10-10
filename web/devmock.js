@@ -409,6 +409,9 @@ window.createJarvisMock = function createJarvisMock() {
       return { ok: true, verified: true };
     },
     media_volume: async (key, level) => { const s = sessions.find((x) => x.key === key); if (s) s.volume = level; return { ok: true, volume: level }; },
+    corrections_list: async () => ({ items: [{ id: 'c1', heard: 'this cord', meant: 'discord', whole: false, voice_only: true, uses: 3 },
+      { id: 'c2', heard: 'play lo fi', meant: 'play lo fi on youtube', whole: true, voice_only: false, uses: 0 }], log: [] }),
+    corrections_delete: async () => ({ ok: true }),
     update_status: async () => ({ ...updateState }),
     update_check: async () => ({ ok: true, available: true, ...updateState }),
     update_install: async () => { setTimeout(() => emit({ type: 'update', ...updateState, state: 'installing' }), 100); return { ok: true }; },

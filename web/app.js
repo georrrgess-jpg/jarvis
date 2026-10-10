@@ -2561,7 +2561,7 @@
       $('#btn-min').onclick = () => call('window_minimize');
       $('#btn-max').onclick = () => this.toggleMax();
       $('#btn-full').onclick = () => this.toggleFull();
-      $('#btn-close').onclick = () => call('window_close');
+      $('#btn-close').onclick = () => { if (window.__winDebug) window.__winDebug.close = (window.__winDebug.close || 0) + 1; call('window_close'); };
       // Dragging: once the mouse moves a few pixels with the button down on the title bar, Windows takes over the move.
       // A plain click still clicks (the J.A.R.V.I.S. badge opens the personalities) and a double-click maximises.
       const NOT_DRAG = 'button, input, select, textarea, a, label, .chip.clickable, [data-no-drag]';

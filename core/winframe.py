@@ -2,7 +2,7 @@
 
 The HUD draws its own title bar, so Windows doesn't know where to grab the window. Instead of moving it from
 JavaScript on every mouse move (which jumps and drifts on scaled screens), the page asks for a drag or a resize and
-Windows runs its own move/size loop (WM_SYSCOMMAND SC_MOVE / SC_SIZE): smooth, DPI-correct, with the minimum size.
+Windows runs its own move loop (WM_SYSCOMMAND SC_MOVE); resizing follows the cursor from here, keeping the minimum size.
 
 * maximise = the screen's work area (the taskbar stays visible), restore = the size and place it had before;
 * full screen = the whole monitor; leaving it returns to how the window was;
@@ -14,13 +14,15 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+import threading
+import time
 from ctypes import wintypes
 from typing import Callable
 
 log = logging.getLogger("jarvis.window")
 
 WM_SYSCOMMAND = 0x0112
-SC_SIZE, SC_MOVE_CAPTION = 0xF000, 0xF012
+SC_MOVE_CAPTION = 0xF012
 EDGES = {"left": 1, "right": 2, "top": 3, "topleft": 4, "topright": 5, "bottom": 6, "bottomleft": 7, "bottomright": 8}
 SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW = 0x4, 0x10, 0x20, 0x40
 SW_RESTORE = 9
@@ -43,6 +45,8 @@ class WinFrame:
         self.fullscreen = False
         self._normal: tuple[int, int, int, int] | None = None
         self._before_full: tuple[tuple[int, int, int, int], bool] | None = None
+        self._resizing = False
+        self.min_size = (640, 480)  # set by app.py to the window's real minimum
         self.user32 = ctypes.WinDLL("user32", use_last_error=True) if sys.platform == "win32" else None
         if self.user32:
             u = self.user32
@@ -55,6 +59,8 @@ class WinFrame:
             u.IsZoomed.argtypes = (wintypes.HWND,)
             u.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
             u.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
+            u.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+            u.GetAsyncKeyState.restype = ctypes.c_short
 
     # -- state
     def state(self) -> dict:
@@ -155,14 +161,47 @@ class WinFrame:
             self._changed()
 
     def start_resize(self, edge: str) -> None:
-        code = EDGES.get(str(edge))
-        if not self.user32 or code is None or self.maximized or self.fullscreen:
+        """Resize from an edge while the left button is held. Windows' own sizing loop ignores borderless windows,
+        so the cursor is followed here (about 60 times a second), keeping the window's minimum size."""
+        if not self.user32 or str(edge) not in EDGES or self.maximized or self.fullscreen:
             return
+        if self._resizing:
+            return
+        self._resizing = True
+        threading.Thread(target=self._resize_loop, args=(str(edge),), name="window-resize", daemon=True).start()
+
+    def _resize_loop(self, edge: str) -> None:
         u = self.user32
-        hwnd = self._hwnd()
-
-        def go() -> None:
-            u.ReleaseCapture()
-            u.PostMessageW(hwnd, WM_SYSCOMMAND, SC_SIZE + code, 0)
-
-        self._run_ui(go)
+        try:
+            start = wintypes.POINT()
+            u.GetCursorPos(ctypes.byref(start))
+            x0, y0, w0, h0 = self.rect()
+            min_w, min_h = self.min_size
+            work = self.monitor(work=False)
+            last = None
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline and (u.GetAsyncKeyState(0x01) & 0x8000):  # left button still down
+                pt = wintypes.POINT()
+                u.GetCursorPos(ctypes.byref(pt))
+                dx, dy = pt.x - start.x, pt.y - start.y
+                x, y, w, h = x0, y0, w0, h0
+                if "left" in edge:
+                    w = max(min_w, w0 - dx)
+                    x = x0 + w0 - w
+                if "right" in edge:
+                    w = max(min_w, w0 + dx)
+                if "top" in edge:
+                    h = max(min_h, h0 - dy)
+                    y = y0 + h0 - h
+                if "bottom" in edge:
+                    h = max(min_h, h0 + dy)
+                w, h = min(w, work[2] * 2), min(h, work[3] * 2)
+                box = (x, y, w, h)
+                if box != last:
+                    last = box
+                    self._run_ui(lambda b=box: self._place(b))
+                time.sleep(0.016)
+        except Exception:
+            log.debug("resize loop failed", exc_info=True)
+        finally:
+            self._resizing = False

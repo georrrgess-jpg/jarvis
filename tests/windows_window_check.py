@@ -236,12 +236,14 @@ def main() -> int:
         user32.ShowWindow(hwnd, 9)
         time.sleep(1.0)
         check("it comes back from the taskbar", not user32.IsIconic(hwnd) and rect(hwnd)[2] == normal[2], rect(hwnd))
-        p = probe()
-        click(*screen_point(p, "close"))
-        try:
-            proc.wait(30)
-        except subprocess.TimeoutExpired:
-            pass
+        for attempt in range(3):  # right after coming back from the taskbar a first click can be lost
+            p = probe()
+            click(*screen_point(p, "close"))
+            try:
+                proc.wait(15)
+                break
+            except subprocess.TimeoutExpired:
+                report["steps"].append({"close_attempt": attempt, "page_events": probe().get("debug")})
         check("the close button closes JARVIS", proc.poll() is not None, proc.poll())
     except Exception as exc:  # noqa: BLE001
         import traceback

@@ -665,6 +665,10 @@ class JarvisAPI:
 
                 self._frame = WinFrame(lambda: int(native.Handle.ToInt64()), run_ui,
                                        lambda st: self._bridge.emit("window_state", st))
+                try:
+                    self._frame.min_size = (int(native.MinimumSize.Width), int(native.MinimumSize.Height))
+                except Exception:
+                    pass
             except Exception:
                 log.warning("native window control unavailable; using pywebview's", exc_info=True)
                 self._frame = False

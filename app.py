@@ -716,6 +716,7 @@ class JarvisAPI:
         return frame.state() if frame else {"maximized": self._maximized, "fullscreen": False, "native": False}
 
     def window_close(self) -> None:
+        log.info("window_close")
         if self._window:
             self._window.destroy()
 
@@ -1304,7 +1305,17 @@ def main(argv: list[str] | None = None) -> int:
         icon=window_icon(),
     )
     log.info("GUI loop ended")
-    return (0 if smoke.passed else 1) if smoke else 0
+    code = (0 if smoke.passed else 1) if smoke else 0
+    # The window is gone: don't let a background thread (a download, a helper, a timer) keep JARVIS
+    # running invisibly. Give shutdown a moment to finish, then leave.
+    for assistant in assistants:
+        try:
+            assistant.shutdown()
+        except Exception:
+            log.debug("shutdown hiccup", exc_info=True)
+    logging.shutdown()
+    threading.Timer(3.0, lambda: os._exit(code)).start()
+    return code
 
 
 if __name__ == "__main__":

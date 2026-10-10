@@ -185,7 +185,10 @@ def main() -> int:
         check("dragging the title bar moves the window", abs(moved[0] + 60) <= 10 and abs(moved[1] - 40) <= 10 and after[2:] == before[2:],
               {"before": before, "after": after, "moved": moved})
 
-        # 2. resize from the bottom edge
+        # 2. resize from the bottom edge (first put the whole window on screen so its edge can be reached)
+        w0 = rect(hwnd)
+        user32.SetWindowPos(hwnd, None, workarea[0] + 10, workarea[1] + 10, w0[2], w0[3], 0x0004 | 0x0010)
+        time.sleep(1.0)
         p = probe()
         gx, gy = screen_point(p, "grip", 0.5, 0.5)
         before = rect(hwnd)
